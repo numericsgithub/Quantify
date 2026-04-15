@@ -26,10 +26,12 @@ class FixedPointCNN(nn.Module):
             # Layer 1: Conv -> ReLU -> MaxPool
             QuantConv2d(1, 16, kernel_size=3, stride=1, padding=1, weight_quant=weight_quant),
             QuantReLU(),
+            nn.MaxPool2d(kernel_size=2),
             
             # Layer 2: Conv -> ReLU -> MaxPool
             QuantConv2d(16, 32, kernel_size=3, stride=1, padding=1, weight_quant=weight_quant),
             QuantReLU(),
+            nn.MaxPool2d(kernel_size=2),
         )
         
         self.classifier = nn.Sequential(
