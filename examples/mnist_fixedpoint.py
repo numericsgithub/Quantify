@@ -3,7 +3,7 @@ import torch.nn as nn
 import torch.optim as optim
 from torch.utils.data import DataLoader
 from torchvision import datasets, transforms
-from brevitas.nn import QuantConv2d, QuantLinear, QuantReLU, QuantMaxPool2d
+from brevitas.nn import QuantConv2d, QuantLinear, QuantReLU
 
 from quantizers.fixedpoint_per_tensor_weights import FixedPointPerTensorWeightQuant
 
@@ -26,12 +26,10 @@ class FixedPointCNN(nn.Module):
             # Layer 1: Conv -> ReLU -> MaxPool
             QuantConv2d(1, 16, kernel_size=3, stride=1, padding=1, weight_quant=weight_quant),
             QuantReLU(),
-            QuantMaxPool2d(kernel_size=2),
             
             # Layer 2: Conv -> ReLU -> MaxPool
             QuantConv2d(16, 32, kernel_size=3, stride=1, padding=1, weight_quant=weight_quant),
             QuantReLU(),
-            QuantMaxPool2d(kernel_size=2),
         )
         
         self.classifier = nn.Sequential(
