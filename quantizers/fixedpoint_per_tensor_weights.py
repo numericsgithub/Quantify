@@ -38,3 +38,7 @@ class Quantizer1(ExtendedInjector):
     proxy_class = WeightQuantProxyFromInjector
     # Required tensor quantization implementation
     tensor_quant = IntQuant
+    # Required for proper initialization
+    input_view_impl = Identity
+    # Required for proper initialization
+    stats_reduce_dim = None
