@@ -39,3 +39,11 @@ class Quantizer1(ExtendedInjector):
     input_view_impl = Identity
     # Required for proper initialization
     stats_reduce_dim = None
+    
+    # This is the key - we need to provide a proper tensor_quant implementation
+    # Let's use a simple approach by inheriting from a working base
+    @value
+    def tensor_quant():
+        # Return the actual tensor quantization module that will be instantiated
+        from brevitas.core.quant import IntQuant
+        return IntQuant
