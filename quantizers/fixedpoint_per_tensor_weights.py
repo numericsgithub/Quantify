@@ -304,11 +304,7 @@ class FixedPointPerTensorWeightQuant(Injector):
     narrow_range = True
     tensor_quant = FixedPointPerTensorWeightQuantizer
     
-    # For Brevitas compatibility, we need to ensure signed is a proper boolean value
-    # The actual signedness is determined by the tensor_quant module at runtime
-    # This is a workaround to avoid the None/property issue
-    @property
-    def signed(self):
-        # Return a default boolean value to satisfy Brevitas requirements
-        # The actual signedness is handled by the tensor_quant module
-        return True
+    # For Brevitas compatibility, we need to ensure signed is a proper boolean value.
+    # The actual signedness is determined by the tensor_quant module at runtime,
+    # but the proxy requires a boolean attribute to initialize the IntQuantTensor.
+    signed = True
