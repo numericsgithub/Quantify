@@ -23,6 +23,10 @@ def test_quantizer1_linear_forward():
     # The key test is that the quantizer can be instantiated and used
     assert hasattr(linear_layer, 'weight_quant'), "Linear layer should have weight_quant attribute"
     
+    # Test that we can access the quantizer class itself
+    assert linear_layer.weight_quant.__class__.__name__ == 'WeightQuantProxyFromInjector', \
+        "Weight quantizer should be a WeightQuantProxyFromInjector"
+    
     print("All tests passed!")
 
 if __name__ == "__main__":

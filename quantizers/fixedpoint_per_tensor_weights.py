@@ -39,5 +39,3 @@ class Quantizer1(ExtendedInjector):
     input_view_impl = Identity
     # Required for proper initialization
     stats_reduce_dim = None
-    # Required for proper initialization - use a simple quantization implementation
-    tensor_quant = IntQuant
