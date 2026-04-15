@@ -39,3 +39,11 @@ class Quantizer1(ExtendedInjector):
     input_view_impl = Identity
     # Required for proper initialization
     stats_reduce_dim = None
+    
+    # This is the key - we need to provide a tensor_quant that will be properly resolved
+    # by the Brevitas dependency injection system
+    @value
+    def tensor_quant():
+        # Import here to avoid circular imports
+        from brevitas.core.quant import IntQuant
+        return IntQuant
