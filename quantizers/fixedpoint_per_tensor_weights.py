@@ -3,6 +3,9 @@ import torch.nn as nn
 from brevitas.quant.base import *
 from brevitas.inject import ExtendedInjector
 from brevitas.inject.enum import ScalingImplType, BitWidthImplType, FloatToIntImplType, QuantType, ScalingPerOutputType, RestrictValueType
+from brevitas.core.function_wrapper import TensorClamp
+from brevitas.core.scaling import ParameterScaling
+from brevitas.core.scaling import SCALAR_SHAPE
 
 # Quantizer 1: Fixed-point per-tensor weight quantizer
 # Using Brevitas ExtendedInjector pattern
