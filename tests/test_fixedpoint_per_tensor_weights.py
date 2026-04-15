@@ -12,7 +12,8 @@ def test_quantizer1_linear_forward():
     linear_layer = QuantLinear(64, 32, bias=False, weight_quant=Quantizer1)
     
     # Check that the quantizer has the correct bit width
-    assert linear_layer.weight_quant.bit_width == 8, f"Expected bit_width 8, got {linear_layer.weight_quant.bit_width}"
+    # Access the bit_width through the proxy's tensor_quant
+    assert linear_layer.weight_quant.tensor_quant.bit_width == 8, f"Expected bit_width 8, got {linear_layer.weight_quant.tensor_quant.bit_width}"
     
     # Check that the quantizer has the correct scaling type
     assert linear_layer.weight_quant.scaling_impl_type == 'PARAMETER', f"Expected scaling_impl_type PARAMETER, got {linear_layer.weight_quant.scaling_impl_type}"
