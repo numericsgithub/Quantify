@@ -1,49 +1,17 @@
 import torch
 import torch.nn as nn
 from brevitas.quant.base import *
-from brevitas.inject import ExtendedInjector
 from brevitas.inject.enum import ScalingImplType, BitWidthImplType, FloatToIntImplType, QuantType, ScalingPerOutputType, RestrictValueType
-from brevitas.core.function_wrapper import TensorClamp, Identity
-from brevitas.core.scaling import ParameterScaling
-from brevitas.core.scaling import SCALAR_SHAPE
-from brevitas.core.zero_point import ZeroZeroPoint
 from brevitas.proxy import WeightQuantProxyFromInjector
 
 # Quantizer 1: Fixed-point per-tensor weight quantizer
-# Using Brevitas ExtendedInjector pattern
-class Quantizer1(ExtendedInjector):
+# Following Brevitas pattern by composing from base classes
+class Quantizer1(
+    NarrowIntQuant,  # 8-bit narrow signed int
+    ParameterScaling,  # Parameter-based scaling
+    PerTensorFloatScaling8bit):  # 8-bit per-tensor float scaling
     """
     Quantizer 1 implementation as a Brevitas QuantType.
     This is a fixed-point per-tensor weight quantizer.
     """
-    
-    # Define the quantizer properties using Brevitas injector pattern
-    quant_type = QuantType.INT
-    bit_width = 8
-    bit_width_impl_type = BitWidthImplType.CONST
-    float_to_int_impl_type = FloatToIntImplType.ROUND
-    narrow_range = True
-    signed = True
-    scaling_impl_type = ScalingImplType.PARAMETER
-    scaling_per_output_type = ScalingPerOutputType.TENSOR
-    restrict_scaling_type = RestrictValueType.FP
-    tensor_clamp_impl = TensorClamp
-    zero_point_impl = ZeroZeroPoint
-    # Use a fixed-point scaling implementation
-    scaling_impl = ParameterScaling
-    scaling_shape = SCALAR_SHAPE
-    scaling_min_val = 1e-10
-    # Required for Brevitas injector pattern
-    proxy_class = WeightQuantProxyFromInjector
-    # Required for proper initialization
-    input_view_impl = Identity
-    # Required for proper initialization
-    stats_reduce_dim = None
-    
-    # Provide a proper tensor_quant implementation that will be resolved by the injector system
-    # This is a workaround to avoid the dependency resolution error
-    @value
-    def tensor_quant():
-        # Import here to avoid circular imports
-        from brevitas.core.quant import IntQuant
-        return IntQuant
+    pass
