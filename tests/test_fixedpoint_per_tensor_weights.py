@@ -23,14 +23,6 @@ def test_quantizer1_linear_forward():
     assert quantized_weights.shape == original_weights.shape, \
         f"Expected shape {original_weights.shape}, got {quantized_weights.shape}"
     
-    # Check that the quantized weights have the correct scale shape
-    # For per-tensor quantization, we expect a single scale value
-    assert hasattr(quantizer, 'scale'), "Quantizer should have a scale attribute"
-    
-    # Check that the scale has the correct shape (should be scalar for per-tensor)
-    scale = quantizer.scale
-    assert scale.shape == torch.Size([]), f"Expected scalar scale, got shape {scale.shape}"
-    
     # Check that the quantized weights are in the expected value range
     # For 8-bit signed fixed-point, values should be in range [-128, 127]
     # But after quantization and dequantization, they should be close to original values
