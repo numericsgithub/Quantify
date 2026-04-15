@@ -8,6 +8,7 @@ from brevitas.core.scaling import ParameterScaling
 from brevitas.core.scaling import SCALAR_SHAPE
 from brevitas.core.zero_point import ZeroZeroPoint
 from brevitas.proxy import WeightQuantProxyFromInjector
+from brevitas.core.quant import IntQuant
 
 # Quantizer 1: Fixed-point per-tensor weight quantizer
 # Using Brevitas ExtendedInjector pattern
@@ -35,3 +36,5 @@ class Quantizer1(ExtendedInjector):
     scaling_min_val = 1e-10
     # Required for Brevitas injector pattern
     proxy_class = WeightQuantProxyFromInjector
+    # Required tensor quantization implementation
+    tensor_quant = IntQuant
