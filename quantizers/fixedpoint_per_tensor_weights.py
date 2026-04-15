@@ -6,6 +6,7 @@ from brevitas.inject.enum import ScalingImplType, BitWidthImplType, FloatToIntIm
 from brevitas.core.function_wrapper import TensorClamp
 from brevitas.core.scaling import ParameterScaling
 from brevitas.core.scaling import SCALAR_SHAPE
+from brevitas.core.zero_point import ZeroZeroPoint
 
 # Quantizer 1: Fixed-point per-tensor weight quantizer
 # Using Brevitas ExtendedInjector pattern
