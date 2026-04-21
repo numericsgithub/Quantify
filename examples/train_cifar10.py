@@ -8,7 +8,7 @@ Run
 ---
     python examples/cifar10_vgg.py
     python examples/cifar10_vgg.py --weight-bits 4 --act-bits 4 \\
-                                   --workdir ./runs/cifar10_4bit
+                               --workdir ./runs/cifar10_4bit
 """
 
 import argparse
@@ -255,6 +255,8 @@ def parse_args():
     p.add_argument("--weight-bits",  type=int,   default=8)
     p.add_argument("--act-bits",     type=int,   default=8)
     p.add_argument("--num-workers",  type=int,   default=2)
+    p.add_argument("--pretrained",   type=str,   default=None,
+                   help="Path to pretrained floating-point model checkpoint")
     return p.parse_args()
 
 
@@ -299,6 +301,14 @@ def main(args):
     model = QuantMobileNetCIFAR(num_classes=10,
                      weight_bit_width=args.weight_bits,
                      act_bit_width=args.act_bits).to(device)
+
+    if args.pretrained:
+        print(f"Loading pretrained weights from: {args.pretrained}")
+        state_dict = torch.load(args.pretrained, map_location=device)
+        # strict=False is used because the float model lacks quantization parameters
+        # and has slightly different attribute names (e.g. self.inp vs self.quant_inp)
+        model.load_state_dict(state_dict, strict=False)
+
     n_params = sum(p.numel() for p in model.parameters())
     print(f"Model:     {n_params / 1e6:.2f}M params "
           f"(W{args.weight_bits}A{args.act_bits})")
