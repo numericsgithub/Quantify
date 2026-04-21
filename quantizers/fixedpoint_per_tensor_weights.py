@@ -223,9 +223,11 @@ class FixedPointPerTensorWeightQuantizer(nn.Module):
         self.bit_width = bit_width
         self.rounding_mode = rounding_mode
         self.narrow_range = narrow_range
-        self.search_done = False
-        self.search_result_is_signed = None
-        self.search_result_lsb = None
+        
+        # Register search results as buffers to ensure they are serialized in state_dict
+        self.register_buffer('search_done', torch.tensor(False, dtype=torch.bool))
+        self.register_buffer('search_result_is_signed', torch.tensor(True, dtype=torch.bool))
+        self.register_buffer('search_result_lsb', torch.tensor(0, dtype=torch.long))
 
     # ---- public helpers --------------------------------------------------
 
@@ -252,7 +254,7 @@ class FixedPointPerTensorWeightQuantizer(nn.Module):
         bit_width : torch.Tensor
             The bit-width as a float tensor.
         """
-        if not self.search_done:
+        if not self.search_done.item():
             signed = self.detect_signed(weights)
 
             lsb = find_optimal_lsb(
@@ -262,12 +264,12 @@ class FixedPointPerTensorWeightQuantizer(nn.Module):
                 self.rounding_mode,
                 self.narrow_range,
             )
-            self.search_result_is_signed = signed
-            self.search_result_lsb = lsb
-            self.search_done = True
+            self.search_result_is_signed.fill_(signed)
+            self.search_result_lsb.fill_(lsb)
+            self.search_done.fill_(True)
         else:
-            signed = self.search_result_is_signed
-            lsb = self.search_result_lsb
+            signed = self.search_result_is_signed.item()
+            lsb = self.search_result_lsb.item()
 
         quantized = quantize_fixed_point(
             weights, lsb, self.bit_width, signed, self.rounding_mode, self.narrow_range
