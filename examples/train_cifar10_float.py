@@ -195,8 +195,8 @@ def parse_args():
     p = argparse.ArgumentParser(description="Floating Point training on CIFAR-10")
     # Use a different name to avoid overwriting quantized results
     add_workspace_args(p, name="cifar10_vgg_float")
-    p.add_argument("--epochs",       type=int,   default=200)
-    p.add_argument("--batch-size",   type=int,   default=512)
+    p.add_argument("--epochs",       type=int,   default=50)
+    p.add_argument("--batch-size",   type=int,   default=2048)
     p.add_argument("--lr",           type=float, default=0.05)
     p.add_argument("--momentum",     type=float, default=0.9)
     p.add_argument("--weight-decay", type=float, default=5e-4)
