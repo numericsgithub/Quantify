@@ -2,23 +2,40 @@
 ImageNet Validation for pretrained MobileNetV2.
 
 This script loads a pretrained MobileNetV2 model and validates it on the 
-ImageNet validation dataset.
+ImageNet validation dataset loaded from Hugging Face.
 
 Run
 ---
-    python examples/validate_imagenet_mobilenetv2.py --data-dir /path/to/imagenet/val --workdir ./runs/imagenet_val
+    python examples/validate_imagenet_mobilenetv2.py --workdir ./runs/imagenet_val
 """
 
 import argparse
 import torch
 import torch.nn as nn
-from torch.utils.data import DataLoader
+from torch.utils.data import DataLoader, Dataset
 import torchvision
 import torchvision.transforms as transforms
 from torchvision.models import mobilenet_v2, MobileNet_V2_Weights
+from datasets import load_dataset
 
 from utils import add_workspace_args, workspace_from_args
 from utils.logging import CSVLogger
+
+
+class HFDatasetWrapper(Dataset):
+    """
+    Wrapper to make a Hugging Face dataset compatible with PyTorch DataLoader.
+    """
+    def __init__(self, hf_dataset):
+        self.hf_dataset = hf_dataset
+
+    def __len__(self):
+        return len(self.hf_dataset)
+
+    def __getitem__(self, idx):
+        item = self.hf_dataset[idx]
+        # The transform applied via set_transform adds 'pixel_values'
+        return item["pixel_values"], item["label"]
 
 
 @torch.no_grad()
@@ -39,8 +56,6 @@ def evaluate(model, loader, device):
 def parse_args():
     p = argparse.ArgumentParser(description="Validate pretrained MobileNetV2 on ImageNet")
     add_workspace_args(p, name="imagenet_mobilenetv2_val")
-    p.add_argument("--data-dir", type=str, required=True, 
-                   help="Path to the ImageNet validation directory (containing subfolders per class)")
     p.add_argument("--batch-size", type=int, default=128)
     p.add_argument("--num-workers", type=int, default=4)
     return p.parse_args()
@@ -52,19 +67,24 @@ def main(args):
     
     print(f"Workspace: {ws.root}")
     print(f"Device:    {device}")
-    print(f"Data Dir:  {args.data_dir}")
 
     # ---------------- data ----------------
     # MobileNetV2 pretrained weights expect specific normalization and resizing
     weights = MobileNet_V2_Weights.DEFAULT
     preprocess = weights.transforms()
 
-    # Using ImageFolder as it is the standard way to load ImageNet validation 
-    # when organized in class-named subdirectories.
-    val_set = torchvision.datasets.ImageFolder(
-        root=args.data_dir, 
-        transform=preprocess
-    )
+    print("Loading ImageNet-1k validation set from Hugging Face...")
+    # Note: This requires huggingface-cli login and access to the imagenet-1k dataset
+    hf_val_dataset = load_dataset("imagenet-1k", split="validation", trust_remote_code=True)
+
+    def transform_fn(batch):
+        # Apply the torchvision preprocess to each image in the batch
+        batch["pixel_values"] = [preprocess(img) for img in batch["image"]]
+        return batch
+
+    hf_val_dataset.set_transform(transform_fn)
+    
+    val_set = HFDatasetWrapper(hf_val_dataset)
     
     val_loader = DataLoader(
         val_set, 
