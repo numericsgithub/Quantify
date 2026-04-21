@@ -170,22 +170,22 @@ def find_optimal_lsb(
         n_positive_codes = 2 ** bit_width - 1
 
     ideal_lsb = math.log2(abs_max / n_positive_codes) if n_positive_codes > 0 else 0
-    search_lo = math.floor(ideal_lsb) - 4
-    search_hi = math.ceil(ideal_lsb) + 4
+    search_lo = math.floor(ideal_lsb) - 12
+    search_hi = math.ceil(ideal_lsb) + 12
 
     best_lsb = search_lo
     best_unique = -1
-    best_mse = float("inf")
+    best_sad = float("inf")
 
-    for lsb in range(search_lo, search_hi + 1):
+    for lsb in reversed(range(search_lo, search_hi + 1)):
         q = quantize_fixed_point(weights, lsb, bit_width, signed, rounding_mode, narrow_range)
         n_unique = int(torch.unique(q).numel())
-        mse = float(torch.mean((weights - q) ** 2).item())
+        sad = float(torch.sum(torch.abs(weights - q)).item())
 
-        if n_unique > best_unique or (n_unique == best_unique and mse < best_mse):
+        if sad < best_sad: # n_unique > best_unique : # n_unique > best_unique: #or (n_unique == best_unique and sad < best_sad)
             best_lsb = lsb
             best_unique = n_unique
-            best_mse = mse
+            best_sad = sad
 
     return best_lsb
 
@@ -223,6 +223,9 @@ class FixedPointPerTensorWeightQuantizer(nn.Module):
         self.bit_width = bit_width
         self.rounding_mode = rounding_mode
         self.narrow_range = narrow_range
+        self.search_done = False
+        self.search_result_is_signed = None
+        self.search_result_lsb = None
 
     # ---- public helpers --------------------------------------------------
 
@@ -249,15 +252,22 @@ class FixedPointPerTensorWeightQuantizer(nn.Module):
         bit_width : torch.Tensor
             The bit-width as a float tensor.
         """
-        signed = self.detect_signed(weights)
+        if not self.search_done:
+            signed = self.detect_signed(weights)
 
-        lsb = find_optimal_lsb(
-            weights,
-            self.bit_width,
-            signed,
-            self.rounding_mode,
-            self.narrow_range,
-        )
+            lsb = find_optimal_lsb(
+                weights,
+                self.bit_width,
+                signed,
+                self.rounding_mode,
+                self.narrow_range,
+            )
+            self.search_result_is_signed = signed
+            self.search_result_lsb = lsb
+            self.search_done = True
+        else:
+            signed = self.search_result_is_signed
+            lsb = self.search_result_lsb
 
         quantized = quantize_fixed_point(
             weights, lsb, self.bit_width, signed, self.rounding_mode, self.narrow_range
@@ -299,7 +309,7 @@ class FixedPointPerTensorWeightQuant(Injector):
 
     quant_type = QuantType.INT
     proxy_class = WeightQuantProxyFromInjector
-    bit_width = 8
+    bit_width = 4
     rounding_mode = RoundingMode.ROUND_TO_NEAREST_EVEN
     narrow_range = True
     tensor_quant = FixedPointPerTensorWeightQuantizer
