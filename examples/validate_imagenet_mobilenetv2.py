@@ -75,7 +75,7 @@ def main(args):
 
     print("Loading ImageNet-1k validation set from Hugging Face...")
     # Note: This requires huggingface-cli login and access to the imagenet-1k dataset
-    hf_val_dataset = load_dataset("imagenet-1k", split="validation", trust_remote_code=True)
+    hf_val_dataset = load_dataset("ILSVRC/imagenet-1k", split="validation", trust_remote_code=True)
 
     def transform_fn(batch):
         # Apply the torchvision preprocess to each image in the batch
