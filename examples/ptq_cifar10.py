@@ -107,6 +107,7 @@ def main(args):
         pretrained_path = args.pretrained
     else:
         pretrained_path = ws.checkpoints / "best_float.pt"
+        pretrained_path = "/home/th/tmp/quanttests/cifar10_vgg_float/checkpoints/best_float.pt"  # ws.checkpoints / "best_float.pt"
 
     print(f"Loading pretrained weights from: {pretrained_path}")
     state_dict = torch.load(pretrained_path, map_location=device)
