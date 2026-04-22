@@ -69,7 +69,7 @@ def parse_args():
     p = argparse.ArgumentParser(description="Brevitas QAT on CIFAR-10 (Fixed-Point Weights)")
     # --workdir (+ QATLAB_WORKDIR env-var fallback) handled here:
     add_workspace_args(p, name="cifar10_fixedpoint")
-    p.add_argument("--epochs",       type=int,   default=200)
+    p.add_argument("--epochs",       type=int,   default=50)
     p.add_argument("--batch-size",   type=int,   default=512)
     p.add_argument("--lr",           type=float, default=0.05)
     p.add_argument("--momentum",     type=float, default=0.9)
@@ -146,6 +146,13 @@ def main(args):
     criterion = nn.CrossEntropyLoss()
     optimizer = optim.SGD(model.parameters(), lr=args.lr, momentum=args.momentum, weight_decay=args.weight_decay, nesterov=True)
     scheduler = optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=args.epochs)
+
+    # ---------------- evaluation ----------------
+    test_loss, test_acc = evaluate(model, test_loader, criterion, device)
+
+    print(f"\nPTQ Results:")
+    print(f"Test Loss: {test_loss:.4f}")
+    print(f"Test Acc:  {test_acc:.2f}%")
 
     # ---------------- training loop ----------------
     best_acc = 0.0
