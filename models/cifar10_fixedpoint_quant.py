@@ -28,7 +28,7 @@ class DepthwiseSeparableBlock(nn.Module):
             weight_bit_width=weight_bit_width,
             weight_quant=weight_quant)
         self.bn_dw = nn.BatchNorm2d(in_ch)
-        self.relu_dw = qnn.QuantReLU(bit_width=act_bit_width)
+        self.relu_dw = qnn.QuantReLU(bit_width=act_bit_width) if act_bit_width is not None else nn.ReLU()
 
         # Pointwise: 1x1 conv mixing the channels.
         self.pw = qnn.QuantConv2d(
@@ -36,7 +36,7 @@ class DepthwiseSeparableBlock(nn.Module):
             weight_bit_width=weight_bit_width,
             weight_quant=weight_quant)
         self.bn_pw = nn.BatchNorm2d(out_ch)
-        self.relu_pw = qnn.QuantReLU(bit_width=act_bit_width)
+        self.relu_pw = qnn.QuantReLU(bit_width=act_bit_width) if act_bit_width is not None else nn.ReLU()
 
     def forward(self, x):
         x = self.relu_dw(self.bn_dw(self.dw(x)))
@@ -75,12 +75,13 @@ class QuantMobileNetCIFAR(nn.Module):
         self.quant_inp = nn.Identity()
 
         # Standard 3x3 stem conv
+        relu_stem = qnn.QuantReLU(bit_width=act_bit_width) if act_bit_width is not None else nn.ReLU()
         self.stem = nn.Sequential(
             qnn.QuantConv2d(3, 32, kernel_size=3, padding=1, bias=True,
                             weight_bit_width=weight_bit_width,
                             weight_quant=FixedPointWeightQuant),
             nn.BatchNorm2d(32),
-            qnn.QuantReLU(bit_width=act_bit_width),
+            relu_stem,
         )
 
         blocks = []
@@ -141,7 +142,7 @@ class QuantVGG(nn.Module):
                             weight_bit_width=weight_bit_width,
                             weight_quant=FixedPointWeightQuant),
             nn.BatchNorm1d(256),
-            qnn.QuantReLU(bit_width=act_bit_width),
+            qnn.QuantReLU(bit_width=act_bit_width) if act_bit_width is not None else nn.ReLU(),
             qnn.QuantLinear(256, num_classes, bias=True,
                             weight_bit_width=weight_bit_width,
                             weight_quant=FixedPointWeightQuant),
@@ -154,7 +155,7 @@ class QuantVGG(nn.Module):
                             bias=False, weight_bit_width=w_bits,
                             weight_quant=weight_quant),
             nn.BatchNorm2d(out_ch),
-            qnn.QuantReLU(bit_width=a_bits),
+            qnn.QuantReLU(bit_width=a_bits) if a_bits is not None else nn.ReLU(),
         ]
 
     def forward(self, x):
