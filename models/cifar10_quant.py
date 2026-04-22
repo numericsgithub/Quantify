@@ -103,9 +103,7 @@ class QuantMobileNetCIFAR(nn.Module):
                  act_bit_width: int = 8):
         super().__init__()
 
-        self.quant_inp = qnn.QuantIdentity(bit_width=act_bit_width,
-                                            return_quant_tensor=False)
-        #self.quant_inp = nn.Identity()
+        self.quant_inp = nn.Identity()
 
         # Standard 3x3 stem conv — first layer is usually kept dense
         # (no depthwise) because it has only 3 input channels.
@@ -166,8 +164,7 @@ class QuantVGG(nn.Module):
                  act_bit_width: int = 8):
         super().__init__()
 
-        self.quant_inp = qnn.QuantIdentity(bit_width=act_bit_width,
-                                           return_quant_tensor=False)
+        self.quant_inp = nn.Identity()
 
         self.features = nn.Sequential(
             *self._conv_block(3,   64,  weight_bit_width, act_bit_width),
