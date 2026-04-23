@@ -69,7 +69,7 @@ def main(args):
     ])
 
     test_set = torchvision.datasets.CIFAR10(
-        root=str(ws.data), train=False, download=True,
+        root=str(ws.datasets), train=False, download=True,
         transform=transform_test)
 
     test_loader = DataLoader(test_set,  batch_size=512,

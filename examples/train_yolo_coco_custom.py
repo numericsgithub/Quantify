@@ -96,13 +96,13 @@ def main(args):
     train_dataset = dataset_dict["train"]
     val_dataset   = dataset_dict["val"]
 
-    output_dir = Path(ws.data / "coco_yolo_fmt")
+    output_dir = Path(ws.datasets / "coco_yolo_fmt")
 
     # Uncomment to reconvert:
-    # save_hf_dataset_for_yolo(train_dataset, output_dir, "train")
-    # save_hf_dataset_for_yolo(val_dataset,   output_dir, "val")
+    save_hf_dataset_for_yolo(train_dataset, output_dir, "train")
+    save_hf_dataset_for_yolo(val_dataset,   output_dir, "val")
 
-    yaml_path = output_dir / "coco_train.yaml"
+    yaml_path = output_dir / "coco.yaml"
     create_yolo_yaml(output_dir, yaml_path)
     print(f"Dataset YAML created at: {yaml_path}")
 

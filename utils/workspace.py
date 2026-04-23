@@ -37,31 +37,40 @@ class Workspace:
     derived from it so there is a single source of truth.
     """
 
-    root: Path
+    root_folder_path: Path
+    root_sub_folder_path: Path
+
+    @property
+    def root(self) -> Path:
+        return self.root_sub_folder_path
 
     @property
     def data(self) -> Path:
-        return self.root / "data"
+        return self.root_sub_folder_path / "data"
+
+    @property
+    def datasets(self) -> Path:
+        return self.root_folder_path / "cached_datasets"
 
     @property
     def checkpoints(self) -> Path:
-        return self.root / "checkpoints"
+        return self.root_sub_folder_path / "checkpoints"
 
     @property
     def logs(self) -> Path:
-        return self.root / "logs"
+        return self.root_sub_folder_path / "logs"
 
     def ensure(self) -> "Workspace":
         """Create every subdirectory if it doesn't already exist."""
-        for d in (self.data, self.checkpoints, self.logs):
+        for d in (self.root_folder_path, self.root, self.data, self.checkpoints, self.logs, self.datasets):
             d.mkdir(parents=True, exist_ok=True)
         return self
 
     @classmethod
-    def at(cls, root: os.PathLike | str) -> "Workspace":
+    def at(cls, root: os.PathLike | str, sub_folder_name: os.PathLike | str) -> "Workspace":
         """Build a Workspace rooted at ``root`` (expanded & resolved),
         and create its subdirectories."""
-        return cls(root=Path(root).expanduser().resolve()).ensure()
+        return cls(root_folder_path=Path(root / sub_folder_name).expanduser().resolve(), root_sub_folder_path=Path(root / sub_folder_name).expanduser().resolve()).ensure()
 
 
 def add_workspace_args(
@@ -84,27 +93,28 @@ def add_workspace_args(
         Environment variable consulted for the base directory when
         ``--workdir`` is not given on the command line.
     """
-    env_root = os.environ.get(env_var)
-    if env_root:
-        default = Path(env_root) / name
-    else:
-        if DEFAULT_ROOT is None:
-            raise Exception("Set enviroment variable " + env_root)
-        default = DEFAULT_ROOT / name
 
     parser.add_argument(
         "--workdir",
         type=Path,
-        default=default,
+        default=name,
         help=(
             f"Base directory for data, checkpoints and logs. "
-            f"Can also be controlled via the ${env_var} environment "
-            f"variable (in which case the example's name '{name}' "
-            f"is appended). Default: %(default)s"
         ),
     )
 
 
 def workspace_from_args(args: argparse.Namespace) -> Workspace:
     """Create and prepare a :class:`Workspace` from parsed CLI args."""
-    return Workspace.at(args.workdir)
+    env_root = os.environ.get(DEFAULT_WORKDIR_ENV)
+    if env_root:
+        main_root = Path(env_root)
+    else:
+        if DEFAULT_ROOT is None:
+            raise Exception("Set enviroment variable " + env_root)
+        main_root = DEFAULT_ROOT
+
+    if "/" in str(args.workdir).strip() or "\\" in str(args.workdir).strip():
+        raise Exception("The workdir is not a simple folder name")
+
+    return Workspace.at(main_root, args.workdir)
