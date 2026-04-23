@@ -28,6 +28,34 @@ from tqdm import tqdm
 # Setup logging
 logging.basicConfig(level=logging.INFO)
 
+def print_device_locations(model, device_name="cuda"):
+    """Print device locations for all model components, mimicking the debug script."""
+    print(f"\n=== Device Locations for model on {device_name} ===")
+    
+    print("\n[Parameters]")
+    for name, param in model.named_parameters():
+        print(f"  {name}: {param.device}")
+        
+    print("\n[Buffers]")
+    for name, buf in model.named_buffers():
+        print(f"  {name}: {buf.device}")
+        
+    print("\n[Custom Quantizer Internal Buffers]")
+    for name, module in model.named_modules():
+        if hasattr(module, 'search_done'):
+            print(f"  Module: {name}")
+            print(f"    search_done: {module.search_done.device}")
+            print(f"    search_result_is_signed: {module.search_result_is_signed.device}")
+            print(f"    search_result_lsb: {module.search_result_lsb.device}")
+            
+    print("\n[All Modules with 'quant' in name]")
+    for name, module in model.named_modules():
+        if 'quant' in name.lower() or 'Quant' in name:
+            print(f"  {name}: {type(module).__name__}")
+            for sub_name, sub_mod in module.named_modules():
+                if hasattr(sub_mod, 'search_done'):
+                    print(f"    -> {sub_name}: search_done on {sub_mod.search_done.device}")
+
 class HFDatasetWrapper(Dataset):
     """
     Wrapper to make a Hugging Face dataset compatible with PyTorch DataLoader.
@@ -149,6 +177,9 @@ def main(args):
     print("Loading pretrained floating-point weights...")
     float_model = mobilenet_v2(weights=weights).to(device)
     model = load_pretrained_weights(model, float_model)
+    
+    # Debug device locations for all modules, buffers, and custom quantizer internals
+    print_device_locations(model, device)
     
     # Clean up float model to save memory
     del float_model
