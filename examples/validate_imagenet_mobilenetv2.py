@@ -78,8 +78,10 @@ def main(args):
     hf_val_dataset = load_dataset("ILSVRC/imagenet-1k", split="validation", trust_remote_code=True)
 
     def transform_fn(batch):
-        # Apply the torchvision preprocess to each image in the batch
-        batch["pixel_values"] = [preprocess(img) for img in batch["image"]]
+        # Apply the torchvision preprocess to each image in the batch.
+        # We call .convert("RGB") to ensure grayscale images are converted to 3 channels,
+        # preventing shape mismatch errors during normalization.
+        batch["pixel_values"] = [preprocess(img.convert("RGB")) for img in batch["image"]]
         return batch
 
     hf_val_dataset.set_transform(transform_fn)
