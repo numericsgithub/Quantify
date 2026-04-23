@@ -99,8 +99,9 @@ def parse_args():
 
 def main(args):
     ws = workspace_from_args(args)
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu") # This does not! (I have a gpu, so it will choose "cuda")
+    # device = torch.device("cpu") # This works! No problems!
+
     print(f"Workspace: {ws.root}")
     print(f"Device:    {device}")
 
