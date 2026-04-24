@@ -28,11 +28,13 @@ from brevitas.inject.enum import QuantType
 try:
     from brevitas.proxy.activation_quant import ActivationQuantProxyFromInjector
 except ImportError:
-    # Fallback for older Brevitas versions where the module might be located elsewhere
     try:
-        from brevitas.proxy.parameter_quant import ActivationQuantProxyFromInjector
+        from brevitas.proxy.activation import ActivationQuantProxyFromInjector
     except ImportError:
-        from brevitas.proxy.quant_proxy import QuantProxyFromInjector as ActivationQuantProxyFromInjector
+        raise ImportError(
+            "Could not find ActivationQuantProxyFromInjector. "
+            "Please ensure you have a compatible version of Brevitas installed."
+        )
 
 
 # ------ Rounding helpers ------
