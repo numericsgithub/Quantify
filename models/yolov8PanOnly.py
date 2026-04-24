@@ -50,34 +50,34 @@ class YOLOv8nPANOnly(nn.Module):
     Head detects from [P3, P4_out, P5_out] at strides [8, 16, 32].
     """
 
-    def __init__(self, nc: int = 80):
+    def __init__(self, nc: int = 80, weight_quant=None, act_quant=None, weight_bit_width: int = 8, act_bit_width: int = 8):
         super().__init__()
         C1, C2, C3, C4, C5 = 16, 32, 64, 128, 256
 
         # ---- Backbone (identical to YOLOv8n) ----
-        self.b0  = Conv(3,  C1, k=3, s=2)
-        self.b1  = Conv(C1, C2, k=3, s=2)
-        self.b2  = C2f(C2, C2, n=scale_depth(3), shortcut=True)
-        self.b3  = Conv(C2, C3, k=3, s=2)
-        self.b4  = C2f(C3, C3, n=scale_depth(6), shortcut=True)   # → P3
-        self.b5  = Conv(C3, C4, k=3, s=2)
-        self.b6  = C2f(C4, C4, n=scale_depth(6), shortcut=True)   # → P4
-        self.b7  = Conv(C4, C5, k=3, s=2)
-        self.b8  = C2f(C5, C5, n=scale_depth(3), shortcut=True)
-        self.b9  = SPPF(C5, C5, k=5)                              # → P5
+        self.b0  = Conv(3,  C1, k=3, s=2, weight_quant=weight_quant, act_quant=act_quant, weight_bit_width=weight_bit_width, act_bit_width=act_bit_width)
+        self.b1  = Conv(C1, C2, k=3, s=2, weight_quant=weight_quant, act_quant=act_quant, weight_bit_width=weight_bit_width, act_bit_width=act_bit_width)
+        self.b2  = C2f(C2, C2, n=scale_depth(3), shortcut=True, weight_quant=weight_quant, act_quant=act_quant, weight_bit_width=weight_bit_width, act_bit_width=act_bit_width)
+        self.b3  = Conv(C2, C3, k=3, s=2, weight_quant=weight_quant, act_quant=act_quant, weight_bit_width=weight_bit_width, act_bit_width=act_bit_width)
+        self.b4  = C2f(C3, C3, n=scale_depth(6), shortcut=True, weight_quant=weight_quant, act_quant=act_quant, weight_bit_width=weight_bit_width, act_bit_width=act_bit_width)   # → P3
+        self.b5  = Conv(C3, C4, k=3, s=2, weight_quant=weight_quant, act_quant=act_quant, weight_bit_width=weight_bit_width, act_bit_width=act_bit_width)
+        self.b6  = C2f(C4, C4, n=scale_depth(6), shortcut=True, weight_quant=weight_quant, act_quant=act_quant, weight_bit_width=weight_bit_width, act_bit_width=act_bit_width)   # → P4
+        self.b7  = Conv(C4, C5, k=3, s=2, weight_quant=weight_quant, act_quant=act_quant, weight_bit_width=weight_bit_width, act_bit_width=act_bit_width)
+        self.b8  = C2f(C5, C5, n=scale_depth(3), shortcut=True, weight_quant=weight_quant, act_quant=act_quant, weight_bit_width=weight_bit_width, act_bit_width=act_bit_width)
+        self.b9  = SPPF(C5, C5, k=5, weight_quant=weight_quant, act_quant=act_quant, weight_bit_width=weight_bit_width, act_bit_width=act_bit_width)                              # → P5
 
         # ---- Neck: bottom-up only ----
         # P3 → downsample → concat P4 → C2f
-        self.n16 = Conv(C3, C3, k=3, s=2)           # C3 → C3
-        self.n18 = C2f(C3 + C4, C4, n=scale_depth(3), shortcut=False)  # P4_out
+        self.n16 = Conv(C3, C3, k=3, s=2, weight_quant=weight_quant, act_quant=act_quant, weight_bit_width=weight_bit_width, act_bit_width=act_bit_width)           # C3 → C3
+        self.n18 = C2f(C3 + C4, C4, n=scale_depth(3), shortcut=False, weight_quant=weight_quant, act_quant=act_quant, weight_bit_width=weight_bit_width, act_bit_width=act_bit_width)  # P4_out
 
         # P4_out → downsample → concat P5 → C2f
-        self.n19 = Conv(C4, C4, k=3, s=2)           # C4 → C4
-        self.n21 = C2f(C4 + C5, C5, n=scale_depth(3), shortcut=False)  # P5_out
+        self.n19 = Conv(C4, C4, k=3, s=2, weight_quant=weight_quant, act_quant=act_quant, weight_bit_width=weight_bit_width, act_bit_width=act_bit_width)           # C4 → C4
+        self.n21 = C2f(C4 + C5, C5, n=scale_depth(3), shortcut=False, weight_quant=weight_quant, act_quant=act_quant, weight_bit_width=weight_bit_width, act_bit_width=act_bit_width)  # P5_out
 
         # ---- Detection head ----
         # Detects from [P3 (raw), P4_out, P5_out]
-        self.detect = DetectHead(nc=nc, ch=(C3, C4, C5))
+        self.detect = DetectHead(nc=nc, ch=(C3, C4, C5), stride=self.stride, weight_quant=weight_quant, act_quant=act_quant, weight_bit_width=weight_bit_width, act_bit_width=act_bit_width)
 
         self.register_buffer('stride', torch.tensor([8., 16., 32.]))
 
@@ -156,9 +156,9 @@ if __name__ == "__main__":
     model.eval()
     with torch.no_grad():
         out_eval = model._forward_features(dummy)
-    print(f"\nInference output: {tuple(out_eval.shape)}  (expected (1, 84, 8400))")
+    print(f"\nInference output (decoded tensor): {tuple(out_eval.shape)}")
+    print(f"  Expected: (1, 84, 8400)")
 
-    n_orig  = sum(p.numel() for p in orig.parameters())
-    n_model = sum(p.numel() for p in model.parameters())
-    removed = n_orig - n_model
-    print(f"\nParameters:  original={n_orig:,}  pan_only={n_model:,}  removed={removed:,} ({removed/n_orig*100:.1f}%)")
+    total = sum(p.numel() for p in model.parameters())
+    print(f"\nTotal parameters: {total:,}")
+    print("Expected: ~1,600,000 (roughly half of yolov8n)")
