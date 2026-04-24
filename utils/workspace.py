@@ -70,7 +70,7 @@ class Workspace:
     def at(cls, root: os.PathLike | str, sub_folder_name: os.PathLike | str) -> "Workspace":
         """Build a Workspace rooted at ``root`` (expanded & resolved),
         and create its subdirectories."""
-        return cls(root_folder_path=Path(root / sub_folder_name).expanduser().resolve(), root_sub_folder_path=Path(root / sub_folder_name).expanduser().resolve()).ensure()
+        return cls(root_folder_path=Path(root).expanduser().resolve(), root_sub_folder_path=Path(root / sub_folder_name).expanduser().resolve()).ensure()
 
 
 def add_workspace_args(

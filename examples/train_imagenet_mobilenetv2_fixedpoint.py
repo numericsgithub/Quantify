@@ -28,33 +28,70 @@ from tqdm import tqdm
 # Setup logging
 logging.basicConfig(level=logging.INFO)
 
-def print_device_locations(model, device_name="cuda"):
-    """Print device locations for all model components, mimicking the debug script."""
-    print(f"\n=== Device Locations for model on {device_name} ===")
-    
-    print("\n[Parameters]")
+import torch
+import torch.nn as nn
+
+
+def check_all_devices(model, inputs=None):
+    print("=" * 60)
+    print("MODEL PARAMETERS & BUFFERS")
+    print("=" * 60)
+
+    devices_found = set()
+    issues = []
+
+    # 1. Parameters
     for name, param in model.named_parameters():
-        print(f"  {name}: {param.device}")
-        
-    print("\n[Buffers]")
+        dev = str(param.device)
+        devices_found.add(dev)
+        print(f"{dev}  [PARAM]  {name}: shape={tuple(param.shape)}")
+
+    # 2. Buffers (BatchNorm stats, positional encodings, etc.)
     for name, buf in model.named_buffers():
-        print(f"  {name}: {buf.device}")
-        
-    print("\n[Custom Quantizer Internal Buffers]")
-    for name, module in model.named_modules():
-        if hasattr(module, 'search_done'):
-            print(f"  Module: {name}")
-            print(f"    search_done: {module.search_done.device}")
-            print(f"    search_result_is_signed: {module.search_result_is_signed.device}")
-            print(f"    search_result_lsb: {module.search_result_lsb.device}")
-            
-    print("\n[All Modules with 'quant' in name]")
-    for name, module in model.named_modules():
-        if 'quant' in name.lower() or 'Quant' in name:
-            print(f"  {name}: {type(module).__name__}")
-            for sub_name, sub_mod in module.named_modules():
-                if hasattr(sub_mod, 'search_done'):
-                    print(f"    -> {sub_name}: search_done on {sub_mod.search_done.device}")
+        dev = str(buf.device)
+        devices_found.add(dev)
+        print(f"{dev}:  [BUFFER] {name}: shape={tuple(buf.shape)}")
+
+    # 3. Check every module's __dict__ for any tensor attribute
+    print("\n" + "=" * 60)
+    print("TENSOR ATTRIBUTES IN MODULE __dict__")
+    print("=" * 60)
+    for mod_name, module in model.named_modules():
+        for attr_name, attr_val in module.__dict__.items():
+            if isinstance(attr_val, torch.Tensor):
+                dev = str(attr_val.device)
+                devices_found.add(dev)
+                label = f"{mod_name}.{attr_name}" if mod_name else attr_name
+                print(f"{dev}:  [ATTR]   {label}: shape={tuple(attr_val.shape)}")
+                if dev not in ("cuda:0",):  # adjust expected device
+                    issues.append(label)
+
+    # 4. Check inputs if provided
+    if inputs is not None:
+        print("\n" + "=" * 60)
+        print("INPUTS")
+        print("=" * 60)
+        if isinstance(inputs, torch.Tensor):
+            inputs = {"input": inputs}
+        if isinstance(inputs, (list, tuple)):
+            inputs = {f"input[{i}]": v for i, v in enumerate(inputs)}
+        for name, val in inputs.items():
+            if isinstance(val, torch.Tensor):
+                dev = str(val.device)
+                devices_found.add(dev)
+                print(f"{dev}  [INPUT]  {name}: shape={tuple(val.shape)}")
+
+    # 5. Summary
+    print("\n" + "=" * 60)
+    print("SUMMARY")
+    print("=" * 60)
+    print(f"  Devices found: {devices_found}")
+    if len(devices_found) > 1:
+        print(f"  ⚠️  MULTIPLE DEVICES DETECTED — likely cause of your error!")
+    else:
+        print(f"  ✅ All tensors on same device.")
+
+    return devices_found
 
 class HFDatasetWrapper(Dataset):
     """
@@ -102,7 +139,9 @@ def train_one_epoch(model, loader, optimizer, criterion, device):
 def evaluate(model, loader, criterion, device):
     model.eval()
     loss_sum, correct, total = 0.0, 0, 0
-    
+    model = model.to("cpu")
+    model = model.to("cuda")
+
     for inputs, targets in loader:
         inputs, targets = inputs.to(device), targets.to(device)
         outputs = model(inputs)
@@ -172,14 +211,16 @@ def main(args):
         num_classes=1000, 
         weight_bit_width=args.weight_bits, 
         act_bit_width=args.act_bits
-    ).to(device)
+    ).to("cpu")#.to(device)
 
     print("Loading pretrained floating-point weights...")
-    float_model = mobilenet_v2(weights=weights).to(device)
+    float_model = mobilenet_v2(weights=weights).to("cpu")#.to(device)
     model = load_pretrained_weights(model, float_model)
-    
+    model = model.to(device)
+
+
     # Debug device locations for all modules, buffers, and custom quantizer internals
-    print_device_locations(model, device)
+    check_all_devices(model)
     
     # Clean up float model to save memory
     del float_model

@@ -228,26 +228,6 @@ class FixedPointPerTensorWeightQuantizer(nn.Module):
         self.register_buffer('search_done', torch.tensor(False, dtype=torch.bool))
         self.register_buffer('search_result_is_signed', torch.tensor(True, dtype=torch.bool))
         self.register_buffer('search_result_lsb', torch.tensor(0, dtype=torch.long))
-        
-        # Register a forward pre-hook to ensure buffers are on the correct device
-        # before any computation happens. This handles cases where the quantizer
-        # is instantiated after model.to(device) or attached as an attribute,
-        # which commonly occurs with Brevitas's injector system.
-        self.register_forward_pre_hook(self._sync_buffers_to_device)
-
-    def _sync_buffers_to_device(self, module, input):
-        device = input[0].device
-        if self.search_done.device != device:
-            self.search_done = self.search_done.to(device)
-            self.search_result_is_signed = self.search_result_is_signed.to(device)
-            self.search_result_lsb = self.search_result_lsb.to(device)
-
-    def to(self, device):
-        # Explicitly move buffers before calling super().to()
-        self.search_done = self.search_done.to(device)
-        self.search_result_is_signed = self.search_result_is_signed.to(device)
-        self.search_result_lsb = self.search_result_lsb.to(device)
-        return super().to(device)
 
     # ---- public helpers --------------------------------------------------
 
