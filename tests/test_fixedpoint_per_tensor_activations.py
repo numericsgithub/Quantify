@@ -114,9 +114,10 @@ class TestBrevitasIntegration(unittest.TestCase):
         act = QuantReLU(act_quant=FixedPointPerTensorActivationQuant)
         x = torch.randn(2, 3, 4, 4)
         _ = act(x)
-        # Verify quantizer proxy is attached and exposes scale attributes
+        # Verify quantizer proxy is attached
         self.assertTrue(hasattr(act, 'act_quant'))
-        self.assertTrue(hasattr(act.act_quant, 'quant_scale'))
+        # Brevitas proxies expose scale as 'quant_scale' or 'scale' depending on version
+        self.assertTrue(hasattr(act.act_quant, 'quant_scale') or hasattr(act.act_quant, 'scale'))
 
     def test_custom_bit_width_via_subclass(self):
         from brevitas.nn import QuantReLU
