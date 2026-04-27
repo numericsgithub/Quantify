@@ -124,10 +124,11 @@ def main():
         model,
         dummy_input,
         onnx_path,
-        opset_version=18,  # Updated to 18 to avoid ONNX version converter failure
+        opset_version=18,
         input_names=["input"],
         output_names=["output"],
         dynamic_axes={"input": {0: "batch"}, "output": {0: "batch"}},
+        legacy=True,  # Force legacy exporter to support torch.autograd.Function.symbolic
     )
     print(f"Model exported to {onnx_path}")
     print("Open the file in Netron to verify the custom 'mydomain::CustomQuantConv' and 'mydomain::CustomQuantLinear' nodes.")
