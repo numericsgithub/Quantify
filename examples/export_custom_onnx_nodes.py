@@ -124,7 +124,7 @@ def main():
         model,
         dummy_input,
         onnx_path,
-        opset_version=15,
+        opset_version=18,  # Updated to 18 to avoid ONNX version converter failure
         input_names=["input"],
         output_names=["output"],
         dynamic_axes={"input": {0: "batch"}, "output": {0: "batch"}},
