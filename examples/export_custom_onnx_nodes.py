@@ -128,7 +128,7 @@ def main():
         input_names=["input"],
         output_names=["output"],
         dynamic_axes={"input": {0: "batch"}, "output": {0: "batch"}},
-        use_dynamo=False,  # Force legacy exporter to support torch.autograd.Function.symbolic
+        dynamo=False,  # Force legacy exporter to support torch.autograd.Function.symbolic
     )
     print(f"Model exported to {onnx_path}")
     print("Open the file in Netron to verify the custom 'mydomain::CustomQuantConv' and 'mydomain::CustomQuantLinear' nodes.")
