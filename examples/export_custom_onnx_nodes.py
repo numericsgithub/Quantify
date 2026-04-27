@@ -92,6 +92,8 @@ class SimpleQuantizedModel(nn.Module):
             1, 1, self.bit_width, self.rounding_mode, self.is_signed
         )
         x = torch.relu(x)
+        # Pool spatial dimensions to match the fully connected layer's input size
+        x = torch.nn.functional.adaptive_avg_pool2d(x, 1)
         x = x.view(x.size(0), -1)
         x = CustomQuantLinearFn.apply(
             x, self.fc_weight, self.fc_bias,
