@@ -35,6 +35,30 @@ from brevitas.inject import BaseInjector as Injector
 from brevitas.inject.enum import QuantType
 from brevitas.proxy.parameter_quant import WeightQuantProxyFromInjector
 
+from torch.autograd import Function
+
+class FixedPointQuantFn(Function):
+    """Symbolic shim: emits a single `mydomain::FixedPointQuant` ONNX node."""
+
+    @staticmethod
+    def symbolic(g, x, scale, zero_point,
+                 bit_width, signed, narrow_range, rounding_mode):
+        return g.op(
+            "mydomain::FixedPointQuant",
+            x, scale, zero_point,
+            bit_width_i=int(bit_width),
+            signed_i=int(signed),
+            narrow_range_i=int(narrow_range),
+            rounding_mode_s=str(rounding_mode),
+        ).setType(x.type())
+
+    @staticmethod
+    def forward(ctx, x, scale, zero_point,
+                bit_width, signed, narrow_range, rounding_mode):
+        # Weights are already on the fixed-point grid by the time we export,
+        # so this is effectively a pass-through. PyTorch still needs a valid
+        # tensor of the right shape/dtype for tracing.
+        return x
 
 # ---------------------------------------------------------------------------
 # Rounding helpers
@@ -122,7 +146,7 @@ def find_optimal_lsb(
     signed: bool,
     rounding_mode: RoundingMode,
     narrow_range: bool = True,
-) -> int:
+) -> Tuple[int, int]:
     """
     Search over LSB positions to find the one that maximises the number of
     unique quantised values.  Ties are broken by smallest SAD (Sum of Absolute Differences).
@@ -150,17 +174,7 @@ def find_optimal_lsb(
     abs_max = max(abs(w_min), abs(w_max))
 
     if abs_max == 0.0:
-        return 0  # all-zero tensor, LSB doesn't matter
-
-    # Determine the search range for LSB.
-    # The step = 2^lsb must be small enough to resolve the weights but large
-    # enough that the representable range covers them.
-    #
-    # Upper bound on LSB: the full range must at least cover abs_max.
-    #   For unsigned: (2^bw - 1) * 2^lsb >= abs_max
-    #                 lsb >= log2(abs_max / (2^bw - 1))
-    #   (similar for signed)
-    # We search a generous window around the "ideal" LSB.
+        return 0, 1  # all-zero tensor, LSB doesn't matter
 
     if signed:
         n_positive_codes = 2 ** (bit_width - 1) - 1
@@ -187,7 +201,7 @@ def find_optimal_lsb(
             best_unique = n_unique
             best_sad = sad
 
-    return best_lsb
+    return best_lsb, best_unique
 
 
 # ---------------------------------------------------------------------------
@@ -223,7 +237,7 @@ class FixedPointPerTensorWeightQuantizer(nn.Module):
         self.bit_width = bit_width
         self.rounding_mode = rounding_mode
         self.narrow_range = narrow_range
-        
+
         # Register search results as buffers to ensure they are serialized in state_dict
         self.register_buffer('search_done', torch.tensor(False, dtype=torch.bool))
         self.register_buffer('search_result_is_signed', torch.tensor(True, dtype=torch.bool))
@@ -254,16 +268,11 @@ class FixedPointPerTensorWeightQuantizer(nn.Module):
         bit_width : torch.Tensor
             The bit-width as a float tensor.
         """
-        # Fallback device sync (hook should handle this, but kept for safety)
-        if self.search_done.device != weights.device:
-            self.search_done = self.search_done.to(weights.device)
-            self.search_result_is_signed = self.search_result_is_signed.to(weights.device)
-            self.search_result_lsb = self.search_result_lsb.to(weights.device)
 
         if not self.search_done.item():
             signed = self.detect_signed(weights)
 
-            lsb = find_optimal_lsb(
+            lsb, num_unique = find_optimal_lsb(
                 weights,
                 self.bit_width,
                 signed,
@@ -272,7 +281,10 @@ class FixedPointPerTensorWeightQuantizer(nn.Module):
             )
             self.search_result_is_signed.fill_(signed)
             self.search_result_lsb.fill_(lsb)
-            self.search_done.fill_(True)
+            if num_unique > 1:
+                self.search_done.fill_(True)
+            else:
+                self.search_done.fill_(False)
         else:
             signed = self.search_result_is_signed.item()
             lsb = self.search_result_lsb.item()

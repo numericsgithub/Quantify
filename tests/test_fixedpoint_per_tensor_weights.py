@@ -168,7 +168,7 @@ class TestFindOptimalLsb:
         bw = 4
         mode = RoundingMode.ROUND_TO_NEAREST_EVEN
 
-        best_lsb = find_optimal_lsb(weights, bw, signed, mode)
+        best_lsb , _ = find_optimal_lsb(weights, bw, signed, mode)
 
         # Verify: no other nearby LSB gives strictly more unique values
         best_q = quantize_fixed_point(weights, best_lsb, bw, signed, mode)
@@ -189,7 +189,7 @@ class TestFindOptimalLsb:
         bw = 8  # more bits → more likely to tie on unique count
         mode = RoundingMode.ROUND_TO_NEAREST_EVEN
 
-        best_lsb = find_optimal_lsb(weights, bw, signed, mode)
+        best_lsb , _ = find_optimal_lsb(weights, bw, signed, mode)
         best_q = quantize_fixed_point(weights, best_lsb, bw, signed, mode)
         best_unique = torch.unique(best_q).numel()
         best_sad = torch.sum(torch.abs(weights - best_q)).item()
@@ -207,7 +207,7 @@ class TestFindOptimalLsb:
     def test_all_zeros(self):
         """All-zero weights should not crash."""
         weights = torch.zeros(64)
-        lsb = find_optimal_lsb(weights, 4, False, RoundingMode.ROUND_TO_NEAREST_EVEN)
+        lsb , _ = find_optimal_lsb(weights, 4, False, RoundingMode.ROUND_TO_NEAREST_EVEN)
         assert isinstance(lsb, int)
 
     def test_positive_weights_choose_unsigned_range(self):
@@ -216,9 +216,9 @@ class TestFindOptimalLsb:
         weights = torch.rand(256) * 3.0  # [0, 3)
         bw = 4
 
-        lsb_unsigned = find_optimal_lsb(weights, bw, signed=False,
+        lsb_unsigned , _ = find_optimal_lsb(weights, bw, signed=False,
                                         rounding_mode=RoundingMode.ROUND_TO_NEAREST_EVEN)
-        lsb_signed = find_optimal_lsb(weights, bw, signed=True,
+        lsb_signed , _ = find_optimal_lsb(weights, bw, signed=True,
                                       rounding_mode=RoundingMode.ROUND_TO_NEAREST_EVEN)
 
         q_unsigned = quantize_fixed_point(weights, lsb_unsigned, bw, False,

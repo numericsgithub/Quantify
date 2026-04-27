@@ -141,7 +141,7 @@ def find_optimal_lsb(
     abs_max = max(abs(t_min), abs(t_max))
 
     if abs_max == 0.0:
-        return 0
+        return 0, 1
 
     if signed:
         n_positive_codes = 2 ** (bit_width - 1) - 1
@@ -163,12 +163,12 @@ def find_optimal_lsb(
         n_unique = int(torch.unique(q).numel())
         sad = float(torch.sum(torch.abs(tensor - q)).item())
 
-        if sad < best_sad:
+        if n_unique > best_unique or (n_unique == best_unique and sad < best_sad):
             best_lsb = lsb
             best_unique = n_unique
             best_sad = sad
 
-    return best_lsb
+    return best_lsb, best_unique
 
 
 # ------ Torch Module ------
@@ -226,7 +226,7 @@ class FixedPointPerTensorActivationQuantizer(nn.Module):
 
         if not self.search_done.item():
             signed = self.detect_signed(tensor)
-            lsb = find_optimal_lsb(
+            lsb, num_unique = find_optimal_lsb(
                 tensor,
                 self.bit_width,
                 signed,
@@ -235,7 +235,10 @@ class FixedPointPerTensorActivationQuantizer(nn.Module):
             )
             self.search_result_is_signed.fill_(signed)
             self.search_result_lsb.fill_(lsb)
-            self.search_done.fill_(True)
+            if num_unique > 1:
+                self.search_done.fill_(True)
+            else:
+                self.search_done.fill_(False)
         else:
             signed = self.search_result_is_signed.item()
             lsb = self.search_result_lsb.item()
