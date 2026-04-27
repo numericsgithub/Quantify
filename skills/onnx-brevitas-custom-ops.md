@@ -39,4 +39,7 @@ The pattern wraps a layer's forward pass in a `torch.autograd.Function` to inter
 
 ## 5. Reference
 - **Example File**: `examples/export_custom_onnx_nodes.py`
+- **PyTorch ONNX Export Documentation**: https://docs.pytorch.org/docs/stable/onnx_export.html
+- **PyTorch ONNX Control Flow Tutorial**: https://pytorch.org/tutorials/beginner/onnx/export_control_flow_model_to_onnx_tutorial.html
+- **Brevitas Documentation**: https://brevitas.readthedocs.io/
 - **Dependencies**: The example imports `brevitas.nn as qnn` and `FixedPointPerTensorWeightQuant`, but relies on standard `torch.nn.functional` for the actual computation. No additional Brevitas-specific export hooks are used.
