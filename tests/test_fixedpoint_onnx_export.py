@@ -7,7 +7,7 @@ import onnx
 import numpy as np
 import pytest
 
-from quantizers.fixedpoint_per_tensor_weights import FixedPointPerTensorWeightQuant
+from quantizers.fixedpoint_per_tensor_weights import FixedPointPerTensorWeightQuant, FixedPointPerTensorWeightQuantizer, RoundingMode
 
 
 class SimpleFixedPointCNN(nn.Module):
@@ -112,6 +112,56 @@ class TestFixedPointOnnxExport:
             assert "rounding_mode" in attrs
             assert "scale" in attrs
             assert "zero_point" in attrs
+
+    def test_quantizer_parameters_roundtrip(self, tmp_path):
+        """Verify that quantizer parameters (lsb, bit_width, signed, etc.) are correctly exported and match expected values."""
+        # Create a quantizer instance
+        quantizer = FixedPointPerTensorWeightQuantizer(
+            bit_width=8,
+            rounding_mode=RoundingMode.ROUND_TO_NEAREST_EVEN,
+            narrow_range=True
+        )
+        
+        # Perform a dummy inference to initialize search buffers (simulating real usage)
+        dummy_weights = torch.randn(10, 10)
+        _ = quantizer(dummy_weights)
+        
+        # Force a specific lsb to test round-trip explicitly
+        quantizer.search_result_lsb.fill_(-3)
+        quantizer.search_result_is_signed.fill_(True)
+        quantizer.search_done.fill_(True)
+        
+        # Create a dummy model that uses this quantizer
+        class DummyModel(nn.Module):
+            def __init__(self, quantizer):
+                super().__init__()
+                self.quant = quantizer
+            
+            def forward(self, x):
+                return self.quant(x)
+                
+        model = DummyModel(quantizer).eval()
+        dummy_input = torch.randn(1, 10)
+        
+        onnx_path = tmp_path / "test_quantizer.onnx"
+        torch.onnx.export(
+            model, dummy_input, str(onnx_path),
+            dynamo=False, opset_version=13,
+            input_names=["input"], output_names=["output"]
+        )
+        
+        onnx_model = get_onnx_model(str(onnx_path))
+        attrs_list = get_custom_node_attributes(onnx_model)
+        
+        assert len(attrs_list) == 1
+        attrs = attrs_list[0]
+        
+        # Verify attributes match the quantizer state
+        assert attrs["lsb"] == -3, f"Expected lsb=-3, got {attrs['lsb']}"
+        assert attrs["bit_width"] == 8, f"Expected bit_width=8, got {attrs['bit_width']}"
+        assert attrs["signed"] == 1, f"Expected signed=1, got {attrs['signed']}"
+        assert attrs["narrow_range"] == 1, f"Expected narrow_range=1, got {attrs['narrow_range']}"
+        assert attrs["rounding_mode"] == "round_to_nearest_even", f"Expected rounding_mode='round_to_nearest_even', got {attrs['rounding_mode']}"
 
     def test_onnx_model_validates(self, model, dummy_input, tmp_path):
         onnx_path = tmp_path / "test_model.onnx"
