@@ -9,10 +9,12 @@
 - If you need to quantize activations from unsupported layers, wrap them with `qnn.QuantIdentity` or apply quantization explicitly in `forward()`.
 
 ## 2. `QuantLinear` Does Not Auto-Flatten Spatial Dimensions
-**When this happens:** You connect a pooling layer (e.g., `AdaptiveAvgPool2d(1)` → shape `(B, C, 1, 1)`) directly to `qnn.QuantLinear`.
+**When this happens:** You connect a pooling layer (e.g., `AdaptiveAvgPool2d(1)` → shape `(B, C, 1, 1)`) directly to `qnn.QuantLinear`, or you manually miscalculate the flattened feature size.
 **The Problem:** `QuantLinear` inherits `nn.Linear`'s strict 2D input requirement `(batch_size, in_features)`. It will not reshape or flatten tensors automatically, causing `RuntimeError: mat1 and mat2 shapes cannot be multiplied`.
 **How to Prevent It:**
 - Always explicitly flatten before the linear layer: `self.flatten = nn.Flatten()` or `x = x.view(x.size(0), -1)`.
+- **Verify flattened dimensions manually or via a dummy pass.** When calculating `in_features` for `QuantLinear` after `Conv2d` + `MaxPool2d`, double-check the spatial reduction formula: `out_size = floor((in_size - kernel + 2*padding) / stride)`. 
+- **Pro-tip:** Run a dummy forward pass with `model.eval()` and print `x.shape` right before the linear layer. This catches arithmetic errors (like `16*8*8` vs `16*16*16`) before they cause `RuntimeError` during training or export.
 - Remember: quantized layers follow standard PyTorch tensor shape rules; they add no dimension-handling magic.
 
 ## 3. Custom ONNX Nodes Require Legacy Exporter (`dynamo=False`)
