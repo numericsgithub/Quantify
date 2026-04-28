@@ -106,68 +106,34 @@ class CustomYOLOv8nTrainer(DetectionTrainer):
             "train_args": vars(self.args),
         }
         torch.save(ckpt, self.last)
+
+        export_model = self.model.float().cpu().eval()
+        dummy = torch.zeros(1, 3, 640, 640)
+        torch.onnx.export(
+            export_model, dummy, str(self.last) + ".onnx",
+            dynamo=False,
+            opset_version=13,
+            custom_opsets={"mydomain": 1},
+            do_constant_folding=False,  # keep the custom node visible
+            input_names=["input"],
+            output_names=["output"],
+        )
         if self.best_fitness == self.fitness:
             torch.save(ckpt, self.best)
+            torch.onnx.export(
+                export_model, dummy, str(self.best) + ".onnx",
+                dynamo=False,
+                opset_version=13,
+                custom_opsets={"mydomain": 1},
+                do_constant_folding=False,  # keep the custom node visible
+                input_names=["input"],
+                output_names=["output"],
+            )
         return True
 
     def final_eval(self):
-        export_model = self.model.float().cpu().eval()
-        dummy = torch.zeros(1, 3, 640, 640)
+        pass
 
-        try:
-            torch.onnx.export(
-                export_model, dummy, "/home/th/Desktop/brevitas-quantizers/runs/detect/runs/custom_yolo_scratch/model.onnx",
-                opset_version=13,
-                custom_opsets={"mydomain": 1},
-                do_constant_folding=False,  # keep the custom node visible
-                input_names=["input"],
-                output_names=["output"],
-            )
-        except:
-            pass
-        try:
-            torch.onnx.export(
-                export_model, dummy, "/home/th/Desktop/brevitas-quantizers/runs/detect/runs/custom_yolo_scratch/model2.onnx",
-                opset_version=13,
-                custom_opsets={"mydomain": 1},
-                do_constant_folding=False,  # keep the custom node visible
-                input_names=["input"],
-                output_names=["output"],
-            )
-        except:
-            pass
-        try:
-            torch.onnx.export(
-                export_model, dummy, "/home/th/Desktop/brevitas-quantizers/runs/detect/runs/custom_yolo_scratch/model3.onnx",
-                dynamo=False,
-                opset_version=13,
-                custom_opsets={"mydomain": 1},
-                do_constant_folding=False,  # keep the custom node visible
-                input_names=["input"],
-                output_names=["output"],
-            )
-        except:
-            pass
-        try:
-            torch.onnx.export(
-                export_model, dummy, "/home/th/Desktop/brevitas-quantizers/runs/detect/runs/custom_yolo_scratch/model4.onnx",
-                dynamo=False,
-                opset_version=13,
-                input_names=["input"],
-                output_names=["output"],
-            )
-        except:
-            pass
-
-
-        return
-        # # Skip strip_optimizer which chokes on Brevitas models
-        # for f in [self.last, self.best]:
-        #     if Path(f).exists():
-        #         with open(f, "rb") as fh:
-        #             ckpt = dill.load(fh)
-        #         # run validation directly
-        #         self.validator(model=ckpt["model"])
 
     def get_model(self, cfg=None, weights=None, verbose=True):
         """Build our custom YOLOv8nPANOnly, optionally loading a saved state dict."""
@@ -275,50 +241,6 @@ def main():
         )
     )
 
-    # import types
-    # original_save = trainer.save_model
-    #
-    # def patched_save_model(self):
-    #     import copy
-    #     ckpt = {
-    #         "epoch": self.epoch,
-    #         "best_fitness": self.best_fitness,
-    #         "model": self.model.state_dict(),  # state_dict only, no full model
-    #         "optimizer": self.optimizer.state_dict(),
-    #         "train_args": vars(self.args),
-    #     }
-    #     torch.save(ckpt, self.last)
-    #     if self.best_fitness == self.fitness:
-    #         torch.save(ckpt, self.best)
-    #     return True
-    #
-    # trainer.save_model = types.MethodType(patched_save_model, trainer)
-    #
-    # def patched_strip_optimizer(f, update=True):
-    #     """Re-implementation that skips .half() and handles state_dict-only checkpoints."""
-    #     try:
-    #         import dill
-    #         with open(f, "rb") as fh:
-    #             ckpt = dill.load(fh)
-    #     except Exception:
-    #         ckpt = torch.load(f, map_location="cpu")
-    #
-    #     # If model is a state_dict (OrderedDict), nothing to strip
-    #     if isinstance(ckpt.get("model"), dict):
-    #         return ckpt
-    #
-    #     # Normal case: strip optimizer to shrink file
-    #     ckpt.pop("optimizer", None)
-    #     if update:
-    #         import dill
-    #         with open(f, "wb") as fh:
-    #             dill.dump(ckpt, fh)
-    #     return ckpt
-    #
-    # # Patch strip_optimizer globally before trainer.train()
-    # import ultralytics.utils.torch_utils as tu
-    # tu.strip_optimizer = patched_strip_optimizer
-
     trainer.add_callback("on_train_batch_end", stop_early)
     trainer.train()
 
@@ -333,121 +255,17 @@ def main():
         if hasattr(model, "state_dict"):
             torch.save(model.state_dict(), out_path)
             print(f"\nClean state dict saved to: {out_path}")
-
-        try:
-            model.export(format="onnx", dynamic=False)
-            # dummy = torch.zeros(1, 3, 640, 640, dtype=torch.half).to("cpu")
-            # torch.onnx.export(
-            #     model.to("cpu"),
-            #     dummy,
-            #     Path(trainer.save_dir) / "weights" / "best.onnx",
-            #     input_names=["images"],
-            #     output_names=["output"],
-            #     opset_version=17,
-            #     dynamo=False,
-            # )
-            print("Exported to yolov8n_custom.onnx")
-            print("Exported to yolov8n_custom.onnx")
-            print("Exported to yolov8n_custom.onnx")
-            print("Exported to yolov8n_custom.onnx")
-            print("Exported to yolov8n_custom.onnx")
-            print("Exported to yolov8n_custom.onnx")
-            print("Exported to yolov8n_custom.onnx")
-            print("Exported to yolov8n_custom.onnx")
-            print("Exported to yolov8n_custom.onnx")
-            print("Exported to yolov8n_custom.onnx")
-            print("Exported to yolov8n_custom.onnx")
-            print("Exported to yolov8n_custom.onnx")
-            print("Exported to yolov8n_custom.onnx")
-            print("Exported to yolov8n_custom.onnx")
-            print("Exported to yolov8n_custom.onnx")
-            print("Exported to yolov8n_custom.onnx")
-        except Exception as ex:
-            print("⚠️ ⚠️ ⚠️ ⚠️ IT DID NOT WORK HERE", ex)
-
-        onnx_path = Path(trainer.save_dir) / "weights" / "best2.onnx"
-
-        try:
-            export_model = trainer.model.float().cpu()#.eval()
-            dummy = torch.zeros(1, 3, args.imgsz, args.imgsz)
-            torch.onnx.export(
-                export_model,
-                dummy,
-                Path(trainer.save_dir) / "weights" / "best2_COR.onnx",
-                dynamo=False,
-                opset_version=13,
-                input_names=["input"],
-                output_names=["output"],
-                dynamic_axes={"input": {0: "batch_size"}, "output": {0: "batch_size"}}
-            )
-        except Exception as ex:
-            print("⚠️ ⚠️ ⚠️ ⚠️⚠️ ⚠️ ⚠️ ⚠️⚠️ ⚠️ ⚠️ ⚠️⚠️ ⚠️ ⚠️ ⚠️⚠️ ⚠️ ⚠️ ⚠️", ex)
-            print("# # # # ### #  END")
-            print("# # # # ### #  END")
-            print("# # # # ### #  END")
-            print("# # # # ### #  END")
-
-        try:
-            export_model = trainer.model.float().cpu().eval()
-            dummy = torch.zeros(1, 3, args.imgsz, args.imgsz)
-            torch.onnx.export(
-                export_model,
-                dummy,
-                str(onnx_path),
-                input_names=["images"],
-                output_names=["output"],
-                opset_version=17,
-                dynamo=False,
-            )
-
-            # export_onnx_qcdq(
-            #     export_model,
-            #     dummy,  # dummy input
-            #     export_path=str(Path(trainer.save_dir) / "weights" / "best_export_onnx_qcdq.onnx"),
-            #     opset_version=13,  # 13+ for per-channel DQ
-            # )
-
-            torch.onnx.export(
-                export_model,
-                dummy,
-                str(Path(trainer.save_dir) / "weights" / "best3.onnx"),
-                input_names=["images"],
-                output_names=["output"],
-                opset_version=16,
-                dynamo=False,
-            )
-            torch.onnx.export(
-                export_model,
-                dummy,
-                str(Path(trainer.save_dir) / "weights" / "best4.onnx"),
-                input_names=["images"],
-                output_names=["output"],
-                opset_version=13,
-                dynamo=False,
-            )
-            torch.onnx.export(
-                export_model,
-                dummy,
-                str(Path(trainer.save_dir) / "weights" / "best5.onnx"),
-                input_names=["images"],
-                output_names=["output"],
-                dynamo=False,
-            )
-            print(f"ONNX model saved to:       {onnx_path}")
-        except Exception as e:
-            print(f"⚠️  ONNX export failed: {e}")
-
-        try:
-            import onnx
-            from onnxsim import simplify
-
-            model = onnx.load(str(Path(trainer.save_dir) / "weights" / "best2.onnx"))
-            model_simp, check = simplify(model)
-
-            assert check
-            onnx.save(model_simp, str(Path(trainer.save_dir) / "weights" / "best6.onnx"))
-        except Exception as e:
-            print(f"⚠️  ONNX SIMPLIFY export failed: {e}")
+        # try:
+        #     import onnx
+        #     from onnxsim import simplify
+        #
+        #     model = onnx.load(str(Path(trainer.save_dir) / "weights" / "best2.onnx"))
+        #     model_simp, check = simplify(model)
+        #
+        #     assert check
+        #     onnx.save(model_simp, str(Path(trainer.save_dir) / "weights" / "best6.onnx"))
+        # except Exception as e:
+        #     print(f"⚠️  ONNX SIMPLIFY export failed: {e}")
     else:
         print(f"\n⚠️  best.pt not found at {best_ckpt}")
 
