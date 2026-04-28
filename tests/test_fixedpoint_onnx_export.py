@@ -48,7 +48,19 @@ def get_custom_node_attributes(onnx_model):
     attrs = []
     for node in onnx_model.graph.node:
         if node.op_type == "FixedPointQuant" and node.domain == "mydomain":
-            attrs.append({a.name: (a.i if a.i else a.f if a.f else a.s) for a in node.attribute})
+            attr_dict = {}
+            for a in node.attribute:
+                if a.HasField("i"):
+                    attr_dict[a.name] = a.i
+                elif a.HasField("f"):
+                    attr_dict[a.name] = a.f
+                elif a.HasField("s"):
+                    attr_dict[a.name] = a.s
+                elif a.HasField("t"):
+                    attr_dict[a.name] = a.t
+                else:
+                    attr_dict[a.name] = None
+            attrs.append(attr_dict)
     return attrs
 
 
@@ -92,13 +104,14 @@ class TestFixedPointOnnxExport:
         
         assert len(attrs_list) > 0
         for attrs in attrs_list:
-            assert "lsb_i" in attrs
-            assert "bit_width_i" in attrs
-            assert "signed_i" in attrs
-            assert "narrow_range_i" in attrs
-            assert "rounding_mode_s" in attrs
-            assert "scale_f" in attrs
-            assert "zero_point_f" in attrs
+            # ONNX attribute names do not include type suffixes (_i, _f, _s)
+            assert "lsb" in attrs
+            assert "bit_width" in attrs
+            assert "signed" in attrs
+            assert "narrow_range" in attrs
+            assert "rounding_mode" in attrs
+            assert "scale" in attrs
+            assert "zero_point" in attrs
 
     def test_onnx_model_validates(self, model, dummy_input, tmp_path):
         onnx_path = tmp_path / "test_model.onnx"
