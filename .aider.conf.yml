@@ -1,3 +1,5 @@
 read:
   - CONVENTIONS.md
   - skills/onnx-brevitas-custom-ops.md
+  - pitfalls/brevitas_pitfalls.md
+  - BREVITAS_DOCUMENTATION.md
