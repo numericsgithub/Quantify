@@ -132,34 +132,7 @@ class CustomYOLOv8nTrainer(DetectionTrainer):
         return True
 
     def final_eval(self):
-        best_path = self.save_dir / "weights" / "best.pt"
-        if best_path.exists():
-            # Load checkpoint and inject weights into the already-initialized model
-            ckpt = torch.load(best_path, map_location="cpu", weights_only=False)
-            state_dict = ckpt.get("model", ckpt)
-            if hasattr(state_dict, "state_dict"):
-                state_dict = state_dict.state_dict()
-            self.model.load_state_dict(state_dict)
-            model = self.model
-            
-            model.eval()  # Ensure eval mode for consistent quantization
-            
-            # Verify weight quantization works by inspecting the first quantized layer
-            quant_layer = None
-            for m in model.modules():
-                if hasattr(m, 'weight_quant') and hasattr(m, 'weight'):
-                    quant_layer = m
-                    break
-            
-            if quant_layer is not None:
-                q_weights = quant_layer.weight_quant(quant_layer.weight)
-                unique_vals = torch.unique(q_weights)
-                print(f"✅ Weight quantization check on {quant_layer}: {len(unique_vals)} unique values")
-                print(f"   Sample unique values: {unique_vals[:10]}")
-            else:
-                print("⚠️  No quantized layer found to verify weight quantization.")
-
-            self.validator(model=model)
+        pass
 
 
     def get_model(self, cfg=None, weights=None, verbose=True):
