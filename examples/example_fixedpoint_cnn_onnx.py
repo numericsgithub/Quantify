@@ -32,6 +32,9 @@ class SmallFixedPointCNN(nn.Module):
         # Brevitas does not provide a QuantGlobalAvgPool2d wrapper.
         # Use standard PyTorch adaptive average pooling instead.
         self.pool = nn.AdaptiveAvgPool2d(1)
+        # QuantLinear expects a 2D input (batch, in_features).
+        # We must explicitly flatten spatial dimensions before the linear layer.
+        self.flatten = nn.Flatten()
         self.fc = qnn.QuantLinear(
             in_features=16,
             out_features=num_classes,
@@ -42,6 +45,7 @@ class SmallFixedPointCNN(nn.Module):
         x = self.conv1(x)
         x = self.relu(x)
         x = self.pool(x)
+        x = self.flatten(x)
         x = self.fc(x)
         return x
 
