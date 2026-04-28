@@ -32,7 +32,7 @@ class SimpleFixedPointCNN(nn.Module):
         self.relu = qnn.QuantReLU()
         self.pool = nn.MaxPool2d(2, 2)
         self.fc = qnn.QuantLinear(
-            in_features=16 * 8 * 8,  # Assuming 32x32 input -> 16x8x8 after pool
+            in_features=16 * 16 * 16,  # 32x32 input -> 16x16x16 after pool -> 4096 features
             out_features=num_classes,
             weight_quant=FixedPointPerTensorWeightQuant,
             return_quant_tensor=False,
