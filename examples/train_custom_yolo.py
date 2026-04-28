@@ -134,7 +134,14 @@ class CustomYOLOv8nTrainer(DetectionTrainer):
     def final_eval(self):
         best_path = self.save_dir / "weights" / "best.pt"
         if best_path.exists():
-            model = self.load_model(best_path)
+            # Load checkpoint and inject weights into the already-initialized model
+            ckpt = torch.load(best_path, map_location="cpu", weights_only=False)
+            state_dict = ckpt.get("model", ckpt)
+            if hasattr(state_dict, "state_dict"):
+                state_dict = state_dict.state_dict()
+            self.model.load_state_dict(state_dict)
+            model = self.model
+            
             model.eval()  # Ensure eval mode for consistent quantization
             
             # Verify weight quantization works by inspecting the first quantized layer
