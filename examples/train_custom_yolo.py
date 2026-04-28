@@ -132,7 +132,9 @@ class CustomYOLOv8nTrainer(DetectionTrainer):
         return True
 
     def final_eval(self):
-        pass
+        print("\nRunning final evaluation on the best model...")
+        self.model.eval()
+        self.validator(model=self.model)
 
 
     def get_model(self, cfg=None, weights=None, verbose=True):
