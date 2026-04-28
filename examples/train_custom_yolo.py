@@ -43,6 +43,8 @@ from quantizers import FixedPointPerTensorWeightQuantizer
 
 from contextlib import contextmanager
 
+# Example usage python -m examples.train_custom_yolo --data /home/th/tmp/quanttests/cached_datasets/coco_yolo_fmt/coco.yaml --device cuda --batch 128 --epochs 1
+
 @contextmanager
 def fixed_point_export_mode(model):
     targets = [m for m in model.modules()
@@ -53,8 +55,8 @@ def fixed_point_export_mode(model):
         yield
     finally:
         pass
-        # for m in targets:
-        #     m.export_mode = False
+        for m in targets:
+            m.export_mode = False
 
 MAX_BATCHES = 5
 counter = {"n": 0}
@@ -112,7 +114,7 @@ class CustomYOLOv8nTrainer(DetectionTrainer):
         export_model = self.model.float().cpu().eval()
         dummy = torch.zeros(1, 3, 640, 640)
 
-        with fixed_point_export_mode(export_model):
+        try:
             torch.onnx.export(
                 export_model, dummy, "/home/th/Desktop/brevitas-quantizers/runs/detect/runs/custom_yolo_scratch/model.onnx",
                 opset_version=13,
@@ -121,6 +123,43 @@ class CustomYOLOv8nTrainer(DetectionTrainer):
                 input_names=["input"],
                 output_names=["output"],
             )
+        except:
+            pass
+        try:
+            torch.onnx.export(
+                export_model, dummy, "/home/th/Desktop/brevitas-quantizers/runs/detect/runs/custom_yolo_scratch/model2.onnx",
+                opset_version=13,
+                custom_opsets={"mydomain": 1},
+                do_constant_folding=False,  # keep the custom node visible
+                input_names=["input"],
+                output_names=["output"],
+            )
+        except:
+            pass
+        try:
+            torch.onnx.export(
+                export_model, dummy, "/home/th/Desktop/brevitas-quantizers/runs/detect/runs/custom_yolo_scratch/model3.onnx",
+                dynamo=False,
+                opset_version=13,
+                custom_opsets={"mydomain": 1},
+                do_constant_folding=False,  # keep the custom node visible
+                input_names=["input"],
+                output_names=["output"],
+            )
+        except:
+            pass
+        try:
+            torch.onnx.export(
+                export_model, dummy, "/home/th/Desktop/brevitas-quantizers/runs/detect/runs/custom_yolo_scratch/model4.onnx",
+                dynamo=False,
+                opset_version=13,
+                input_names=["input"],
+                output_names=["output"],
+            )
+        except:
+            pass
+
+
         return
         # # Skip strip_optimizer which chokes on Brevitas models
         # for f in [self.last, self.best]:
@@ -133,7 +172,7 @@ class CustomYOLOv8nTrainer(DetectionTrainer):
     def get_model(self, cfg=None, weights=None, verbose=True):
         """Build our custom YOLOv8nPANOnly, optionally loading a saved state dict."""
         nc = self.data["nc"]
-        model = YOLOv8nPANOnly(nc=nc, weight_quant=q.FixedPointPerTensorWeightQuant, act_quant=q.FixedPointPerTensorActivationQuant)
+        model = YOLOv8nPANOnly(nc=nc, weight_quant=q.FixedPointPerTensorWeightQuant, act_quant=None)# q.FixedPointPerTensorActivationQuant
 
         # Load a previously saved state dict if provided via --checkpoint.
         # self.args.checkpoint is set from overrides in main().
@@ -327,6 +366,27 @@ def main():
             print("⚠️ ⚠️ ⚠️ ⚠️ IT DID NOT WORK HERE", ex)
 
         onnx_path = Path(trainer.save_dir) / "weights" / "best2.onnx"
+
+        try:
+            export_model = trainer.model.float().cpu()#.eval()
+            dummy = torch.zeros(1, 3, args.imgsz, args.imgsz)
+            torch.onnx.export(
+                export_model,
+                dummy,
+                Path(trainer.save_dir) / "weights" / "best2_COR.onnx",
+                dynamo=False,
+                opset_version=13,
+                input_names=["input"],
+                output_names=["output"],
+                dynamic_axes={"input": {0: "batch_size"}, "output": {0: "batch_size"}}
+            )
+        except Exception as ex:
+            print("⚠️ ⚠️ ⚠️ ⚠️⚠️ ⚠️ ⚠️ ⚠️⚠️ ⚠️ ⚠️ ⚠️⚠️ ⚠️ ⚠️ ⚠️⚠️ ⚠️ ⚠️ ⚠️", ex)
+            print("# # # # ### #  END")
+            print("# # # # ### #  END")
+            print("# # # # ### #  END")
+            print("# # # # ### #  END")
+
         try:
             export_model = trainer.model.float().cpu().eval()
             dummy = torch.zeros(1, 3, args.imgsz, args.imgsz)

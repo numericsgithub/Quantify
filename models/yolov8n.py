@@ -86,7 +86,7 @@ class Conv(nn.Module):
         super().__init__()
         if p is None:
             p = k // 2  # 'same' padding for odd kernels
-        self.conv = qnn.QuantConv2d(in_ch, out_ch, k, s, p, bias=False) #, weight_quant=weight_quant , output_quant=act_quant
+        self.conv = qnn.QuantConv2d(in_ch, out_ch, k, s, p, bias=False, weight_quant=weight_quant) #,  , output_quant=act_quant
         # self.conv = nn.Conv2d(in_ch, out_ch, k, s, p, bias=False) # The unquantized version
         self.bn   = nn.BatchNorm2d(out_ch, eps=1e-3, momentum=0.03)
         self.act  = nn.SiLU(inplace=True)
