@@ -55,7 +55,8 @@ def get_custom_node_attributes(onnx_model):
                 elif a.HasField("f"):
                     attr_dict[a.name] = a.f
                 elif a.HasField("s"):
-                    attr_dict[a.name] = a.s
+                    val = a.s
+                    attr_dict[a.name] = val.decode('utf-8') if isinstance(val, bytes) else val
                 elif a.HasField("t"):
                     attr_dict[a.name] = a.t
                 else:
