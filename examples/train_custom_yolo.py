@@ -96,6 +96,9 @@ class CustomYOLOv8nTrainer(DetectionTrainer):
         # Store checkpoint path before super().__init__ validates overrides
         self._checkpoint = checkpoint
         super().__init__(*args, **kwargs)
+        # Disable EMA to prevent it from averaging/corrupting quantizer scales.
+        # `ema` is not a valid override argument, so we nullify it after init.
+        self.ema = None
 
     def save_model(self):
         ckpt = {
@@ -225,7 +228,6 @@ def main():
         checkpoint=args.checkpoint,
         overrides=dict(
             amp=False,      # Prevents CPU master weight drift & dtype mismatch with Brevitas
-            ema=False,      # Prevents EMA from averaging/corrupting quantizer scales
             model="yolov8n.yaml",  # placeholder — get_model() ignores this
             data=args.data,
             epochs=args.epochs,
