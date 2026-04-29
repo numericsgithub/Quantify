@@ -142,6 +142,7 @@ class CustomYOLOv8nTrainer(DetectionTrainer):
         """Build our custom YOLOv8nPANOnly, optionally loading a saved state dict."""
         nc = self.data["nc"]
         model = YOLOv8nPANOnly(nc=nc, weight_quant=q.FixedPointPerTensorWeightQuant, act_quant=None)# q.FixedPointPerTensorActivationQuant
+        model = model.to(self.device)
 
         # Load a previously saved state dict if provided via --checkpoint.
         # self.args.checkpoint is set from overrides in main().
@@ -166,7 +167,6 @@ class CustomYOLOv8nTrainer(DetectionTrainer):
         model.detect.nc = nc
         model.detect.stride = model.stride
         model.end2end = False
-        model.model = [model.detect]
 
         if verbose and RANK in {-1, 0}:
             n_params = sum(p.numel() for p in model.parameters())
@@ -224,6 +224,8 @@ def main():
     trainer = CustomYOLOv8nTrainer(
         checkpoint=args.checkpoint,
         overrides=dict(
+            amp=False,      # Prevents CPU master weight drift & dtype mismatch with Brevitas
+            ema=False,      # Prevents EMA from averaging/corrupting quantizer scales
             model="yolov8n.yaml",  # placeholder — get_model() ignores this
             data=args.data,
             epochs=args.epochs,
