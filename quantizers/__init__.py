@@ -4,3 +4,4 @@ from quantizers.fixedpoint_per_tensor import FixedPointPerTensorActivationQuant
 
 from quantizers.coefficient_per_tensor_weights import CoefficientPerTensorWeightQuantizer
 from quantizers.fixedpoint_per_tensor import FixedPointPerTensorQuantizer
+from quantizers.fixedpoint_per_tensor import RoundingMode, quantize_fixed_point, find_optimal_lsb

@@ -1,10 +1,10 @@
 import unittest
 import torch
-from quantizers.fixedpoint_per_tensor_weights import FixedPointPerTensorWeightQuantizer
+from quantizers import FixedPointPerTensorQuantizer
 
 class TestQuantizerSerialization(unittest.TestCase):
     """
-    Tests that the FixedPointPerTensorWeightQuantizer correctly serializes
+    Tests that the FixedPointPerTensorQuantizer correctly serializes
     its search results (LSB and signedness) so that they are not re-calculated
     after loading a model.
     """
@@ -12,7 +12,7 @@ class TestQuantizerSerialization(unittest.TestCase):
     def test_serialization_preserves_search_results(self):
         # 1. Setup
         bit_width = 4
-        quantizer = FixedPointPerTensorWeightQuantizer(bit_width=bit_width)
+        quantizer = FixedPointPerTensorQuantizer(bit_width=bit_width)
         
         # Use weights that will trigger a specific LSB search result
         # Weights in range [-1, 1] with bw=4 should result in a specific LSB
@@ -32,7 +32,7 @@ class TestQuantizerSerialization(unittest.TestCase):
         state_dict = quantizer.state_dict()
         
         # 4. Create a new quantizer and load the state_dict
-        new_quantizer = FixedPointPerTensorWeightQuantizer(bit_width=bit_width)
+        new_quantizer = FixedPointPerTensorQuantizer(bit_width=bit_width)
         new_quantizer.load_state_dict(state_dict)
         
         # 5. Verify that the search results are preserved in the new instance

@@ -7,7 +7,7 @@ import onnx
 import numpy as np
 import pytest
 
-from quantizers.fixedpoint_per_tensor_weights import FixedPointPerTensorWeightQuant, FixedPointPerTensorWeightQuantizer, RoundingMode
+from quantizers import FixedPointPerTensorWeightQuant, FixedPointPerTensorQuantizer, RoundingMode
 
 
 class SimpleFixedPointCNN(nn.Module):
@@ -117,7 +117,7 @@ class TestFixedPointOnnxExport:
     def test_quantizer_parameters_roundtrip(self, tmp_path):
         """Verify that quantizer parameters (lsb, bit_width, signed, etc.) are correctly exported and match expected values."""
         # Create a quantizer instance
-        quantizer = FixedPointPerTensorWeightQuantizer(
+        quantizer = FixedPointPerTensorQuantizer(
             bit_width=8,
             rounding_mode=RoundingMode.ROUND_TO_NEAREST_EVEN,
             narrow_range=True
