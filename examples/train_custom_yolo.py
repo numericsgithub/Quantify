@@ -42,6 +42,7 @@ from brevitas.export import export_onnx_qcdq
 from quantizers import FixedPointPerTensorWeightQuantizer
 
 from contextlib import contextmanager
+import copy
 
 # Example usage python -m examples.train_custom_yolo --data /home/th/tmp/quanttests/cached_datasets/coco_yolo_fmt/coco.yaml --device cuda --batch 128 --epochs 1
 
@@ -110,7 +111,8 @@ class CustomYOLOv8nTrainer(DetectionTrainer):
         }
         torch.save(ckpt, self.last)
 
-        export_model = self.model.float().cpu().eval()
+        export_model = copy.deepcopy(self.model).float().cpu().eval()
+
         dummy = torch.zeros(1, 3, 640, 640)
         torch.onnx.export(
             export_model, dummy, str(self.last) + ".onnx",
@@ -132,6 +134,7 @@ class CustomYOLOv8nTrainer(DetectionTrainer):
                 input_names=["input"],
                 output_names=["output"],
             )
+        del export_model
         return True
 
     def final_eval(self):
@@ -144,7 +147,7 @@ class CustomYOLOv8nTrainer(DetectionTrainer):
     def get_model(self, cfg=None, weights=None, verbose=True):
         """Build our custom YOLOv8nPANOnly, optionally loading a saved state dict."""
         nc = self.data["nc"]
-        model = YOLOv8nPANOnly(nc=nc, weight_quant=q.FixedPointPerTensorWeightQuant, act_quant=None)# q.FixedPointPerTensorActivationQuant
+        model = YOLOv8nPANOnly(nc=nc, weight_quant=q.FixedPointPerTensorWeightQuant, act_quant=q.FixedPointPerTensorActivationQuant)# q.FixedPointPerTensorActivationQuant
         model = model.to(self.device)
 
         # Load a previously saved state dict if provided via --checkpoint.

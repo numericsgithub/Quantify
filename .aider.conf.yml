@@ -3,3 +3,5 @@ read:
   - skills/onnx-brevitas-custom-ops.md
   - pitfalls/brevitas_pitfalls.md
   - BREVITAS_DOCUMENTATION.md
+  - ULTRALYTICS_DOCUMENTATION.md
+  - BREVITAS_QUANTIZERS_DOCUMENTATION.md

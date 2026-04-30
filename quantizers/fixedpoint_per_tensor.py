@@ -34,6 +34,19 @@ import torch.nn as nn
 from brevitas.inject import BaseInjector as Injector
 from brevitas.inject.enum import QuantType
 from brevitas.proxy.parameter_quant import WeightQuantProxyFromInjector
+try:
+    from brevitas.proxy.runtime_quant import ActQuantProxyFromInjector as ActivationQuantProxyFromInjector
+except ImportError:
+    try:
+        from brevitas.proxy.activation_quant import ActivationQuantProxyFromInjector
+    except ImportError:
+        try:
+            from brevitas.proxy.activation import ActivationQuantProxyFromInjector
+        except ImportError:
+            raise ImportError(
+                "Could not find ActivationQuantProxyFromInjector. "
+                "Please ensure you have a compatible version of Brevitas installed."
+            )
 
 from torch.autograd import Function
 from torch.onnx import symbolic_helper
@@ -43,7 +56,7 @@ from torch.onnx import symbolic_helper
 # ---------------------------------------------------------------------------
 
 def quantize_fixed_point(
-    weights: torch.Tensor,
+    inputs: torch.Tensor,
     lsb: int,
     bit_width: int,
     signed: bool,
@@ -51,12 +64,12 @@ def quantize_fixed_point(
     narrow_range: bool = True,
 ) -> torch.Tensor:
     """
-    Quantize a weight tensor to a fixed-point grid.
+    Quantize a input tensor to a fixed-point grid.
 
     Parameters
     ----------
-    weights : torch.Tensor
-        The floating-point weight tensor.
+    inputs : torch.Tensor
+        The floating-point input tensor.
     lsb : int
         Position of the least-significant bit (can be negative for fractional steps).
     bit_width : int
@@ -72,7 +85,7 @@ def quantize_fixed_point(
     Returns
     -------
     torch.Tensor
-        Quantized (dequantized) weight tensor on the fixed-point grid.
+        Quantized (dequantized) input tensor on the fixed-point grid.
     """
     step = 2.0 ** lsb
 
@@ -86,7 +99,7 @@ def quantize_fixed_point(
         code_max = 2 ** bit_width - 1
 
     # Quantize: map to integer codes, round, clamp, scale back
-    codes = weights / step
+    codes = inputs / step
     codes = _round(codes, rounding_mode)
     codes = torch.clamp(codes, code_min, code_max)
     quantized = codes * step
@@ -99,7 +112,7 @@ def quantize_fixed_point(
 # ---------------------------------------------------------------------------
 
 def find_optimal_lsb(
-    weights: torch.Tensor,
+    inputs: torch.Tensor,
     bit_width: int,
     signed: bool,
     rounding_mode: "RoundingMode",
@@ -111,8 +124,8 @@ def find_optimal_lsb(
 
     Parameters
     ----------
-    weights : torch.Tensor
-        The floating-point weight tensor.
+    inputs : torch.Tensor
+        The floating-point input tensor.
     bit_width : int
         Total number of bits.
     signed : bool
@@ -127,8 +140,8 @@ def find_optimal_lsb(
     int
         The optimal LSB position.
     """
-    w_min = weights.min().item()
-    w_max = weights.max().item()
+    w_min = inputs.min().item()
+    w_max = inputs.max().item()
     abs_max = max(abs(w_min), abs(w_max))
 
     if abs_max == 0.0:
@@ -150,9 +163,9 @@ def find_optimal_lsb(
     best_sad = float("inf")
 
     for lsb in reversed(range(search_lo, search_hi + 1)):
-        q = quantize_fixed_point(weights, lsb, bit_width, signed, rounding_mode, narrow_range)
+        q = quantize_fixed_point(inputs, lsb, bit_width, signed, rounding_mode, narrow_range)
         n_unique = int(torch.unique(q).numel())
-        sad = float(torch.sum(torch.abs(weights - q)).item())
+        sad = float(torch.sum(torch.abs(inputs - q)).item())
 
         if n_unique > best_unique or (n_unique == best_unique and sad < best_sad):
             best_lsb = lsb
@@ -219,7 +232,7 @@ class FixedPointQuantFn(Function):
 
     @staticmethod
     def backward(ctx, grad_quantized, grad_scale, grad_zero_point, grad_bw):
-        # Straight-Through Estimator: pass gradient through for the first input (weights)
+        # Straight-Through Estimator: pass gradient through for the first input
         return grad_quantized, None, None, None, None, None, None, None
 
 
@@ -227,9 +240,9 @@ class FixedPointQuantFn(Function):
 # Torch Module — usable as a standalone quantizer
 # ---------------------------------------------------------------------------
 
-class FixedPointPerTensorWeightQuantizer(nn.Module):
+class FixedPointPerTensorQuantizer(nn.Module):
     """
-    A self-contained fixed-point per-tensor weight quantizer.
+    A self-contained fixed-point per-tensor quantizer.
 
     Parameters
     ----------
@@ -259,22 +272,22 @@ class FixedPointPerTensorWeightQuantizer(nn.Module):
 
     # ---- public helpers --------------------------------------------------
 
-    def detect_signed(self, weights: torch.Tensor) -> bool:
-        """Return True if any weight is negative."""
-        return bool((weights < 0).any().item())
+    def detect_signed(self, inputs: torch.Tensor) -> bool:
+        """Return True if any input is negative."""
+        return bool((inputs < 0).any().item())
 
     # ---- forward ---------------------------------------------------------
 
     def forward(
-        self, weights: torch.Tensor
+        self, inputs: torch.Tensor
     ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
         """
-        Quantize *weights* and return a Brevitas-style 4-tuple.
+        Quantize *inputs* and return a Brevitas-style 4-tuple.
 
         Returns
         -------
         quantized : torch.Tensor
-            Weights snapped to the fixed-point grid (dequantized form).
+            inputs snapped to the fixed-point grid (dequantized form).
         scale : torch.Tensor
             Scalar step size ``2 ** lsb``.
         zero_point : torch.Tensor
@@ -286,9 +299,9 @@ class FixedPointPerTensorWeightQuantizer(nn.Module):
         is_exporting = torch.onnx.is_in_onnx_export()
         
         if not is_exporting and not self.search_done.item():
-            signed = self.detect_signed(weights)
+            signed = self.detect_signed(inputs)
             lsb, num_unique = find_optimal_lsb(
-                weights,
+                inputs,
                 self.bit_width,
                 signed,
                 self.rounding_mode,
@@ -306,12 +319,12 @@ class FixedPointPerTensorWeightQuantizer(nn.Module):
 
         # Brevitas compatibility tensors
         step = 2.0 ** lsb
-        scale = torch.tensor(step, dtype=weights.dtype, device=weights.device)
-        zero_point = torch.tensor(0.0, dtype=weights.dtype, device=weights.device)
+        scale = torch.tensor(step, dtype=inputs.dtype, device=inputs.device)
+        zero_point = torch.tensor(0.0, dtype=inputs.dtype, device=inputs.device)
 
         # Route through custom autograd.Function to trigger ONNX symbolic export
         return FixedPointQuantFn.apply(
-            weights, scale, zero_point, lsb, self.bit_width, signed, self.narrow_range, self.rounding_mode
+            inputs, scale, zero_point, lsb, self.bit_width, signed, self.narrow_range, self.rounding_mode
         )
 
 
@@ -346,9 +359,30 @@ class FixedPointPerTensorWeightQuant(Injector):
     bit_width = 4
     rounding_mode = RoundingMode.ROUND_TO_NEAREST_EVEN
     narrow_range = True
-    tensor_quant = FixedPointPerTensorWeightQuantizer
+    tensor_quant = FixedPointPerTensorQuantizer
     
     # For Brevitas compatibility, we need to ensure signed is a proper boolean value.
     # The actual signedness is determined by the tensor_quant module at runtime,
     # but the proxy requires a boolean attribute to initialize the IntQuantTensor.
     signed = True
+
+
+# ------ Brevitas Injector ------
+class FixedPointPerTensorActivationQuant(Injector):
+    """
+    Brevitas-compatible Injector for the fixed-point per-tensor activation
+    quantizer.
+
+    Usage::
+
+        from brevitas.nn import QuantReLU
+        act = QuantReLU(act_quant=FixedPointPerTensorActivationQuant)
+    """
+
+    quant_type = QuantType.INT
+    proxy_class = ActivationQuantProxyFromInjector
+    bit_width = 8
+    rounding_mode = RoundingMode.ROUND_TO_NEAREST_EVEN
+    narrow_range = True
+    tensor_quant = FixedPointPerTensorQuantizer
+    signed = False  # Activations are often unsigned, but detection handles it dynamically
