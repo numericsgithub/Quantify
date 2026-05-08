@@ -39,25 +39,12 @@ from models.yolov8PanOnly import YOLOv8nPANOnly
 import dill
 import quantizers as q
 from brevitas.export import export_onnx_qcdq
-from quantizers import FixedPointPerTensorWeightQuantizer
+from quantizers import FixedPointPerTensorQuantizer
 
 from contextlib import contextmanager
 import copy
 
 # Example usage python -m examples.train_custom_yolo --data /home/th/tmp/quanttests/cached_datasets/coco_yolo_fmt/coco.yaml --device cuda --batch 128 --epochs 1
-
-@contextmanager
-def fixed_point_export_mode(model):
-    targets = [m for m in model.modules()
-               if isinstance(m, FixedPointPerTensorWeightQuantizer)]
-    for m in targets:
-        m.export_mode = True
-    try:
-        yield
-    finally:
-        pass
-        for m in targets:
-            m.export_mode = False
 
 MAX_BATCHES = 5
 counter = {"n": 0}
@@ -138,10 +125,14 @@ class CustomYOLOv8nTrainer(DetectionTrainer):
         return True
 
     def final_eval(self):
-        # print("\nRunning final evaluation on the best model...")
-        # self.model.eval()
-        # self.validator(model=self.model)
-        pass
+        export_model = copy.deepcopy(self.model).float().cpu().eval()
+        self.metrics = self.validator(model=export_model)
+        self.metrics.pop("fitness", None)
+        self.run_callbacks("on_fit_epoch_end")
+    #     # print("\nRunning final evaluation on the best model...")
+    #     # self.model.eval()
+    #     # self.validator(model=self.model)
+    #     pass
 
 
     def get_model(self, cfg=None, weights=None, verbose=True):

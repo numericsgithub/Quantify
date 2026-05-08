@@ -356,7 +356,7 @@ class FixedPointPerTensorWeightQuant(Injector):
 
     quant_type = QuantType.INT
     proxy_class = WeightQuantProxyFromInjector
-    bit_width = 4
+    bit_width = 8
     rounding_mode = RoundingMode.ROUND_TO_NEAREST_EVEN
     narrow_range = True
     tensor_quant = FixedPointPerTensorQuantizer
