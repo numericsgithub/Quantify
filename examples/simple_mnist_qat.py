@@ -12,6 +12,7 @@ class SimpleMNISTNet(nn.Module):
     """
     A small CNN for MNIST using Fixed-Point quantization for both 
     weights and activations.
+    Architecture mirrors SimpleMNISTFloatNet to allow loading float checkpoints.
     """
     def __init__(self):
         super().__init__()
@@ -23,38 +24,40 @@ class SimpleMNISTNet(nn.Module):
         
         # Layer 1: Conv -> ReLU -> Pool
         self.conv1 = qnn.QuantConv2d(
-            1, 16, kernel_size=3, stride=2,
+            1, 16, kernel_size=3, stride=1,
             weight_quant=FixedPointPerTensorWeightQuant,
             output_quant=FixedPointPerTensorActivationQuant
         )
         self.relu1 = qnn.QuantReLU(
             act_quant=FixedPointPerTensorActivationQuant
         )
+        self.pool1 = nn.MaxPool2d(2)
 
         # Layer 2: Conv -> ReLU -> Pool
         self.conv2 = qnn.QuantConv2d(
-            16, 32, kernel_size=3,  stride=2,
+            16, 32, kernel_size=3, stride=1,
             weight_quant=FixedPointPerTensorWeightQuant,
             output_quant=FixedPointPerTensorActivationQuant
         )
         self.relu2 = qnn.QuantReLU(
             act_quant=FixedPointPerTensorActivationQuant
         )
+        self.pool2 = nn.MaxPool2d(2)
 
         self.flatten = nn.Flatten()
         
         # Final Linear Layer
-        # Input size: 32 channels * 5x5 spatial (after two 2x2 pools and two 3x3 convs)
+        # Input size: 32 channels * 5x5 spatial (after two 3x3 convs and two 2x2 pools)
         self.fc = qnn.QuantLinear(
-            32 * 6 * 6, 10,
+            32 * 5 * 5, 10,
             weight_quant=FixedPointPerTensorWeightQuant,
             output_quant=FixedPointPerTensorActivationQuant
         )
 
     def forward(self, x):
         x = self.input_quant(x)
-        x = self.relu1(self.conv1(x))
-        x = self.relu2(self.conv2(x))
+        x = self.pool1(self.relu1(self.conv1(x)))
+        x = self.pool2(self.relu2(self.conv2(x)))
         x = self.flatten(x)
         x = self.fc(x)
         return x
@@ -80,6 +83,16 @@ def train():
 
     # Model, Loss, Optimizer
     model = SimpleMNISTNet().to(device)
+    
+    # --- Load Floating-Point Checkpoint ---
+    checkpoint_path = "simple_mnist_float.pt"
+    try:
+        # strict=False is required because the float state_dict lacks Brevitas quantization parameters
+        model.load_state_dict(torch.load(checkpoint_path, map_location=device), strict=False)
+        print(f"Successfully loaded floating-point checkpoint from {checkpoint_path} for fine-tuning.")
+    except FileNotFoundError:
+        print(f"Checkpoint {checkpoint_path} not found. Training from scratch.")
+
     criterion = nn.CrossEntropyLoss()
     optimizer = optim.Adam(model.parameters(), lr=lr)
 
