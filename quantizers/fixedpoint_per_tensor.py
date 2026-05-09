@@ -289,17 +289,28 @@ class FixedPointPerTensorQuantizer(BaseQuantizer):
 
     def _quantize(self, x: torch.Tensor, params: Any) -> torch.Tensor:
         """Apply quantization using the provided parameters."""
-        quantized, _, _, _ = FixedPointQuantFn.apply(
+        # Use the custom Function only during ONNX export to emit the custom node.
+        # During training/inference, call the direct math function to avoid overhead.
+        if torch.onnx.is_in_onnx_export():
+            quantized, _, _, _ = FixedPointQuantFn.apply(
+                x,
+                torch.tensor(2.0 ** params['lsb'], dtype=x.dtype, device=x.device),
+                torch.tensor(0.0, dtype=x.dtype, device=x.device),
+                params['lsb'],
+                self.bit_width,
+                params['signed'],
+                self.narrow_range,
+                self.rounding_mode
+            )
+            return quantized
+        return quantize_fixed_point(
             x,
-            torch.tensor(2.0 ** params['lsb'], dtype=x.dtype, device=x.device),
-            torch.tensor(0.0, dtype=x.dtype, device=x.device),
-            params['lsb'],
+            int(params['lsb']),
             self.bit_width,
             params['signed'],
-            self.narrow_range,
-            self.rounding_mode
+            self.rounding_mode,
+            self.narrow_range
         )
-        return quantized
 
     def _get_metadata(self, params: Any, x: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         """Return scale, zero_point, and bit_width tensors matching x's dtype/device."""
