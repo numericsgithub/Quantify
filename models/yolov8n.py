@@ -56,6 +56,8 @@ import torch
 import torch.nn as nn
 import brevitas.nn as qnn
 
+from quantizers import SiLUTensorQuant
+
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -79,18 +81,16 @@ def scale_depth(n: int, depth: float = 0.33) -> int:
 # ---------------------------------------------------------------------------
 
 class Conv(nn.Module):
-    """Standard Conv + BN + SiLU. Supports Brevitas quantization."""
+    """Standard Conv + BN + Quantized SiLU. Supports Brevitas quantization."""
 
     def __init__(self, in_ch: int, out_ch: int, k: int = 1, s: int = 1, p: int = None,
                  weight_quant=None, act_quant=None):
         super().__init__()
         if p is None:
             p = k // 2  # 'same' padding for odd kernels
-        self.conv = qnn.QuantConv2d(in_ch, out_ch, k, s, p, bias=False, weight_quant=weight_quant, output_quant=act_quant) #,  , output_quant=act_quant
-        # self.conv = nn.Conv2d(in_ch, out_ch, k, s, p, bias=False) # The unquantized version
+        self.conv = qnn.QuantConv2d(in_ch, out_ch, k, s, p, bias=False, weight_quant=weight_quant)
         self.bn   = nn.BatchNorm2d(out_ch, eps=1e-3, momentum=0.03)
-        self.act  = nn.SiLU(inplace=True)
-        # TODO: Add SiLU quantizer later
+        self.act  = SiLUTensorQuant()
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         x = self.conv(x)
