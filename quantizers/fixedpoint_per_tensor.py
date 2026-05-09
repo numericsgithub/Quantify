@@ -233,6 +233,9 @@ class FixedPointPerTensorQuantizer(BaseQuantizer):
     ----------
     bit_width : int
         Number of bits for the quantized representation.
+    signed : bool
+        Whether to use signed two's-complement representation. Explicitly set
+        to match Brevitas proxy expectations and avoid QuantTensor validity errors.
     rounding_mode : RoundingMode
         ROUND_TO_NEAREST_EVEN (default) or FLOOR.
     narrow_range : bool
@@ -242,20 +245,23 @@ class FixedPointPerTensorQuantizer(BaseQuantizer):
     def __init__(
         self,
         bit_width: int = 8,
+        signed: bool = True,
         rounding_mode: RoundingMode = RoundingMode.ROUND_TO_NEAREST_EVEN,
         narrow_range: bool = True,
     ):
         super().__init__(bit_width=bit_width)
+        self.signed = signed
         self.rounding_mode = rounding_mode
         self.narrow_range = narrow_range
         
         # Register search results as buffers to ensure they are serialized in state_dict
-        self.register_buffer('search_result_is_signed', torch.tensor(True, dtype=torch.bool))
+        self.register_buffer('search_result_is_signed', torch.tensor(signed, dtype=torch.bool))
         self.register_buffer('search_result_lsb', torch.tensor(0, dtype=torch.long))
 
     def _calibrate(self, x: torch.Tensor) -> Any:
         """Run calibration/search logic and return a params dict."""
-        signed = self.detect_signed(x)
+        # Use explicit signed setting from injector/constructor to align with Brevitas proxy
+        signed = self.signed
         lsb, num_unique = find_optimal_lsb(
             x,
             self.bit_width,
@@ -303,7 +309,7 @@ class FixedPointPerTensorQuantizer(BaseQuantizer):
         return scale, zero_point, bit_width
 
     def detect_signed(self, inputs: torch.Tensor) -> bool:
-        """Return True if any input is negative."""
+        """Return True if any input is negative. (Kept for backward compatibility / manual checks)"""
         return bool((inputs < 0).any().item())
 
 
@@ -335,8 +341,8 @@ class FixedPointPerTensorWeightQuant(BaseWeightQuant):
 
     rounding_mode = RoundingMode.ROUND_TO_NEAREST_EVEN
     narrow_range = True
+    signed = True  # Explicitly declared to match proxy expectation and avoid QuantTensor validity errors
     tensor_quant = FixedPointPerTensorQuantizer
-    # signed inherited from BaseWeightQuant (True)
 
 
 # ------ Brevitas Injector ------
@@ -351,5 +357,5 @@ class FixedPointPerTensorActivationQuant(BaseActivationQuant):
 
     rounding_mode = RoundingMode.ROUND_TO_NEAREST_EVEN
     narrow_range = True
+    signed = False  # Explicitly declared to match proxy expectation
     tensor_quant = FixedPointPerTensorQuantizer
-    # signed inherited from BaseActivationQuant (False)
