@@ -8,7 +8,7 @@ class QuantizerManager:
         # Global flag to force all quantizers to re-run their search/calibration
         self.force_recalibration = False
         self.quantization_is_enabled_globally = True
-        self.quantization_start_gap = 10
+        self.quantization_start_gap = 0
         # Registry to keep track of all active quantizer instances {id: quantizer}
         self.quantizers = {}
         # Counter to generate unique identifiers
