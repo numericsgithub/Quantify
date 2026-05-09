@@ -36,6 +36,9 @@ from models.yolov8n import (
     make_divisible, scale_channels, scale_depth,
 )
 
+# Import the custom quantized SiLU activation injector
+from quantizers import QuantSiLUActivationQuant
+
 
 class YOLOv8nPANOnly(nn.Module):
     """
@@ -50,7 +53,7 @@ class YOLOv8nPANOnly(nn.Module):
     Head detects from [P3, P4_out, P5_out] at strides [8, 16, 32].
     """
 
-    def __init__(self, nc: int = 80, weight_quant=None, act_quant=None, weight_bit_width: int = 8, act_bit_width: int = 8):
+    def __init__(self, nc: int = 80, weight_quant=None, act_quant=QuantSiLUActivationQuant, weight_bit_width: int = 8, act_bit_width: int = 8):
         super().__init__()
         C1, C2, C3, C4, C5 = 16, 32, 64, 128, 256
         self.register_buffer('stride', torch.tensor([8., 16., 32.]))
