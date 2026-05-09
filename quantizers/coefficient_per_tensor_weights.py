@@ -17,30 +17,21 @@ Example:
 
 import torch
 import torch.nn as nn
-from typing import Tuple
+from typing import Tuple, Any
 
 from quantizers.base_injector import BaseWeightQuant
-from quantizers.manager import quantizer_manager
+from quantizers.base_quantizer import BaseQuantizer
 
 
-class CoefficientPerTensorWeightQuantizer(nn.Module):
+class CoefficientPerTensorWeightQuantizer(BaseQuantizer):
     """
     A self-contained coefficient-based per-tensor weight quantizer.
-
-    Usage::
-        quantizer = CoefficientPerTensorWeightQuantizer(filepath="coeffs.txt")
-        q_weights, scale, zero_point, bw = quantizer(linear.weight)
-
-    Parameters
-    ----------
-    filepath : str
-        Path to the text file containing the coefficient sets.
+    Inherits infrastructure from BaseQuantizer (gating, calibration state, ONNX guards).
     """
 
-    def __init__(self, filepath: str):
-        super().__init__()
+    def __init__(self, filepath: str, bit_width: int = 8):
+        super().__init__(bit_width=bit_width)
         self.filepath = filepath
-        self.inference_counter = 0
         
         # Read coefficient sets from the text file during initialization
         self.coefficient_sets = []
@@ -48,129 +39,77 @@ class CoefficientPerTensorWeightQuantizer(nn.Module):
             for line in f:
                 line = line.strip()
                 if line:
-                    # Convert space-separated values in each line to a float tensor
                     coeffs = torch.tensor([float(x) for x in line.split()], dtype=torch.float32)
                     self.coefficient_sets.append(coeffs)
 
         if not self.coefficient_sets:
             raise ValueError(f"No valid coefficient sets found in file: {filepath}")
 
-        # Register search results as buffers to ensure they are serialized in state_dict
-        self.register_buffer('search_done', torch.tensor(False, dtype=torch.bool))
+        # Register search results as buffers (handled by base class for state-dict)
         self.register_buffer('best_set_idx', torch.tensor(0, dtype=torch.long))
         self.register_buffer('best_n', torch.tensor(0, dtype=torch.long))
 
-        # Register this instance with the shared manager
-        quantizer_manager.register_quantizer(self)
+    def _calibrate(self, x: torch.Tensor) -> Any:
+        """Run calibration/search logic and return a params dict."""
+        device = x.device
+        best_sad = float("inf")
+        best_set_idx = 0
+        best_n = 0
 
-    def forward(
-        self, weights: torch.Tensor
-    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
-        """
-        Quantize weights by finding the best coefficient set and scaling factor.
-
-        Returns
-        -------
-        quantized : torch.Tensor
-            Weights snapped to the best scaled coefficient grid.
-        scale : torch.Tensor
-            The chosen scaling factor 2^n.
-        zero_point : torch.Tensor
-            Always 0.0.
-        bit_width : torch.Tensor
-            The number of coefficients in the chosen set.
-        """
-        device = weights.device
-        dtype = weights.dtype
-
-        if self.inference_sequence_id == -1:
-            self.inference_sequence_id = quantizer_manager.get_inference_sequence_id()
-
-        perform_quantization = True
-
-        if not quantizer_manager.quantization_is_enabled_globally:
-            perform_quantization = False
-        elif self.inference_counter < self.inference_sequence_id * quantizer_manager.quantization_start_gap:
-            self.inference_counter += 1
-            perform_quantization = False
-
-        if not perform_quantization:
-            return weights, torch.tensor(float(1), dtype=weights.dtype, device=weights.device), torch.tensor(float(0), dtype=weights.dtype, device=weights.device), torch.tensor(float(9), device=device)
-
-        # Check if we need to search (either first time or global recalibration triggered)
-        should_search = not self.search_done.item() or quantizer_manager.force_recalibration
-
-        if should_search:
-            print("NOW CALIBRATING", self.inference_sequence_id)
-            best_sad = float("inf")
-            best_set_idx = 0
-            best_n = 0
-
-            # Search through all coefficient sets and scalings 2^n for n in [-12, 12]
-            for idx, coeffs in enumerate(self.coefficient_sets):
-                # Move coeffs to device for computation
-                coeffs_dev = coeffs.to(device)
+        for idx, coeffs in enumerate(self.coefficient_sets):
+            coeffs_dev = coeffs.to(device)
+            for n in range(-12, 13):
+                s = 2.0 ** n
+                scaled_coeffs = coeffs_dev * s
+                diffs = torch.abs(x.unsqueeze(-1) - scaled_coeffs)
+                min_indices = torch.argmin(diffs, dim=-1)
+                quantized_temp = scaled_coeffs[min_indices]
+                sad = torch.sum(torch.abs(x - quantized_temp)).item()
                 
-                for n in range(-12, 13):
-                    s = 2.0 ** n
-                    scaled_coeffs = coeffs_dev * s
-                    
-                    # Find nearest coefficient for each weight
-                    # weights: (W,), scaled_coeffs: (C,) -> diffs: (W, C)
-                    diffs = torch.abs(weights.unsqueeze(-1) - scaled_coeffs)
-                    min_indices = torch.argmin(diffs, dim=-1)
-                    quantized_temp = scaled_coeffs[min_indices]
-                    
-                    # Calculate Sum of Absolute Differences (SAD)
-                    sad = torch.sum(torch.abs(weights - quantized_temp)).item()
-                    
-                    if sad < best_sad:
-                        best_sad = sad
-                        best_set_idx = idx
-                        best_n = n
+                if sad < best_sad:
+                    best_sad = sad
+                    best_set_idx = idx
+                    best_n = n
 
-            self.best_set_idx.fill_(best_set_idx)
-            self.best_n.fill_(best_n)
-            self.search_done.fill_(True)
-        else:
-            best_set_idx = self.best_set_idx.item()
-            best_n = self.best_n.item()
+        return {'set_idx': best_set_idx, 'n': best_n}
 
-        # Apply the optimal quantization
-        chosen_coeffs = self.coefficient_sets[best_set_idx].to(device)
-        s = 2.0 ** best_n
+    def _save_calibration(self, params: Any) -> None:
+        """Save calibration results to buffers."""
+        self.best_set_idx.fill_(params['set_idx'])
+        self.best_n.fill_(params['n'])
+        self.search_done.fill_(True)
+
+    def _load_calibration(self) -> Any:
+        """Load calibration results from buffers."""
+        return {
+            'set_idx': self.best_set_idx.item(),
+            'n': self.best_n.item()
+        }
+
+    def _quantize(self, x: torch.Tensor, params: Any) -> torch.Tensor:
+        """Apply quantization using the provided parameters."""
+        chosen_coeffs = self.coefficient_sets[params['set_idx']].to(x.device)
+        s = 2.0 ** params['n']
         scaled_coeffs = chosen_coeffs * s
         
-        diffs = torch.abs(weights.unsqueeze(-1) - scaled_coeffs)
+        diffs = torch.abs(x.unsqueeze(-1) - scaled_coeffs)
         min_indices = torch.argmin(diffs, dim=-1)
         quantized = scaled_coeffs[min_indices]
+        return quantized
 
-        scale = torch.tensor(s, dtype=dtype, device=device)
-        zero_point = torch.tensor(0.0, dtype=dtype, device=device)
-        bw = torch.tensor(float(len(chosen_coeffs)), device=device)
-
-        return quantized, scale, zero_point, bw
+    def _get_metadata(self, params: Any, x: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        """Return scale, zero_point, and bit_width tensors matching x's dtype/device."""
+        scale = torch.tensor(2.0 ** params['n'], dtype=x.dtype, device=x.device)
+        zero_point = torch.tensor(0.0, dtype=x.dtype, device=x.device)
+        # Bit width is passed via constructor, not derived from coefficient count
+        bit_width = torch.tensor(float(self.bit_width), dtype=x.dtype, device=x.device)
+        return scale, zero_point, bit_width
 
 
 class CoefficientPerTensorWeightQuant(BaseWeightQuant):
     """
-    Brevitas-compatible Injector for the coefficient-based per-tensor weight
-    quantizer.
-
-    Usage::
-        from brevitas.nn import QuantLinear
-        layer = QuantLinear(
-            in_features=64,
-            out_features=32,
-            bias=True,
-            weight_quant=CoefficientPerTensorWeightQuant,
-        )
-
-    Override class attributes to customise::
-        class MyCoeffQuant(CoefficientPerTensorWeightQuant):
-            filepath = "my_custom_coeffs.txt"
+    Brevitas-compatible Injector for the coefficient-based per-tensor weight quantizer.
     """
-
     tensor_quant = CoefficientPerTensorWeightQuantizer
     filepath = "coefficients.txt"
     # signed inherited from BaseWeightQuant (True)
