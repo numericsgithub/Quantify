@@ -9,6 +9,9 @@ Covers:
     - Brevitas integration via QuantLinear
     - Edge cases (all zeros, single value, already on grid)
     - ONNX export with custom nodes
+    - State-dict roundtrips
+    - ONNX export guards
+    - Coefficient quantizer integration
 """
 
 import math
@@ -645,6 +648,94 @@ class TestONNXExportIntegration(unittest.TestCase):
             import os
             if os.path.exists(onnx_path):
                 os.remove(onnx_path)
+
+
+# =========================================================================
+# 16. State-Dict Roundtrip
+# =========================================================================
+
+
+class TestStateDictRoundtrip(unittest.TestCase):
+    def test_fixedpoint_roundtrip(self):
+        quantizer = FixedPointPerTensorQuantizer(bit_width=8)
+        weights = torch.randn(32, 64)
+        _ = quantizer(weights)
+        
+        sd = quantizer.state_dict()
+        new_quantizer = FixedPointPerTensorQuantizer(bit_width=8)
+        new_quantizer.load_state_dict(sd)
+        
+        q1, s1, _, _ = quantizer(weights)
+        q2, s2, _, _ = new_quantizer(weights)
+        
+        self.assertTrue(torch.allclose(q1, q2))
+        self.assertTrue(torch.allclose(s1, s2))
+
+    def test_coefficient_roundtrip(self):
+        from quantizers.coefficient_per_tensor_weights import CoefficientPerTensorWeightQuantizer
+        with tempfile.NamedTemporaryFile(mode='w', suffix='.txt', delete=False) as f:
+            f.write("-1.0 0.0 1.0\n")
+            f.write("-0.5 0.0 0.5\n")
+            coeff_file = f.name
+            
+        quantizer = CoefficientPerTensorWeightQuantizer(filepath=coeff_file)
+        weights = torch.randn(32, 64)
+        _ = quantizer(weights)
+        
+        sd = quantizer.state_dict()
+        new_quantizer = CoefficientPerTensorWeightQuantizer(filepath=coeff_file)
+        new_quantizer.load_state_dict(sd)
+        
+        q1, s1, _, _ = quantizer(weights)
+        q2, s2, _, _ = new_quantizer(weights)
+        
+        self.assertTrue(torch.allclose(q1, q2))
+        self.assertTrue(torch.allclose(s1, s2))
+        
+        import os
+        os.unlink(coeff_file)
+
+
+# =========================================================================
+# 17. ONNX Export Guards
+# =========================================================================
+
+
+class TestONNXExportGuards(unittest.TestCase):
+    def test_calibration_skipped_during_export(self):
+        quantizer = FixedPointPerTensorQuantizer(bit_width=8)
+        weights = torch.randn(32, 64)
+        
+        # First pass to calibrate
+        _ = quantizer(weights)
+        initial_lsb = quantizer.search_result_lsb.item()
+        
+        # Export should not trigger calibration or change buffers
+        class DummyModel(nn.Module):
+            def __init__(self, quantizer):
+                super().__init__()
+                self.quantizer = quantizer
+            def forward(self, x):
+                return self.quantizer(x)
+        
+        model = DummyModel(quantizer)
+        model.eval()
+        
+        with tempfile.NamedTemporaryFile(suffix=".onnx", delete=False) as f:
+            onnx_path = f.name
+        
+        dummy_input = torch.randn(2, 32, 64)
+        torch.onnx.export(
+            model, dummy_input, onnx_path,
+            opset_version=14, dynamo=False
+        )
+        
+        # Buffers should remain unchanged
+        self.assertEqual(quantizer.search_result_lsb.item(), initial_lsb)
+        
+        import os
+        if os.path.exists(onnx_path):
+            os.remove(onnx_path)
 
 
 if __name__ == "__main__":
