@@ -37,7 +37,10 @@ class BaseQuantizer(nn.Module, ABC):
         self.quantization_start_gap = quantization_start_gap
         self.quantization_is_enabled_globally = quantization_is_enabled_globally
         self.inference_counter = 0
-        
+
+        self.annealing_alpha = 1.0
+        self.annealing_alpha_step = 0.1
+
         # Calibration state buffers
         self.register_buffer('search_done', torch.tensor(False, dtype=torch.bool))
         
@@ -73,7 +76,14 @@ class BaseQuantizer(nn.Module, ABC):
         # 3. Quantize & format output
         quantized = self._quantize(x, params)
         scale, zero_point, bit_width = self._get_metadata(params, x)
-        return quantized, scale, zero_point, bit_width
+
+        if self.annealing_alpha <= 1.0:
+            result = (1 - self.annealing_alpha) * x + self.annealing_alpha * quantized
+            self.annealing_alpha = min(self.annealing_alpha + self.annealing_alpha_step, 1.0)
+        else:
+            result = quantized
+
+        return result, scale, zero_point, bit_width
 
     # Abstract methods for subclasses
     @abstractmethod

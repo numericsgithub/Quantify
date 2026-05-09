@@ -19,6 +19,12 @@ class QuantizerManager:
         for quant in self.quantizers.values():
             quant.inference_counter = -n
 
+    def set_anneling_for_n_inferences(self, n):
+        alpha_step = 1.0/n
+        for quant in self.quantizers.values():
+            quant.annealing_alpha = 0
+            quant.annealing_alpha_step = alpha_step
+
     def register_quantizer(self, quantizer):
         """
         Registers a quantizer instance with the manager and assigns it a unique ID.

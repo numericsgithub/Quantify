@@ -7,6 +7,8 @@ import brevitas.nn as qnn
 
 # Import the custom fixed-point quantizers
 from quantizers.fixedpoint_per_tensor import FixedPointPerTensorWeightQuant, FixedPointPerTensorActivationQuant
+from quantizers.coefficient_per_tensor_weights import CoefficientPerTensorWeightQuant
+from quantizers.manager import quantizer_manager
 
 class SimpleMNISTNet(nn.Module):
     """
@@ -25,7 +27,7 @@ class SimpleMNISTNet(nn.Module):
         # Layer 1: Conv -> ReLU -> Pool
         self.conv1 = qnn.QuantConv2d(
             1, 16, kernel_size=3, stride=1,
-            weight_quant=FixedPointPerTensorWeightQuant,
+            weight_quant=CoefficientPerTensorWeightQuant,
             output_quant=FixedPointPerTensorActivationQuant
         )
         self.relu1 = qnn.QuantReLU(
@@ -51,7 +53,7 @@ class SimpleMNISTNet(nn.Module):
         self.fc = qnn.QuantLinear(
             32 * 5 * 5, 10,
             weight_quant=FixedPointPerTensorWeightQuant,
-            output_quant=FixedPointPerTensorActivationQuant
+            # output_quant=FixedPointPerTensorActivationQuant
         )
 
     def forward(self, x):
@@ -64,9 +66,9 @@ class SimpleMNISTNet(nn.Module):
 
 def train():
     # Hyperparameters
-    batch_size = 64
-    epochs = 2
-    lr = 0.01
+    batch_size = 256
+    epochs = 5
+    lr = 0.001
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
     # Data Loading
@@ -83,7 +85,8 @@ def train():
 
     # Model, Loss, Optimizer
     model = SimpleMNISTNet().to(device)
-    
+
+
     # --- Load Floating-Point Checkpoint ---
     checkpoint_path = "simple_mnist_float.pt"
     try:
@@ -95,6 +98,9 @@ def train():
 
     criterion = nn.CrossEntropyLoss()
     optimizer = optim.Adam(model.parameters(), lr=lr)
+
+    quantizer_manager.quantization_start_gap = 10
+    quantizer_manager.set_anneling_for_n_inferences(3)
 
     print(f"Training on {device}...")
 
