@@ -24,21 +24,29 @@ from quantizers.base_quantizer import BaseQuantizer
 from torch.autograd import Function
 from torch.onnx import symbolic_helper
 
+def apply_non_uniform_quantization(weights, coefficients, bit_shift_scale):
+    scale = 2.0 ** bit_shift_scale
+    scaled_coeffs = coefficients * scale
+
+    diffs = torch.abs(weights.unsqueeze(-1) - scaled_coeffs)
+    min_indices = torch.argmin(diffs, dim=-1)
+    quantized = scaled_coeffs[min_indices]
+    return quantized, scale, min_indices
+
 
 class CoefficientQuantFn(Function):
     """Symbolic shim: emits a single `Quantify::CoefficientQuant` ONNX node."""
 
     @staticmethod
-    def symbolic(g, x, coefficients, bit_shift_scale, bit_width, signed):
+    def symbolic(g, x, coefficients, bit_shift_scale, bit_width): # TODO Also save the chosen_coefficients_indicis
         coeffs_val = symbolic_helper._maybe_get_const(coefficients, "t")
-        
+
         quantized = g.op(
             "Quantify::CoefficientQuant",
             x,
             coefficients_t=coeffs_val,
-            n_i=int(bit_shift_scale),
-            bit_width_i=int(bit_width),
-            signed_i=int(signed),
+            # TODO chosen_coefficients_indicis_t=...
+            bit_shift_scale_i=int(bit_shift_scale)
         ).setType(x.type())
         
         # Brevitas expects a 4-tuple output; create auxiliary constants
@@ -48,15 +56,11 @@ class CoefficientQuantFn(Function):
         return quantized, scale, zero_point, bw
 
     @staticmethod
-    def forward(ctx, x, coefficients, bit_shift_scale, bit_width, signed):
+    def forward(ctx, x, coefficients, bit_shift_scale, bit_width):
         ctx.save_for_backward(x)
-        s = 2.0 ** bit_shift_scale
-        scaled_coeffs = coefficients * s
-        diffs = torch.abs(x.unsqueeze(-1) - scaled_coeffs)
-        min_indices = torch.argmin(diffs, dim=-1)
-        quantized = scaled_coeffs[min_indices]
+        quantized, scale, _ = apply_non_uniform_quantization(x, coefficients, bit_shift_scale)
         bw = torch.tensor(float(bit_width), dtype=x.dtype, device=x.device)
-        return quantized, torch.tensor(s, dtype=x.dtype, device=x.device), torch.tensor(0.0, dtype=x.dtype, device=x.device), bw
+        return quantized, torch.tensor(scale, dtype=x.dtype, device=x.device), torch.tensor(0.0, dtype=x.dtype, device=x.device), bw
 
     @staticmethod
     def backward(ctx, grad_quantized, grad_scale, grad_zero_point, grad_bw):
@@ -100,11 +104,7 @@ class CoefficientPerTensorWeightQuantizer(BaseQuantizer):
         for idx, coeffs in enumerate(self.coefficient_sets):
             coeffs_dev = coeffs.to(device)
             for bit_shift_scale in range(-12, 13):
-                s = 2.0 ** bit_shift_scale
-                scaled_coeffs = coeffs_dev * s
-                diffs = torch.abs(x.unsqueeze(-1) - scaled_coeffs)
-                min_indices = torch.argmin(diffs, dim=-1)
-                quantized_temp = scaled_coeffs[min_indices]
+                quantized_temp, scale, _ = apply_non_uniform_quantization(x, coeffs_dev, bit_shift_scale)
                 sad = torch.sum(torch.abs(x - quantized_temp)).item()
                 
                 if sad < best_sad:
@@ -131,22 +131,21 @@ class CoefficientPerTensorWeightQuantizer(BaseQuantizer):
         """Apply quantization using the provided parameters."""
         if torch.onnx.is_in_onnx_export():
             chosen_coeffs = self.coefficient_sets[params['set_idx']].to(x.device)
+            _, __, chosen_coefficients_indicis = apply_non_uniform_quantization(x, chosen_coeffs, params['bit_shift_scale'])
+            chosen_coefficients_indicis = chosen_coefficients_indicis.to(x.device).to(torch.float)
+
             quantized, _, _, _ = CoefficientQuantFn.apply(
                 x,
                 chosen_coeffs,
                 params['bit_shift_scale'],
                 len(self.coefficient_sets[params['set_idx']]),
-                1  # signed
+                # TODO Also save the chosen_coefficients_indicis into the ONNX Node
             )
             return quantized
             
         chosen_coeffs = self.coefficient_sets[params['set_idx']].to(x.device)
-        s = 2.0 ** params['bit_shift_scale']
-        scaled_coeffs = chosen_coeffs * s
-        
-        diffs = torch.abs(x.unsqueeze(-1) - scaled_coeffs)
-        min_indices = torch.argmin(diffs, dim=-1)
-        quantized = scaled_coeffs[min_indices]
+        bit_shift_scale = params['bit_shift_scale']
+        quantized, scale, _ = apply_non_uniform_quantization(x, chosen_coeffs, bit_shift_scale)
         return quantized
 
     def _get_metadata(self, params: Any, x: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
