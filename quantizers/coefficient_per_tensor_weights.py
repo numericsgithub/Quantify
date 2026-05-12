@@ -39,14 +39,15 @@ class CoefficientQuantFn(Function):
 
     @staticmethod
     def symbolic(g, x, coefficients, bit_shift_scale, bit_width, chosen_coefficients_indicis):
-        # Embed chosen_coefficients_indicis as a tensor attribute inside the custom node
-        indices_val = symbolic_helper._maybe_get_const(chosen_coefficients_indicis, "t")
-        
+        # chosen_coefficients_indicis varies per forward pass (depends on weights),
+        # so it MUST be passed as an ONNX input. ONNX attributes must be 
+        # compile-time constants; passing a dynamic tensor as an attribute 
+        # triggers `TypeError: t_(): incompatible function arguments`.
         quantized = g.op(
             "Quantify::CoefficientQuant",
             x,
             coefficients,
-            chosen_coefficients_indicis_t=indices_val,
+            chosen_coefficients_indicis,
             bit_shift_scale_i=int(bit_shift_scale)
         ).setType(x.type())
         
@@ -122,7 +123,7 @@ class CoefficientPerTensorWeightQuantizer(BaseQuantizer):
         self.best_bit_shift_scale.fill_(params['bit_shift_scale'])
         self.search_done.fill_(True)
 
-    def _load_calibration(self) -> Any:
+    def _load_calibration(self, params: Any) -> Any:
         """Load calibration results from buffers."""
         return {
             'set_idx': self.best_set_idx.item(),
