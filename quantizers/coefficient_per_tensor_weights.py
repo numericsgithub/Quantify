@@ -38,14 +38,15 @@ class CoefficientQuantFn(Function):
     """Symbolic shim: emits a single `Quantify::CoefficientQuant` ONNX node."""
 
     @staticmethod
-    def symbolic(g, x, coefficients, bit_shift_scale, bit_width): # TODO Also save the chosen_coefficients_indicis
+    def symbolic(g, x, coefficients, bit_shift_scale, bit_width, chosen_coefficients_indicis):
         coeffs_val = symbolic_helper._maybe_get_const(coefficients, "t")
+        indices_val = symbolic_helper._maybe_get_const(chosen_coefficients_indicis, "t")
 
         quantized = g.op(
             "Quantify::CoefficientQuant",
             x,
             coefficients_t=coeffs_val,
-            # TODO chosen_coefficients_indicis_t=...
+            chosen_coefficients_indicis_t=indices_val,
             bit_shift_scale_i=int(bit_shift_scale)
         ).setType(x.type())
         
@@ -56,14 +57,15 @@ class CoefficientQuantFn(Function):
         return quantized, scale, zero_point, bw
 
     @staticmethod
-    def forward(ctx, x, coefficients, bit_shift_scale, bit_width):
+    def forward(ctx, x, coefficients, bit_shift_scale, bit_width, chosen_coefficients_indicis):
         ctx.save_for_backward(x)
         quantized, scale, _ = apply_non_uniform_quantization(x, coefficients, bit_shift_scale)
         bw = torch.tensor(float(bit_width), dtype=x.dtype, device=x.device)
+        # Return exactly 4 tensors to satisfy Brevitas contract
         return quantized, torch.tensor(scale, dtype=x.dtype, device=x.device), torch.tensor(0.0, dtype=x.dtype, device=x.device), bw
 
     @staticmethod
-    def backward(ctx, grad_quantized, grad_scale, grad_zero_point, grad_bw):
+    def backward(ctx, grad_quantized, grad_scale, grad_zero_point, grad_bw, grad_indices):
         # Straight-Through Estimator: pass gradient through for the first input
         return grad_quantized, None, None, None, None
 
@@ -132,14 +134,16 @@ class CoefficientPerTensorWeightQuantizer(BaseQuantizer):
         if torch.onnx.is_in_onnx_export():
             chosen_coeffs = self.coefficient_sets[params['set_idx']].to(x.device)
             _, __, chosen_coefficients_indicis = apply_non_uniform_quantization(x, chosen_coeffs, params['bit_shift_scale'])
-            chosen_coefficients_indicis = chosen_coefficients_indicis.to(x.device).to(torch.float)
+            
+            # Indices are inherently integer; use torch.long for ONNX compatibility
+            chosen_coefficients_indicis = chosen_coefficients_indicis.to(x.device).to(torch.long)
 
             quantized, _, _, _ = CoefficientQuantFn.apply(
                 x,
                 chosen_coeffs,
                 params['bit_shift_scale'],
                 len(self.coefficient_sets[params['set_idx']]),
-                # TODO Also save the chosen_coefficients_indicis into the ONNX Node
+                chosen_coefficients_indicis,
             )
             return quantized
             
