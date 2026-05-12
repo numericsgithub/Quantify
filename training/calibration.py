@@ -35,6 +35,7 @@ def run_calibration(
     device: str = "cpu",
     forward_fn: Optional[Callable] = None,
     verbose: bool = True,
+    reset_calibration: bool = True,
 ) -> None:
     """
     Run a calibration pass over `n_batches` batches of data.
@@ -54,9 +55,18 @@ def run_calibration(
                     `forward_fn(model, inputs) -> outputs`.
                     Defaults to `model(inputs)`.
         verbose:    Print progress.
+        reset_calibration: If True, resets lazy calibration buffers (e.g., `search_done`)
+                           before starting the calibration pass to ensure fresh statistics.
     """
     if verbose:
         print(f"[calibration] Starting calibration over {n_batches} batches …")
+
+    if reset_calibration:
+        print("[calibration] Resetting calibration buffers …")
+        for module in model.modules():
+            for name, buffer in module.named_buffers():
+                if "search_done" in name or "calibration_done" in name:
+                    buffer.fill_(False)
 
     original_training = model.training
     model.eval()

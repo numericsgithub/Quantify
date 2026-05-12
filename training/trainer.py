@@ -198,6 +198,11 @@ class Trainer:
         log_hardware_info(self.logger)
         self.logger.log_hparams(self.config.to_dict())
 
+        # Log quantization configuration for reproducibility
+        quant_config = self._extract_quant_config()
+        if quant_config:
+            self.logger.log_text("quant_config", str(quant_config))
+
         print(f"\n{'═'*60}")
         print(f"  Experiment : {self.config.experiment_name}")
         print(f"  Run ID     : {self.config.run_id}")
@@ -234,6 +239,7 @@ class Trainer:
                     n_batches   = self.config.quant_schedule.calibration_batches,
                     device      = str(self.device),
                     verbose     = True,
+                    reset_calibration=True,
                 )
                 self._calibrated = True
 
@@ -444,6 +450,35 @@ class Trainer:
         else:
             parts.append("  [QAT]")
         print("".join(parts))
+
+    # ------------------------------------------------------------------
+    # Quantization introspection
+    # ------------------------------------------------------------------
+
+    def _extract_quant_config(self) -> dict:
+        """
+        Walk the model and extract quantizer classes, bit-widths, and current scales.
+        Useful for logging full quantization configuration alongside hyperparameters.
+        """
+        config = {}
+        for name, module in self.model.named_modules():
+            for attr in ("weight_quant", "input_quant", "output_quant", "act_quant"):
+                proxy = getattr(module, attr, None)
+                if proxy is None:
+                    continue
+                info = {"class": type(proxy).__name__}
+                if hasattr(proxy, "bit_width"):
+                    info["bit_width"] = proxy.bit_width
+                if hasattr(proxy, "signed"):
+                    info["signed"] = proxy.signed
+                try:
+                    scale = proxy.scale()
+                    if scale is not None:
+                        info["scale"] = float(scale.abs().mean().item())
+                except Exception:
+                    pass
+                config[f"{name}.{attr}"] = info
+        return config
 
 
 # ---------------------------------------------------------------------------
