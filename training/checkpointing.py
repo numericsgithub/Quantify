@@ -3,7 +3,8 @@ checkpointing.py — Checkpoint management for the training harness.
 
 Handles saving/loading model state, optimizer state, scheduler state,
 and training metadata. Maintains a top-K ranking so only the best
-checkpoints are kept on disk.
+checkpoints are kept on disk. Automatically exports to ONNX alongside
+each saved checkpoint.
 """
 
 from __future__ import annotations
@@ -20,7 +21,7 @@ import torch.nn as nn
 
 # ---------------------------------------------------------------------------
 # Data structures
-# ---------------------------------------------------------------------------
+# -----------------------------------------------------------------------------------
 
 @dataclass
 class CheckpointRecord:
@@ -35,7 +36,7 @@ class CheckpointRecord:
 
 # ---------------------------------------------------------------------------
 # Checkpoint payload helpers
-# ---------------------------------------------------------------------------
+# -----------------------------------------------------------------------------------
 
 def _build_payload(
     epoch: int,
@@ -63,7 +64,7 @@ def _build_payload(
 
 # ---------------------------------------------------------------------------
 # CheckpointManager
-# ---------------------------------------------------------------------------
+# -----------------------------------------------------------------------------------
 
 class CheckpointManager:
     """
@@ -73,6 +74,7 @@ class CheckpointManager:
     - Saves model, optimizer, scheduler, and metadata.
     - Keeps only the top-K checkpoints ranked by a monitored metric.
     - Optionally keeps a 'last.pt' checkpoint separate from the top-K.
+    - Automatically exports the model to ONNX alongside each saved checkpoint.
     - Provides a simple resume() method to restore a full training state.
 
     Usage::
@@ -139,6 +141,7 @@ class CheckpointManager:
         metrics_dict: Optional[Dict[str, Any]] = None,
         config_dict: Optional[dict] = None,
         extra: Optional[dict] = None,
+        dummy_input: Optional[torch.Tensor] = None,
     ) -> Optional[str]:
         """
         Evaluate whether this epoch should be checkpointed and save if so.
@@ -152,6 +155,8 @@ class CheckpointManager:
             metrics_dict:  Full metrics snapshot (stored as metadata).
             config_dict:   TrainerConfig as a plain dict (stored for reference).
             extra:         Any extra data to bundle into the checkpoint.
+            dummy_input:   Optional tensor for ONNX export. If None, a random
+                           tensor of shape (1, 3, 32, 32) is generated.
 
         Returns:
             Path to the saved checkpoint file, or None if not saved.
@@ -165,6 +170,7 @@ class CheckpointManager:
                 epoch, model, optimizer, scheduler, metrics_dict or {}, config_dict, extra
             )
             torch.save(payload, last_path)
+            self._export_onnx(model, last_path.replace('.pt', '.onnx'), dummy_input)
 
         # Save every-N if configured
         if self.save_every_n_epochs and (epoch + 1) % self.save_every_n_epochs == 0:
@@ -176,6 +182,7 @@ class CheckpointManager:
                 epoch, model, optimizer, scheduler, metrics_dict or {}, config_dict, extra
             )
             torch.save(payload, periodic_path)
+            self._export_onnx(model, periodic_path.replace('.pt', '.onnx'), dummy_input)
 
         # Top-K logic
         if self._should_save(metric_value):
@@ -185,6 +192,7 @@ class CheckpointManager:
                 epoch, model, optimizer, scheduler, metrics_dict or {}, config_dict, extra
             )
             torch.save(payload, path)
+            self._export_onnx(model, path.replace('.pt', '.onnx'), dummy_input)
 
             record = CheckpointRecord(epoch=epoch, metric_value=metric_value, path=path)
             self._add_record(record)
@@ -325,3 +333,27 @@ class CheckpointManager:
             for r in data.get("records", [])
             if os.path.exists(r["path"])  # Skip missing files
         ]
+
+    def _export_onnx(self, model: nn.Module, onnx_path: str, dummy_input: Optional[torch.Tensor]) -> None:
+        """Export model to ONNX format alongside the checkpoint."""
+        if dummy_input is None:
+            # Fallback to a simple random tensor if no dummy input is provided.
+            # Users can override this by passing a custom dummy_input to save().
+            dummy_input = torch.randn(1, 3, 32, 32)
+        
+        try:
+            model.eval()
+            with torch.no_grad():
+                torch.onnx.export(
+                    model,
+                    dummy_input,
+                    onnx_path,
+                    opset_version=13,
+                    input_names=["input"],
+                    output_names=["output"],
+                    dynamo=False,  # Required for custom Brevitas ops
+                    verbose=False,
+                )
+            print(f"  [ckpt] Exported ONNX → {os.path.basename(onnx_path)}")
+        except Exception as e:
+            print(f"  [ckpt] ONNX export skipped: {e}")
