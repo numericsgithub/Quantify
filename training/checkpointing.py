@@ -76,6 +76,7 @@ class CheckpointManager:
     - Optionally keeps a 'last.pt' checkpoint separate from the top-K.
     - Automatically exports the model to ONNX alongside each saved checkpoint.
     - Provides a simple resume() method to restore a full training state.
+    - Gracefully handles Brevitas scale/buffer mismatches during load.
 
     Usage::
 
@@ -224,16 +225,19 @@ class CheckpointManager:
         scheduler=None,
         path: Optional[str] = None,
         device: str = "cpu",
+        reset_calibration: bool = True,
     ) -> int:
         """
         Load a checkpoint and restore training state.
 
         Args:
-            model:     Model to restore weights into.
-            optimizer: Optimizer to restore state into (optional).
-            scheduler: Scheduler to restore state into (optional).
-            path:      Explicit checkpoint path. If None, uses last.pt.
-            device:    Device string for torch.load map_location.
+            model:             Model to restore weights into.
+            optimizer:         Optimizer to restore state into (optional).
+            scheduler:         Scheduler to restore state into (optional).
+            path:              Explicit checkpoint path. If None, uses last.pt.
+            device:            Device string for torch.load map_location.
+            reset_calibration: If True, resets lazy calibration buffers (e.g., `search_done`)
+                               so quantizers will re-calibrate on the next forward pass.
 
         Returns:
             The epoch at which the checkpoint was saved (resume from here + 1).
@@ -249,13 +253,24 @@ class CheckpointManager:
         print(f"[ckpt] Resuming from {path}")
         payload = torch.load(path, map_location=device)
 
-        model.load_state_dict(payload["model_state_dict"])
+        # Use strict=False to handle Brevitas scale/buffer mismatches gracefully
+        try:
+            incompatible = model.load_state_dict(payload["model_state_dict"], strict=False)
+            if incompatible.missing_keys:
+                print(f"[ckpt] Missing keys (expected for Brevitas scales/buffers): {incompatible.missing_keys}")
+            if incompatible.unexpected_keys:
+                print(f"[ckpt] Unexpected keys: {incompatible.unexpected_keys}")
+        except Exception as e:
+            print(f"[ckpt] Warning during state_dict load: {e}")
 
         if optimizer is not None and "optimizer_state_dict" in payload:
             optimizer.load_state_dict(payload["optimizer_state_dict"])
 
         if scheduler is not None and "scheduler_state_dict" in payload:
             scheduler.load_state_dict(payload["scheduler_state_dict"])
+
+        if reset_calibration:
+            self._reset_calibration_buffers(model)
 
         epoch = payload.get("epoch", 0)
         metrics = payload.get("metrics", {})
@@ -266,9 +281,15 @@ class CheckpointManager:
         self,
         model: nn.Module,
         device: str = "cpu",
+        reset_calibration: bool = True,
     ) -> Optional[dict]:
         """
         Load the best checkpoint's weights into the model.
+
+        Args:
+            model:             Model to load weights into.
+            device:            Device string for torch.load map_location.
+            reset_calibration: If True, resets lazy calibration buffers.
 
         Returns:
             The full payload dict, or None if no checkpoint exists.
@@ -279,7 +300,18 @@ class CheckpointManager:
             return None
 
         payload = torch.load(path, map_location=device)
-        model.load_state_dict(payload["model_state_dict"])
+        try:
+            incompatible = model.load_state_dict(payload["model_state_dict"], strict=False)
+            if incompatible.missing_keys:
+                print(f"[ckpt] Missing keys (expected for Brevitas scales/buffers): {incompatible.missing_keys}")
+            if incompatible.unexpected_keys:
+                print(f"[ckpt] Unexpected keys: {incompatible.unexpected_keys}")
+        except Exception as e:
+            print(f"[ckpt] Warning during state_dict load: {e}")
+
+        if reset_calibration:
+            self._reset_calibration_buffers(model)
+
         print(f"[ckpt] Loaded best checkpoint from epoch {payload.get('epoch', '?')}")
         return payload
 
@@ -333,6 +365,17 @@ class CheckpointManager:
             for r in data.get("records", [])
             if os.path.exists(r["path"])  # Skip missing files
         ]
+
+    def _reset_calibration_buffers(self, model: nn.Module) -> None:
+        """Reset lazy calibration flags (e.g., `search_done`) in Brevitas quantizers."""
+        reset_count = 0
+        for module in model.modules():
+            for name, buffer in module.named_buffers():
+                if "search_done" in name or "calibration_done" in name:
+                    buffer.fill_(False)
+                    reset_count += 1
+        if reset_count > 0:
+            print(f"  [ckpt] Reset {reset_count} calibration buffer(s) to force re-calibration.")
 
     def _export_onnx(self, model: nn.Module, onnx_path: str, dummy_input: Optional[torch.Tensor]) -> None:
         """Export model to ONNX format alongside the checkpoint."""
