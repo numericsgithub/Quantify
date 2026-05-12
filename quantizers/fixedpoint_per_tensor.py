@@ -46,7 +46,7 @@ def quantize_fixed_point(
     bit_width: int,
     signed: bool,
     rounding_mode: "RoundingMode",
-    narrow_range: bool = True,
+    narrow_range: bool = False,
 ) -> torch.Tensor:
     """
     Quantize a input tensor to a fixed-point grid.
@@ -65,7 +65,7 @@ def quantize_fixed_point(
         ROUND_TO_NEAREST_EVEN or FLOOR.
     narrow_range : bool
         If True and signed, exclude the most negative value (e.g. -4.0 for 4-bit)
-        to make the range symmetric.  Default True.
+        to make the range symmetric.  Default False.
 
     Returns
     -------
@@ -101,7 +101,7 @@ def find_optimal_lsb(
     bit_width: int,
     signed: bool,
     rounding_mode: "RoundingMode",
-    narrow_range: bool = True,
+    narrow_range: bool = False,
 ) -> Tuple[int, int]:
     """
     Search over LSB positions to find the one that maximises the number of
@@ -239,7 +239,7 @@ class FixedPointPerTensorQuantizer(BaseQuantizer):
     rounding_mode : RoundingMode
         ROUND_TO_NEAREST_EVEN (default) or FLOOR.
     narrow_range : bool
-        Exclude most-negative code in signed mode (default True).
+        Exclude most-negative code in signed mode (default False).
     """
 
     def __init__(
@@ -247,7 +247,7 @@ class FixedPointPerTensorQuantizer(BaseQuantizer):
         bit_width: int = 8,
         signed: bool = True,
         rounding_mode: RoundingMode = RoundingMode.ROUND_TO_NEAREST_EVEN,
-        narrow_range: bool = True,
+        narrow_range: bool = False,
     ):
         super().__init__(bit_width=bit_width)
         self.signed = signed
@@ -355,7 +355,7 @@ class FixedPointPerTensorWeightQuant(BaseWeightQuant):
     """
 
     rounding_mode = RoundingMode.ROUND_TO_NEAREST_EVEN
-    narrow_range = True
+    narrow_range = False
     signed = True  # Explicitly declared to match proxy expectation and avoid QuantTensor validity errors
     tensor_quant = FixedPointPerTensorQuantizer
 
@@ -371,6 +371,6 @@ class FixedPointPerTensorActivationQuant(BaseActivationQuant):
     """
 
     rounding_mode = RoundingMode.ROUND_TO_NEAREST_EVEN
-    narrow_range = True
+    narrow_range = False
     signed = False  # Explicitly declared to match proxy expectation
     tensor_quant = FixedPointPerTensorQuantizer
