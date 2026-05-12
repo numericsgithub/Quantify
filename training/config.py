@@ -185,10 +185,13 @@ class TrainerConfig:
     'mps'   → Apple Silicon GPU.
     """
 
-    mixed_precision: bool = True
+    mixed_precision: bool = False
     """
     Enable torch.autocast + GradScaler for AMP training.
     Automatically disabled on CPU.
+    
+    Note: Defaults to False for Brevitas QAT compatibility. 
+    Mixed precision can interfere with fake-quantization ops and scale learning.
     """
 
     num_workers: int = 4

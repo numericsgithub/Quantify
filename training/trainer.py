@@ -8,6 +8,7 @@ metric tracking, QAT schedule, calibration, and plotting.
 from __future__ import annotations
 
 import time
+import warnings
 from typing import Callable, Dict, List, Optional
 
 import torch
@@ -99,6 +100,15 @@ class Trainer:
 
         # Resolve device
         self.device = torch.device(config.resolve_device())
+
+        # Warn about AMP compatibility with Brevitas
+        if config.mixed_precision:
+            warnings.warn(
+                "Mixed precision (AMP) is enabled. "
+                "Brevitas fake-quantization ops may interact poorly with autocast, "
+                "potentially causing unstable scale learning. Consider setting mixed_precision=False.",
+                UserWarning,
+            )
 
         # ── Components ────────────────────────────────────────────────
         import time as _time
