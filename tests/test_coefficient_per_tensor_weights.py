@@ -25,12 +25,12 @@ class TestCoefficientQuantizer(unittest.TestCase):
     def test_optimal_search_simple(self):
         """Test search for the best set and scale when weights clearly fit a specific set."""
         quantizer = CoefficientPerTensorWeightQuantizer(self.coeff_file)
-        # Weights clearly fitting set 0 with scale 1.0 (n=0)
+        # Weights clearly fitting set 0 with scale 1.0 (bit_shift_scale=0)
         weights = torch.tensor([-1.1, 0.1, 0.9])
         q, scale, zp, bw = quantizer(weights)
         
         self.assertEqual(quantizer.best_set_idx.item(), 0)
-        self.assertEqual(quantizer.best_n.item(), 0)
+        self.assertEqual(quantizer.best_bit_shift_scale.item(), 0)
         self.assertTrue(torch.allclose(q, torch.tensor([-1.0, 0.0, 1.0])))
         self.assertEqual(scale.item(), 1.0)
         self.assertEqual(bw.item(), 3.0)
@@ -38,18 +38,18 @@ class TestCoefficientQuantizer(unittest.TestCase):
     def test_optimal_search_scaling(self):
         """Test that the quantizer finds the optimal power-of-two scale."""
         quantizer = CoefficientPerTensorWeightQuantizer(self.coeff_file)
-        # Weights fitting set 0 with scale 2.0 (n=1) -> [-2.0, 0.0, 2.0]
+        # Weights fitting set 0 with scale 2.0 (bit_shift_scale=1) -> [-2.0, 0.0, 2.0]
         weights = torch.tensor([-2.1, 0.1, 1.9])
         q, scale, zp, bw = quantizer(weights)
         
-        self.assertEqual(quantizer.best_n.item(), 1)
+        self.assertEqual(quantizer.best_bit_shift_scale.item(), 1)
         self.assertTrue(torch.allclose(q, torch.tensor([-2.0, 0.0, 2.0])))
         self.assertEqual(scale.item(), 2.0)
 
     def test_optimal_search_set_selection(self):
         """Test that the quantizer selects the set that minimizes SAD."""
         quantizer = CoefficientPerTensorWeightQuantizer(self.coeff_file)
-        # Weights fitting set 1 with scale 1.0 (n=0) -> [-0.5, -0.25, 0.0, 0.25, 0.5]
+        # Weights fitting set 1 with scale 1.0 (bit_shift_scale=0) -> [-0.5, -0.25, 0.0, 0.25, 0.5]
         weights = torch.tensor([-0.48, -0.26, 0.01, 0.24, 0.51])
         q, scale, zp, bw = quantizer(weights)
         
@@ -69,7 +69,7 @@ class TestCoefficientQuantizer(unittest.TestCase):
         
         self.assertTrue(new_quantizer.search_done.item())
         self.assertEqual(new_quantizer.best_set_idx.item(), 0)
-        self.assertEqual(new_quantizer.best_n.item(), 0)
+        self.assertEqual(new_quantizer.best_bit_shift_scale.item(), 0)
 
     def test_brevitas_integration(self):
         """Test integration with Brevitas QuantLinear via the Injector."""
