@@ -39,14 +39,14 @@ class CoefficientQuantFn(Function):
 
     @staticmethod
     def symbolic(g, x, coefficients, bit_shift_scale, bit_width, chosen_coefficients_indicis):
-        coeffs_val = symbolic_helper._maybe_get_const(coefficients, "t")
-        indices_val = symbolic_helper._maybe_get_const(chosen_coefficients_indicis, "t")
-
+        # chosen_coefficients_indicis varies per forward pass (depends on weights),
+        # so it must be passed as an ONNX input, not an attribute. Attributes 
+        # must be static constants known at export time.
         quantized = g.op(
             "Quantify::CoefficientQuant",
             x,
-            coefficients_t=coeffs_val,
-            chosen_coefficients_indicis_t=indices_val,
+            coefficients,
+            chosen_coefficients_indicis,
             bit_shift_scale_i=int(bit_shift_scale)
         ).setType(x.type())
         
