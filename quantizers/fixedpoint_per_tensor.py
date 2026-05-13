@@ -452,6 +452,7 @@ class FixedPointPerTensorBiasQuant(BaseWeightQuant):
     """
 
     proxy_class = BiasQuantProxyFromInjector
+    requires_input_scale = False  # Bias scale is computed from bias data itself
     rounding_mode = RoundingMode.ROUND
     narrow_range = False
     signed = True  # Explicitly declared to match proxy expectation
