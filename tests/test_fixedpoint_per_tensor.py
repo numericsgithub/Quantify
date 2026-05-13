@@ -12,6 +12,7 @@ Covers:
     - State-dict roundtrips
     - ONNX export guards
     - Coefficient quantizer integration
+    - Bias quantizer integration
 """
 
 import math
@@ -25,6 +26,7 @@ import torch.nn as nn
 from quantizers import (
     FixedPointPerTensorQuantizer,
     FixedPointPerTensorWeightQuant,
+    FixedPointPerTensorBiasQuant,
     RoundingMode,
     quantize_fixed_point,
     find_optimal_lsb,
@@ -736,6 +738,85 @@ class TestONNXExportGuards(unittest.TestCase):
         import os
         if os.path.exists(onnx_path):
             os.remove(onnx_path)
+
+
+# =========================================================================
+# 18. Bias Quantizer Integration
+# =========================================================================
+
+
+class TestBiasQuantizerIntegration(unittest.TestCase):
+    def test_quantlinear_with_bias_quant(self):
+        """QuantLinear with bias_quant should produce valid output and quantize bias."""
+        from brevitas.nn import QuantLinear
+
+        layer = QuantLinear(
+            in_features=64,
+            out_features=32,
+            bias=True,
+            weight_quant=FixedPointPerTensorWeightQuant,
+            bias_quant=FixedPointPerTensorBiasQuant,
+        )
+        x = torch.randn(1, 64)
+        out = layer(x)
+        self.assertEqual(out.shape, (1, 32))
+        self.assertTrue(torch.isfinite(out).all())
+
+    def test_quantlinear_bias_quant_scale(self):
+        """The quantized bias should have a valid scale."""
+        from brevitas.nn import QuantLinear
+
+        layer = QuantLinear(
+            in_features=64,
+            out_features=32,
+            bias=True,
+            weight_quant=FixedPointPerTensorWeightQuant,
+            bias_quant=FixedPointPerTensorBiasQuant,
+        )
+        # Run forward to trigger calibration
+        _ = layer(torch.randn(1, 64))
+        
+        qb = layer.quant_bias()
+        self.assertIsNotNone(qb)
+        self.assertIsNotNone(qb.scale)
+        self.assertTrue(torch.isfinite(qb.scale).all())
+
+    def test_quantlinear_bias_quant_values_on_grid(self):
+        """Quantized bias values should lie on the fixed-point grid."""
+        from brevitas.nn import QuantLinear
+
+        layer = QuantLinear(
+            in_features=64,
+            out_features=32,
+            bias=True,
+            weight_quant=FixedPointPerTensorWeightQuant,
+            bias_quant=FixedPointPerTensorBiasQuant,
+        )
+        _ = layer(torch.randn(1, 64))
+        
+        qb = layer.quant_bias()
+        if qb is not None and qb.scale is not None:
+            step = qb.scale.item()
+            codes = qb.value / step
+            residual = torch.abs(codes - torch.round(codes))
+            self.assertTrue((residual < 1e-5).all(), 
+                            f"Bias values not on grid: max residual {residual.max().item()}")
+
+    def test_quantlinear_no_bias_quant_when_bias_false(self):
+        """QuantLinear without bias should not fail when bias_quant is specified."""
+        from brevitas.nn import QuantLinear
+
+        layer = QuantLinear(
+            in_features=64,
+            out_features=32,
+            bias=False,
+            weight_quant=FixedPointPerTensorWeightQuant,
+            bias_quant=FixedPointPerTensorBiasQuant,
+        )
+        x = torch.randn(1, 64)
+        out = layer(x)
+        self.assertEqual(out.shape, (1, 32))
+        self.assertTrue(torch.isfinite(out).all())
 
 
 if __name__ == "__main__":
