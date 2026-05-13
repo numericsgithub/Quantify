@@ -32,6 +32,7 @@ import torch
 import torch.nn as nn
 
 from quantizers.base_injector import BaseWeightQuant, BaseActivationQuant
+from brevitas.proxy.parameter_quant import BiasQuantProxyFromInjector
 from torch.autograd import Function
 from torch.onnx import symbolic_helper
 from quantizers.base_quantizer import BaseQuantizer
