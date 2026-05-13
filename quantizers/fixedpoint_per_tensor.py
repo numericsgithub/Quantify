@@ -427,11 +427,31 @@ class FixedPointPerTensorActivationQuant(BaseActivationQuant):
     Brevitas-compatible Injector for the fixed-point per-tensor activation
     quantizer.
 
-    Usage::
+    Usage:
         act = QuantReLU(act_quant=FixedPointPerTensorActivationQuant)
     """
 
     rounding_mode = RoundingMode.FLOOR
     narrow_range = False
     signed = False  # Explicitly declared to match proxy expectation
+    tensor_quant = FixedPointPerTensorQuantizer
+
+
+# ------ Brevitas Injector for Bias ------
+class FixedPointPerTensorBiasQuant(BaseWeightQuant):
+    """
+    Brevitas-compatible Injector for the fixed-point per-tensor bias quantizer.
+
+    Usage:
+        layer = QuantLinear(
+            in_features=64, out_features=32, bias=True,
+            weight_quant=FixedPointPerTensorWeightQuant,
+            bias_quant=FixedPointPerTensorBiasQuant,
+        )
+    """
+
+    proxy_class = BiasQuantProxyFromInjector
+    rounding_mode = RoundingMode.ROUND
+    narrow_range = False
+    signed = True  # Explicitly declared to match proxy expectation
     tensor_quant = FixedPointPerTensorQuantizer
