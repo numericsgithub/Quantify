@@ -217,6 +217,8 @@ def _round(x: torch.Tensor, mode: RoundingMode) -> torch.Tensor:
 
 class FixedPointQuantFn(Function):
     """Symbolic shim: emits a single `Quantify::FixedPointQuant` ONNX node."""
+    
+    _captured_integers: torch.Tensor = None
 
     @staticmethod
     def symbolic(g, x, scale, zero_point, lsb, bit_width, signed, narrow_range, rounding_mode):
@@ -235,6 +237,7 @@ class FixedPointQuantFn(Function):
             signed_i=int(signed),
             narrow_range_i=int(narrow_range),
             rounding_mode_s=str(rounding_mode.value),
+            quantized_ints_t=FixedPointQuantFn._captured_integers,
         ).setType(x.type())
         
         # Brevitas expects a 4-tuple output; create bw constant
@@ -243,9 +246,17 @@ class FixedPointQuantFn(Function):
 
     @staticmethod
     def forward(ctx, x, scale, zero_point, lsb, bit_width, signed, narrow_range, rounding_mode):
+        FixedPointQuantFn._captured_integers = None
         ctx.save_for_backward(x)
         # Compute quantization for PyTorch inference/tracing
-        quantized = quantize_fixed_point(x, int(lsb), int(bit_width), signed, rounding_mode, narrow_range)
+        quantized, integers = quantize_fixed_point_with_integers(
+            x, int(lsb), int(bit_width), signed, rounding_mode, narrow_range
+        )
+        
+        if torch.onnx.is_in_onnx_export():
+            with torch.no_grad():
+                FixedPointQuantFn._captured_integers = integers.cpu().to(torch.long)
+                
         bw = torch.tensor(float(bit_width), dtype=x.dtype, device=x.device)
         return quantized, scale, zero_point, bw
 
