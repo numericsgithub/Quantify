@@ -35,6 +35,7 @@ from quantizers.base_injector import BaseWeightQuant, BaseActivationQuant
 from torch.autograd import Function
 from torch.onnx import symbolic_helper
 from quantizers.base_quantizer import BaseQuantizer
+from collections import deque
 
 # ---------------------------------------------------------------------------
 # Core fixed-point quantization
@@ -74,7 +75,10 @@ def quantize_fixed_point_with_integers(
     torch.Tensor
         Quantized (dequantized) input tensor on the fixed-point grid as integers.
     """
-    step = 2.0 ** lsb
+    orig_dtype = inputs.dtype
+    inputs_f64 = inputs.to(torch.float64)
+
+    step = torch.tensor(2.0, dtype=torch.float64) ** lsb
 
     if signed:
         integer_min = -(2 ** (bit_width - 1))
@@ -85,11 +89,14 @@ def quantize_fixed_point_with_integers(
         integer_min = 0
         integer_max = 2 ** bit_width - 1
 
-    # Quantize: map to integer, round, clamp, scale back
-    integers = inputs / step
-    integers = _round(integers, rounding_mode)
-    integers = torch.clamp(integers, integer_min, integer_max)
+    # Quantize: map to integer, round, clamp, scale back (all in float64)
+    integers = inputs_f64 / step
+    integers = _round(integers, rounding_mode).to(torch.float64)
+    integers = torch.clamp(integers, integer_min, integer_max).to(torch.float64)
     quantized = integers * step
+
+    # Cast back to the caller's dtype
+    quantized = quantized.to(orig_dtype)
 
     return quantized, integers
 
@@ -207,8 +214,9 @@ def _round(x: torch.Tensor, mode: RoundingMode) -> torch.Tensor:
         return torch.floor(x)
     if mode is RoundingMode.ROUND:
         return torch.floor(x + 0.5)
-    # PyTorch's torch.round uses "round half to even" (banker's rounding)
-    return torch.round(x)
+    if mode is RoundingMode.ROUND_TO_NEAREST_EVEN:
+        return torch.round(x)
+    raise Exception(f"Unknown rounding mode! {mode}")
 
 
 # ---------------------------------------------------------------------------
@@ -218,7 +226,7 @@ def _round(x: torch.Tensor, mode: RoundingMode) -> torch.Tensor:
 class FixedPointQuantFn(Function):
     """Symbolic shim: emits a single `Quantify::FixedPointQuant` ONNX node."""
     
-    _captured_integers: torch.Tensor = None
+    _integer_queue: deque = deque()
 
     @staticmethod
     def symbolic(g, x, scale, zero_point, lsb, bit_width, signed, narrow_range, rounding_mode):
@@ -226,6 +234,9 @@ class FixedPointQuantFn(Function):
         # During ONNX export, scale and zero_point are torch._C.Value objects, not tensors.
         scale_val = symbolic_helper._maybe_get_const(scale, "t")
         zero_point_val = symbolic_helper._maybe_get_const(zero_point, "t")
+
+        # Pop the integers that the corresponding forward() enqueued
+        captured = FixedPointQuantFn._integer_queue.popleft()
         
         quantized = g.op(
             "Quantify::FixedPointQuant",
@@ -237,7 +248,7 @@ class FixedPointQuantFn(Function):
             signed_i=int(signed),
             narrow_range_i=int(narrow_range),
             rounding_mode_s=str(rounding_mode.value),
-            quantized_ints_t=FixedPointQuantFn._captured_integers,
+            quantized_ints_t=captured,
         ).setType(x.type())
         
         # Brevitas expects a 4-tuple output; create bw constant
@@ -255,7 +266,8 @@ class FixedPointQuantFn(Function):
         
         if torch.onnx.is_in_onnx_export():
             with torch.no_grad():
-                FixedPointQuantFn._captured_integers = integers.cpu().to(torch.long)
+                # Enqueue; symbolic() will dequeue in the same order
+                FixedPointQuantFn._integer_queue.append(integers.cpu().to(torch.long))
                 
         bw = torch.tensor(float(bit_width), dtype=x.dtype, device=x.device)
         return quantized, scale, zero_point, bw
@@ -264,6 +276,10 @@ class FixedPointQuantFn(Function):
     def backward(ctx, grad_quantized, grad_scale, grad_zero_point, grad_bw):
         # Straight-Through Estimator: pass gradient through for the first input
         return grad_quantized, None, None, None, None, None, None, None
+
+    @classmethod
+    def reset_capture_state(cls):
+        cls._integer_queue.clear()
 
 
 # ---------------------------------------------------------------------------
@@ -399,7 +415,7 @@ class FixedPointPerTensorWeightQuant(BaseWeightQuant):
             rounding_mode = RoundingMode.FLOOR
     """
 
-    rounding_mode = RoundingMode.ROUND_TO_NEAREST_EVEN
+    rounding_mode = RoundingMode.ROUND
     narrow_range = False
     signed = True  # Explicitly declared to match proxy expectation and avoid QuantTensor validity errors
     tensor_quant = FixedPointPerTensorQuantizer
