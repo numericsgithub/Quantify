@@ -18,6 +18,8 @@ from typing import Any, Dict, List, Optional
 import torch
 import torch.nn as nn
 
+from utils.onnx_export import export_onnx_with_io
+
 
 # ---------------------------------------------------------------------------
 # Data structures
@@ -378,25 +380,21 @@ class CheckpointManager:
             print(f"  [ckpt] Reset {reset_count} calibration buffer(s) to force re-calibration.")
 
     def _export_onnx(self, model: nn.Module, onnx_path: str, dummy_input: Optional[torch.Tensor]) -> None:
-        """Export model to ONNX format alongside the checkpoint."""
+        """Export model to ONNX format alongside the checkpoint using the centralized exporter."""
         if dummy_input is None:
             # Fallback to a simple random tensor if no dummy input is provided.
-            # Users can override this by passing a custom dummy_input to save().
             dummy_input = torch.randn(1, 3, 32, 32)
         
         try:
-            model.eval()
-            with torch.no_grad():
-                torch.onnx.export(
-                    model,
-                    dummy_input,
-                    onnx_path,
-                    opset_version=13,
-                    input_names=["input"],
-                    output_names=["output"],
-                    dynamo=False,  # Required for custom Brevitas ops
-                    verbose=False,
-                )
+            # export_onnx_with_io handles model.eval() and torch.no_grad() internally
+            export_onnx_with_io(
+                model=model,
+                dummy_input=dummy_input,
+                filepath=onnx_path,
+                opset_version=13,
+                custom_opsets={"Quantify": 1},
+                dynamo=False,
+            )
             print(f"  [ckpt] Exported ONNX → {os.path.basename(onnx_path)}")
         except Exception as e:
             print(f"  [ckpt] ONNX export skipped: {e}")
