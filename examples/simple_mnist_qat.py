@@ -177,8 +177,8 @@ def train():
         # Epoch metrics
         train_acc = 100. * correct / total
         train_loss_avg = train_loss_meter.avg
-        metrics_tracker.update("train_loss", train_loss_avg)
-        metrics_tracker.update("train_acc", train_acc)
+        metrics_tracker.log("train_loss", train_loss_avg)
+        metrics_tracker.log("train_acc", train_acc)
         
         elapsed, eta = timer.stop(epoch)
         print(f"Epoch {epoch+1} | Train Loss: {train_loss_avg:.4f} | Acc: {train_acc:.2f}% | Time: {elapsed:.1f}s | ETA: {eta}")
@@ -203,8 +203,8 @@ def train():
         
         val_acc = 100. * val_correct / val_total
         val_loss_avg = val_loss_meter.avg
-        metrics_tracker.update("val_loss", val_loss_avg)
-        metrics_tracker.update("val_acc", val_acc)
+        metrics_tracker.log("val_loss", val_loss_avg)
+        metrics_tracker.log("val_acc", val_acc)
         print(f"Epoch {epoch+1} Test Loss: {val_loss_avg:.4f} | Acc: {val_acc:.2f}%")
         logger.log_text(f"val_epoch_{epoch}", f"Loss={val_loss_avg:.4f}, Acc={val_acc:.2f}%")
 
