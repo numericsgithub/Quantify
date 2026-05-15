@@ -9,7 +9,8 @@ from quantizers.manager import QuantizerManager
 
 class TestFixedPointManager(unittest.TestCase):
     def setUp(self):
-        # Create a fresh manager for each test to avoid state leakage
+        # Reset the singleton manager to avoid state leakage from previous tests
+        QuantizerManager().reset()
         self.manager = QuantizerManager()
 
     def test_quantizer_registration(self):
