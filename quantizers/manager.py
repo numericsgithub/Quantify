@@ -45,8 +45,8 @@ class QuantizerManager:
     def set_annealing_for_n_inferences(self, n):
         alpha_step = 1.0/n
         for quant in self.quantizers.values():
-            quant.annealing_alpha = 0
-            quant.annealing_alpha_step = alpha_step
+            quant.annealing_alpha.data.fill_(0)
+            quant.annealing_alpha_step.data.fill_(alpha_step)
 
     def register_quantizer(self, quantizer):
         """
