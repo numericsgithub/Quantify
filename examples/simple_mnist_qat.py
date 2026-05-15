@@ -125,7 +125,6 @@ def train():
         log_dir=LOG_DIR,
         use_tensorboard=True,
         use_wandb=False,
-        use_csv=True
     )
     metrics_tracker = MetricsTracker()
     timer = EpochTimer(total_epochs=EPOCHS)
