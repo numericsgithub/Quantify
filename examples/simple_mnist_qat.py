@@ -4,6 +4,8 @@ import torch.optim as optim
 from torch.utils.data import DataLoader
 from torchvision import datasets, transforms
 import brevitas.nn as qnn
+from quantizers.manager import QuantizerManager
+quantizer_manager = QuantizerManager()
 
 # Import the custom fixed-point quantizers
 from quantizers.fixedpoint_per_tensor import FixedPointPerTensorWeightQuant, FixedPointPerTensorActivationQuant, FixedPointPerTensorBiasQuant
@@ -118,8 +120,6 @@ def train():
     # --- Quantization Manager Setup ---
     # Note: QuantizerManager is no longer a global singleton. 
     # Instantiate it explicitly per training run to avoid state leakage across experiments or DDP ranks.
-    from quantizers.manager import QuantizerManager
-    quantizer_manager = QuantizerManager()
     quantizer_manager.quantization_start_gap = 20
     quantizer_manager.set_annealing_for_n_inferences(6)
 
