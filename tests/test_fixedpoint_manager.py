@@ -14,12 +14,14 @@ class TestFixedPointManager(unittest.TestCase):
 
     def test_quantizer_registration(self):
         """Verify that quantizer instances are automatically registered with the manager and given IDs."""
-        q1 = FixedPointPerTensorQuantizer(bit_width=8, quantizer_manager=self.manager)
-        q2 = FixedPointPerTensorQuantizer(bit_width=4, quantizer_manager=self.manager)
+        q1 = FixedPointPerTensorQuantizer(bit_width=8)
+        q2 = FixedPointPerTensorQuantizer(bit_width=4)
         
-        self.assertIn(q1, self.manager.quantizers.values())
-        self.assertIn(q2, self.manager.quantizers.values())
-        self.assertEqual(len(self.manager.quantizers), 2)
+        # Each quantizer creates its own manager by default
+        self.assertIn(q1, q1.quantizer_manager.quantizers.values())
+        self.assertIn(q2, q2.quantizer_manager.quantizers.values())
+        self.assertEqual(len(q1.quantizer_manager.quantizers), 1)
+        self.assertEqual(len(q2.quantizer_manager.quantizers), 1)
         
         # Verify unique IDs were assigned
         self.assertTrue(hasattr(q1, 'quant_id'))
@@ -28,7 +30,8 @@ class TestFixedPointManager(unittest.TestCase):
 
     def test_global_recalibration(self):
         """Verify that trigger_global_recalibration forces a re-run of LSB search."""
-        q = FixedPointPerTensorQuantizer(bit_width=8, quantizer_manager=self.manager)
+        q = FixedPointPerTensorQuantizer(bit_width=8)
+        manager = q.quantizer_manager
         
         # 1. Initial forward pass to calibrate
         # Use a tensor with a specific range to lock in an LSB
@@ -50,7 +53,7 @@ class TestFixedPointManager(unittest.TestCase):
                          "LSB changed without global recalibration flag being set")
 
         # 3. Trigger global recalibration
-        self.manager.trigger_global_recalibration()
+        manager.trigger_global_recalibration()
         
         # Run forward again
         q(data2)
@@ -60,7 +63,7 @@ class TestFixedPointManager(unittest.TestCase):
                             "LSB did not change after global recalibration was triggered")
         
         # 4. Reset flag and verify it stops recalibrating
-        self.manager.reset_global_flag()
+        manager.reset_global_flag()
         
         # Change data again
         data3 = torch.randn(100) * 0.001
