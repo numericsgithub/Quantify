@@ -382,10 +382,10 @@ class Trainer:
 
             # Accumulate metrics
             batch_size = inputs.size(0)
-            self.tracker.update_step("loss", loss.item(), phase=phase, n=batch_size)
+            self.tracker.update_step(f"{phase}_loss", loss.item(), phase=phase, n=batch_size)
 
             acc = self.accuracy_fn(outputs.detach(), targets)
-            self.tracker.update_step("acc", acc, phase=phase, n=batch_size)
+            self.tracker.update_step(f"{phase}_acc", acc, phase=phase, n=batch_size)
 
         snap = self.tracker.commit_epoch(epoch, phase=phase)
         return snap.metrics
