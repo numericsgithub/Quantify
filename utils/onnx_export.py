@@ -5,7 +5,8 @@ import numpy as np
 import onnx
 import torch
 from onnx import numpy_helper
-
+import onnxoptimizer
+import brevitas.nn as qnn
 
 def export_onnx_with_io(
     model: torch.nn.Module,
@@ -44,27 +45,26 @@ def export_onnx_with_io(
     onnx.ModelProto
         The loaded-and-augmented ONNX model (also saved to filepath).
 
-    Examples
-    --------
-    >>> onnx_model = export_onnx_with_io(
-    ...     model,
-    ...     dummy_input,
-    ...     "model.onnx",
-    ...     opset_version=17,
-    ...     custom_opsets={"Quantify": 1},
-    ...     dynamo=False,
-    ... )
-
     Reloading the embedded tensors
     ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-    >>> inp, out = load_embedded_io("model.onnx")
     """
     model.eval()
+
+    def inject_zero_biases(model: torch.nn.Module) -> None:
+        """Inject zero biases into all bias=False QuantLinear layers in-place."""
+        for name, module in model.named_modules():
+            if isinstance(module, qnn.QuantLinear) and module.bias is None:
+                module.bias = torch.nn.Parameter(
+                    torch.zeros(module.out_features, device=module.weight.device)
+                )
+                print(f"Injected zero bias into: {name}")
+    
+    inject_zero_biases(model)
 
     # ------------------------------------------------------------------ #
     # 1. Export via torch.onnx.export                                     #
     # ------------------------------------------------------------------ #
-    torch.onnx.export(model, dummy_input, filepath, opset_version=opset_version, custom_opsets=custom_opsets, dynamo=dynamo, **export_kwargs)
+    torch.onnx.export(model, dummy_input, filepath, opset_version=opset_version, do_constant_folding=True, custom_opsets=custom_opsets, dynamo=dynamo, **export_kwargs)
 
     # ------------------------------------------------------------------ #
     # 2. Compute reference output                                         #

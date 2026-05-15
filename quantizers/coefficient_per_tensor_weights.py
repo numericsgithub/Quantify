@@ -23,6 +23,7 @@ from quantizers.base_injector import BaseWeightQuant
 from quantizers.base_quantizer import BaseQuantizer
 from torch.autograd import Function
 from torch.onnx import symbolic_helper
+from collections import deque
 
 def apply_non_uniform_quantization(weights, coefficients, bit_shift_scale):
     scale = 2.0 ** bit_shift_scale
@@ -36,18 +37,19 @@ def apply_non_uniform_quantization(weights, coefficients, bit_shift_scale):
 
 class CoefficientQuantFn(Function):
 
-    _captured_indices: torch.Tensor = None
-    _captured_quantized: torch.Tensor = None
+    _queue: deque = deque()
 
     @staticmethod
     def symbolic(g, x, coefficients, bit_shift_scale, bit_width):
+        captured_indices, captured_quantized = CoefficientQuantFn._queue.popleft()
+
         quantized = g.op(
             "Quantify::CoefficientQuant",
             x,
             coefficients,
             bit_shift_scale_i=int(bit_shift_scale),
-            chosen_indices_t=CoefficientQuantFn._captured_indices,  # tensor attribute
-            quantized_values_t=CoefficientQuantFn._captured_quantized,  # tensor attribute
+            chosen_indices_t=captured_indices,
+            quantized_values_t=captured_quantized,
         ).setType(x.type())
 
         scale = g.op("Constant", value_t=torch.tensor(2.0 ** bit_shift_scale))
@@ -59,6 +61,15 @@ class CoefficientQuantFn(Function):
     def forward(ctx, x, coefficients, bit_shift_scale, bit_width):
         ctx.save_for_backward(x)
         quantized, scale, _ = apply_non_uniform_quantization(x, coefficients, bit_shift_scale)
+
+        if torch.onnx.is_in_onnx_export():
+            with torch.no_grad():
+                _, __, indices = apply_non_uniform_quantization(x, coefficients, bit_shift_scale)
+                CoefficientQuantFn._queue.append((
+                    indices.cpu().to(torch.long),
+                    quantized.cpu(),
+                ))
+
         bw = torch.tensor(float(bit_width), dtype=x.dtype, device=x.device)
         return (
             quantized,
@@ -70,6 +81,10 @@ class CoefficientQuantFn(Function):
     @staticmethod
     def backward(ctx, grad_quantized, grad_scale, grad_zero_point, grad_bw):
         return grad_quantized, None, None, None
+
+    @classmethod
+    def reset_capture_state(cls):
+        cls._queue.clear()
 
 class CoefficientPerTensorWeightQuantizer(BaseQuantizer):
     """
@@ -135,11 +150,6 @@ class CoefficientPerTensorWeightQuantizer(BaseQuantizer):
         bit_shift_scale = params['bit_shift_scale']
 
         if torch.onnx.is_in_onnx_export():
-            with torch.no_grad():
-                quantized_vals, __, indices = apply_non_uniform_quantization(x, chosen_coeffs, bit_shift_scale)
-                CoefficientQuantFn._captured_indices = indices.cpu().to(torch.long)
-                CoefficientQuantFn._captured_quantized = quantized_vals.cpu()  # add this
-
             quantized, _, _, _ = CoefficientQuantFn.apply(
                 x,
                 chosen_coeffs,
@@ -147,6 +157,9 @@ class CoefficientPerTensorWeightQuantizer(BaseQuantizer):
                 len(self.coefficient_sets[params['set_idx']]),
             )
             return quantized
+
+        quantized, _, _ = apply_non_uniform_quantization(x, chosen_coeffs, bit_shift_scale)
+        return quantized
 
         quantized, _, _ = apply_non_uniform_quantization(x, chosen_coeffs, bit_shift_scale)
         return quantized

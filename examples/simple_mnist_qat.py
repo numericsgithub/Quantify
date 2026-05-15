@@ -6,7 +6,7 @@ from torchvision import datasets, transforms
 import brevitas.nn as qnn
 
 # Import the custom fixed-point quantizers
-from quantizers.fixedpoint_per_tensor import FixedPointPerTensorWeightQuant, FixedPointPerTensorActivationQuant
+from quantizers.fixedpoint_per_tensor import FixedPointPerTensorWeightQuant, FixedPointPerTensorActivationQuant, FixedPointPerTensorBiasQuant
 from quantizers.coefficient_per_tensor_weights import CoefficientPerTensorWeightQuant
 from quantizers.manager import quantizer_manager
 from utils import export_onnx_with_io
@@ -27,34 +27,57 @@ class SimpleMNISTNet(nn.Module):
         
         # Layer 1: Conv -> ReLU -> Pool
         self.conv1 = qnn.QuantConv2d(
-            1, 16, kernel_size=3, stride=2,
-            weight_quant=CoefficientPerTensorWeightQuant,
+            1, 16, kernel_size=3, stride=2, bias=True,
+            bias_quant=FixedPointPerTensorBiasQuant,
+            weight_quant=FixedPointPerTensorWeightQuant, #CoefficientPerTensorWeightQuant,
             output_quant=FixedPointPerTensorActivationQuant
         )
         self.relu1 = nn.ReLU()
 
         # Layer 2: Conv -> ReLU -> Pool
         self.conv2 = qnn.QuantConv2d(
-            16, 32, kernel_size=3, stride=2,
-            weight_quant=FixedPointPerTensorWeightQuant,
+            16, 8, kernel_size=3, stride=2,
+            bias_quant=FixedPointPerTensorBiasQuant,
+            weight_quant=FixedPointPerTensorWeightQuant, bias=True,
             output_quant=FixedPointPerTensorActivationQuant
         )
         self.relu2 = nn.ReLU()
+
+        self.conv3 = qnn.QuantConv2d(
+            4, 6, kernel_size=3, stride=2,
+            bias_quant=FixedPointPerTensorBiasQuant,
+            weight_quant=FixedPointPerTensorWeightQuant, bias=True,
+            output_quant=FixedPointPerTensorActivationQuant
+        )
+
+        self.conv4 = qnn.QuantConv2d(
+            4, 6, kernel_size=3, stride=2,
+            bias_quant=FixedPointPerTensorBiasQuant,
+            weight_quant=FixedPointPerTensorWeightQuant, bias=True,
+            output_quant=FixedPointPerTensorActivationQuant
+        )
 
         self.flatten = nn.Flatten()
         
         # Final Linear Layer
         # Input size: 32 channels * 5x5 spatial (after two 3x3 convs and two 2x2 pools)
         self.fc = qnn.QuantLinear(
-            32 * 6 * 6, 10,
+            12 * 2 * 2, 10, #bias=True,
+            #bias_quant=FixedPointPerTensorBiasQuant,
             weight_quant=FixedPointPerTensorWeightQuant,
-            # output_quant=FixedPointPerTensorActivationQuant
+            output_quant=FixedPointPerTensorActivationQuant
         )
 
     def forward(self, x):
         x = self.input_quant(x)
         x = self.relu1(self.conv1(x))
         x = self.relu2(self.conv2(x))
+
+        xa, xb = torch.split(x, 4, dim=1)
+        x1 = self.conv3(xa)
+        x2 = self.conv4(xb)
+        x = torch.cat((x1,x2),1)
+        # x = self.conv3(x)
         x = self.flatten(x)
         x = self.fc(x)
         return x
@@ -94,8 +117,8 @@ def train():
     criterion = nn.CrossEntropyLoss()
     optimizer = optim.Adam(model.parameters(), lr=lr)
 
-    quantizer_manager.quantization_start_gap = 10
-    quantizer_manager.set_anneling_for_n_inferences(3)
+    quantizer_manager.quantization_start_gap = 20
+    quantizer_manager.set_anneling_for_n_inferences(6)
 
     print(f"Training on {device}...")
 
@@ -131,19 +154,22 @@ def train():
     # --- ONNX Export ---
     print("Exporting model to ONNX...")
     model.eval()
-    dummy_input = torch.randn(1, 1, 28, 28).to(device)
+    # dummy_input = torch.ones(1, 1, 28, 28) * (2.0 ** -6.0)
+    # dummy_input = dummy_input.to(device)
+    dummy_input, _ = train_dataset[0]  # shape: [1, 28, 28]
+    dummy_input = dummy_input.unsqueeze(0).to(device)  # add batch dimension -> [1, 1, 28, 28]
     onnx_path = "simple_mnist_fixedpoint.onnx"
 
     # We MUST use dynamo=False because FixedPointPerTensorQuantizer 
     # uses torch.autograd.Function.symbolic for custom ONNX nodes.
-    torch.onnx.export(
-        model, 
-        dummy_input, 
-        onnx_path, 
-        opset_version=17,
-        custom_opsets={'Quantify': 1},
-        dynamo=False 
-    )
+    # torch.onnx.export(
+    #     model,
+    #     dummy_input,
+    #     onnx_path,
+    #     opset_version=17,
+    #     custom_opsets={'Quantify': 1},
+    #     dynamo=False
+    # )
 
     # def export_with_test_vector(model, dummy_input, path):
     #     model.eval()
