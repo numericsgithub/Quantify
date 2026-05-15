@@ -38,8 +38,9 @@ class BaseQuantizer(nn.Module, ABC):
         self.inference_counter = 0
         self.inference_sequence_id = -1
 
-        self.annealing_alpha = 1.0
-        self.annealing_alpha_step = 0.1
+        # Register annealing state buffers for checkpoint persistence
+        self.register_buffer('annealing_alpha', torch.tensor(1.0))
+        self.register_buffer('annealing_alpha_step', torch.tensor(0.1))
 
         # Calibration state buffers
         self.register_buffer('search_done', torch.tensor(False, dtype=torch.bool))

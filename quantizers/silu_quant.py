@@ -68,13 +68,6 @@ class SiLUTensorQuant(BaseQuantizer):
         self.signed = signed
         self.rounding_mode = rounding_mode
         self.register_buffer('search_result_lsb', torch.tensor(0, dtype=torch.long))
-        
-        # Register annealing state buffers to ensure they are serialized in state_dict
-        # Use direct _buffers assignment to avoid KeyError if attribute already exists
-        if 'annealing_alpha' not in self._buffers:
-            self._buffers['annealing_alpha'] = torch.tensor(0.0)
-        if 'annealing_alpha_step' not in self._buffers:
-            self._buffers['annealing_alpha_step'] = torch.tensor(0.0)
 
     def _calibrate(self, x: torch.Tensor) -> Any:
         """Calibrate by finding the optimal LSB for the SiLU output."""
