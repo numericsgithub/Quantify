@@ -3,14 +3,18 @@ import torch.nn as nn
 import torch.optim as optim
 from torch.utils.data import DataLoader
 from torchvision import datasets, transforms
+
 import brevitas.nn as qnn
 from quantizers.manager import QuantizerManager
-quantizer_manager = QuantizerManager()
-
-# Import the custom fixed-point quantizers
 from quantizers.fixedpoint_per_tensor import FixedPointPerTensorWeightQuant, FixedPointPerTensorActivationQuant, FixedPointPerTensorBiasQuant
-from quantizers.coefficient_per_tensor_weights import CoefficientPerTensorWeightQuant
 from utils.onnx_export import export_onnx_with_io
+
+# Training Harness Imports
+from training_harness.engine_utils import set_seed, EarlyStopping, EpochTimer
+from training_harness.logger import ExperimentLogger
+from training_harness.metrics import AverageMeter, MetricsTracker
+from training_harness.schedulers import WarmupCosineScheduler
+
 
 class SimpleMNISTNet(nn.Module):
     """
@@ -82,129 +86,150 @@ class SimpleMNISTNet(nn.Module):
         x = self.fc(x)
         return x
 
-def train():
-    # Hyperparameters
-    batch_size = 256
-    epochs = 5
-    lr = 0.001
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-    # Data Loading
+def train():
+    # --- Configuration ---
+    SEED = 42
+    BATCH_SIZE = 256
+    EPOCHS = 5
+    LR = 0.001
+    WARMUP_STEPS = 100
+    DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    LOG_DIR = "logs/simple_mnist_qat"
+    EXPERIMENT_NAME = "simple_mnist_qat"
+
+    # 1. Reproducibility
+    set_seed(SEED, deterministic=True)
+
+    # 2. Data Loading
     transform = transforms.Compose([
         transforms.ToTensor(),
         transforms.Normalize((0.1307,), (0.3081,))
     ])
     
     train_dataset = datasets.MNIST('./data', train=True, download=True, transform=transform)
-    train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True)
+    train_loader = DataLoader(train_dataset, batch_size=BATCH_SIZE, shuffle=True)
     
     test_dataset = datasets.MNIST('./data', train=False, transform=transform)
-    test_loader = DataLoader(test_dataset, batch_size=batch_size, shuffle=False)
+    test_loader = DataLoader(test_dataset, batch_size=BATCH_SIZE, shuffle=False)
 
-    # Model, Loss, Optimizer
-    model = SimpleMNISTNet().to(device)
-
-
-    # --- Load Floating-Point Checkpoint ---
-    # checkpoint_path = "simple_mnist_float.pt"
-    # try:
-    #     # strict=False is required because the float state_dict lacks Brevitas quantization parameters
-    #     model.load_state_dict(torch.load(checkpoint_path, map_location=device), strict=False)
-    #     print(f"Successfully loaded floating-point checkpoint from {checkpoint_path} for fine-tuning.")
-    # except FileNotFoundError:
-    #     print(f"Checkpoint {checkpoint_path} not found. Training from scratch.")
-
+    # 3. Model, Loss, Optimizer
+    model = SimpleMNISTNet().to(DEVICE)
     criterion = nn.CrossEntropyLoss()
-    optimizer = optim.Adam(model.parameters(), lr=lr)
+    optimizer = optim.Adam(model.parameters(), lr=LR)
 
-    # --- Quantization Manager Setup ---
-    # Note: QuantizerManager is no longer a global singleton. 
-    # Instantiate it explicitly per training run to avoid state leakage across experiments or DDP ranks.
+    # 4. Training Harness Components
+    logger = ExperimentLogger(
+        experiment_name=EXPERIMENT_NAME,
+        run_id="default",
+        log_dir=LOG_DIR,
+        use_tensorboard=True,
+        use_wandb=False,
+        use_csv=True
+    )
+    metrics_tracker = MetricsTracker()
+    timer = EpochTimer(total_epochs=EPOCHS)
+    early_stopper = EarlyStopping(patience=3, mode="min", restore_best_weights=True)
+    
+    # Calculate total steps for scheduler
+    total_steps = len(train_loader) * EPOCHS
+    scheduler = WarmupCosineScheduler(
+        optimizer=optimizer,
+        warmup_steps=WARMUP_STEPS,
+        total_steps=total_steps,
+        eta_min=1e-5
+    )
+
+    # Quantization Manager Setup
+    quantizer_manager = QuantizerManager()
     quantizer_manager.quantization_start_gap = 20
     quantizer_manager.set_annealing_for_n_inferences(6)
 
-    print(f"Training on {device}...")
+    print(f"Training on {DEVICE}...")
+    logger.log_text("config", f"Seed={SEED}, Batch={BATCH_SIZE}, Epochs={EPOCHS}, LR={LR}")
 
-    for epoch in range(epochs):
+    for epoch in range(EPOCHS):
         model.train()
-        running_loss = 0.0
+        timer.start()
+        
+        train_loss_meter = AverageMeter("train_loss")
+        correct = 0
+        total = 0
+
         for batch_idx, (data, target) in enumerate(train_loader):
-            data, target = data.to(device), target.to(device)
+            data, target = data.to(DEVICE), target.to(DEVICE)
             
             optimizer.zero_grad()
             output = model(data)
             loss = criterion(output, target)
             loss.backward()
             optimizer.step()
+            scheduler.step()
             
-            running_loss += loss.item()
+            train_loss_meter.update(loss.item(), data.size(0))
+            
+            pred = output.argmax(dim=1, keepdim=True)
+            correct += pred.eq(target.view_as(pred)).sum().item()
+            total += data.size(0)
+            
             if batch_idx % 100 == 0:
-                print(f"Epoch {epoch+1}/{epochs} [{batch_idx*batch_size}/{len(train_loader.dataset)}] Loss: {loss.item():.4f}")
+                print(f"Epoch {epoch+1}/{EPOCHS} [{batch_idx*BATCH_SIZE}/{len(train_loader.dataset)}] Loss: {loss.item():.4f}")
 
-        # Evaluation
+        # Epoch metrics
+        train_acc = 100. * correct / total
+        train_loss_avg = train_loss_meter.avg
+        metrics_tracker.update("train_loss", train_loss_avg)
+        metrics_tracker.update("train_acc", train_acc)
+        
+        elapsed, eta = timer.stop(epoch)
+        print(f"Epoch {epoch+1} | Train Loss: {train_loss_avg:.4f} | Acc: {train_acc:.2f}% | Time: {elapsed:.1f}s | ETA: {eta}")
+        
+        logger.log_text(f"epoch_{epoch}", f"Loss={train_loss_avg:.4f}, Acc={train_acc:.2f}%")
+
+        # Validation
         model.eval()
-        correct = 0
+        val_loss_meter = AverageMeter("val_loss")
+        val_correct = 0
+        val_total = 0
         with torch.no_grad():
             for data, target in test_loader:
-                data, target = data.to(device), target.to(device)
+                data, target = data.to(DEVICE), target.to(DEVICE)
                 output = model(data)
+                loss = criterion(output, target)
+                val_loss_meter.update(loss.item(), data.size(0))
+                
                 pred = output.argmax(dim=1, keepdim=True)
-                correct += pred.eq(target.view_as(pred)).sum().item()
+                val_correct += pred.eq(target.view_as(pred)).sum().item()
+                val_total += data.size(0)
         
-        accuracy = 100. * correct / len(test_loader.dataset)
-        print(f"Epoch {epoch+1} Test Accuracy: {accuracy:.2f}%")
+        val_acc = 100. * val_correct / val_total
+        val_loss_avg = val_loss_meter.avg
+        metrics_tracker.update("val_loss", val_loss_avg)
+        metrics_tracker.update("val_acc", val_acc)
+        print(f"Epoch {epoch+1} Test Loss: {val_loss_avg:.4f} | Acc: {val_acc:.2f}%")
+        logger.log_text(f"val_epoch_{epoch}", f"Loss={val_loss_avg:.4f}, Acc={val_acc:.2f}%")
 
-    # --- ONNX Export ---
+        # Early stopping check
+        if early_stopper.step(val_loss_avg, model, epoch):
+            print(f"Early stopping triggered at epoch {epoch+1}")
+            early_stopper.restore(model)
+            break
+
+    # Restore best weights if early stopping triggered
+    if early_stopper.stopped_epoch is not None:
+        print("Restored best weights.")
+
+    # 5. ONNX Export
     print("Exporting model to ONNX...")
     model.eval()
-    # dummy_input = torch.ones(1, 1, 28, 28) * (2.0 ** -6.0)
-    # dummy_input = dummy_input.to(device)
-    dummy_input, _ = train_dataset[0]  # shape: [1, 28, 28]
-    dummy_input = dummy_input.unsqueeze(0).to(device)  # add batch dimension -> [1, 1, 28, 28]
+    dummy_input, _ = train_dataset[0]
+    dummy_input = dummy_input.unsqueeze(0).to(DEVICE)
     onnx_path = "simple_mnist_fixedpoint.onnx"
 
-    # We MUST use dynamo=False because FixedPointPerTensorQuantizer 
-    # uses torch.autograd.Function.symbolic for custom ONNX nodes.
-    # torch.onnx.export(
-    #     model,
-    #     dummy_input,
-    #     onnx_path,
-    #     opset_version=17,
-    #     custom_opsets={'Quantify': 1},
-    #     dynamo=False
-    # )
-
-    # def export_with_test_vector(model, dummy_input, path):
-    #     model.eval()
-    #
-    #     with torch.no_grad():
-    #         expected_output = model(dummy_input)
-    #
-    #     torch.onnx.export(
-    #         model,
-    #         dummy_input,
-    #         path,
-    #         opset_version=17,
-    #         dynamo=False
-    #     )
-    #
-    #     proto = onnx.load(path)
-    #
-    #     entry1 = onnx.StringStringEntryProto()
-    #     entry1.key = "dummy_input"
-    #     entry1.value = json.dumps(dummy_input.cpu().numpy().tolist())
-    #
-    #     entry2 = onnx.StringStringEntryProto()
-    #     entry2.key = "expected_output"
-    #     entry2.value = json.dumps(expected_output.cpu().numpy().tolist())
-    #
-    #     proto.metadata_props.extend([entry1, entry2])
-    #
-    #     torch.onnx.save(proto, path)
-
-    export_onnx_with_io(model, dummy_input, "simple_mnist_fixedpoint2.onnx")
-
+    export_onnx_with_io(model, dummy_input, onnx_path)
     print(f"Model successfully exported to {onnx_path}")
+
+    logger.close()
 
 if __name__ == "__main__":
     train()
