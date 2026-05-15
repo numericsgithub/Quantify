@@ -175,7 +175,7 @@ class MetricsTracker:
 
         # Average all step buffers for this phase
         for name, values in self._step_buffers[phase].items():
-            snap.update(f"{phase}_{name}", float(np.mean(values)))
+            snap.update(name, float(np.mean(values)))
 
         # Attach extras
         if extra:
