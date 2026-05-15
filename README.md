@@ -17,6 +17,9 @@ pip install -e ".[dev]"
 ├── quantizers/          # Custom Brevitas quantizers (Fixed-Point, Coefficient, SiLU)
 ├── training_harness/    # QAT training loop, calibration, checkpointing, logging
 ├── examples/            # Training scripts (MNIST, ImageNet, YOLOv8)
+│   ├── basics/          # Simple, self-contained scripts
+│   ├── training/        # Full-scale harness pipelines
+│   └── yolo/            # YOLOv8 integration examples
 ├── scripts/             # Utility/debug scripts
 ├── tests/               # Pytest suite
 ├── utils/               # Shared utilities (ONNX export, workspace management)
@@ -27,12 +30,12 @@ pip install -e ".[dev]"
 
 ### Train a Quantized Model (MNIST Example)
 ```bash
-python examples/simple_mnist_qat.py
+python examples/basics/simple_mnist_qat.py
 ```
 
 ### Train YOLOv8n (PAN-Only Variant) on COCO
 ```bash
-python examples/train_custom_yolo.py \
+python examples/yolo/train_custom_yolo.py \
     --data /path/to/coco.yaml \
     --epochs 300 \
     --batch 64 \

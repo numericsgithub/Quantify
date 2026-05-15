@@ -5,7 +5,7 @@ Uses the training harness for QAT, checkpointing, logging, and calibration.
 
 Run
 ---
-    python examples/train_imagenet_mobilenetv2_harness.py --workdir ./runs/imagenet_fixedpoint_harness --weight-bits 8 --act-bits 8
+    python examples/training/train_imagenet_mobilenetv2_harness.py --workdir ./runs/imagenet_fixedpoint_harness --weight-bits 8 --act-bits 8
 """
 
 import argparse
@@ -16,9 +16,9 @@ from torch.utils.data import DataLoader, Dataset
 from torchvision.models import mobilenet_v2, MobileNet_V2_Weights
 from datasets import load_dataset
 
-from training import Trainer, TrainerConfig
-from training.config import CheckpointConfig, LoggingConfig, QuantScheduleConfig
-from training.schedulers import WarmupCosineScheduler
+from training_harness.trainer import Trainer
+from training_harness.config import TrainerConfig, CheckpointConfig, LoggingConfig, QuantScheduleConfig
+from training_harness.schedulers import WarmupCosineScheduler
 from models.mobilenetv2_quant import QuantMobileNetV2
 from quantizers.fixedpoint_per_tensor import FixedPointPerTensorWeightQuant, FixedPointPerTensorActivationQuant
 from utils import add_workspace_args, workspace_from_args
