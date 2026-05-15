@@ -4,23 +4,22 @@ from quantizers.fixedpoint_per_tensor import (
     FixedPointPerTensorQuantizer, 
     RoundingMode
 )
-from quantizers.manager import quantizer_manager as fixed_point_manager
+from quantizers.manager import QuantizerManager
+
 
 class TestFixedPointManager(unittest.TestCase):
     def setUp(self):
-        # Clear the manager's registry and flags before each test
-        fixed_point_manager.quantizers = {}
-        fixed_point_manager._id_counter = 0
-        fixed_point_manager.reset_global_flag()
+        # Create a fresh manager for each test to avoid state leakage
+        self.manager = QuantizerManager()
 
     def test_quantizer_registration(self):
         """Verify that quantizer instances are automatically registered with the manager and given IDs."""
-        q1 = FixedPointPerTensorQuantizer(bit_width=8)
-        q2 = FixedPointPerTensorQuantizer(bit_width=4)
+        q1 = FixedPointPerTensorQuantizer(bit_width=8, quantizer_manager=self.manager)
+        q2 = FixedPointPerTensorQuantizer(bit_width=4, quantizer_manager=self.manager)
         
-        self.assertIn(q1, fixed_point_manager.quantizers.values())
-        self.assertIn(q2, fixed_point_manager.quantizers.values())
-        self.assertEqual(len(fixed_point_manager.quantizers), 2)
+        self.assertIn(q1, self.manager.quantizers.values())
+        self.assertIn(q2, self.manager.quantizers.values())
+        self.assertEqual(len(self.manager.quantizers), 2)
         
         # Verify unique IDs were assigned
         self.assertTrue(hasattr(q1, 'quant_id'))
@@ -29,7 +28,7 @@ class TestFixedPointManager(unittest.TestCase):
 
     def test_global_recalibration(self):
         """Verify that trigger_global_recalibration forces a re-run of LSB search."""
-        q = FixedPointPerTensorQuantizer(bit_width=8)
+        q = FixedPointPerTensorQuantizer(bit_width=8, quantizer_manager=self.manager)
         
         # 1. Initial forward pass to calibrate
         # Use a tensor with a specific range to lock in an LSB
@@ -51,7 +50,7 @@ class TestFixedPointManager(unittest.TestCase):
                          "LSB changed without global recalibration flag being set")
 
         # 3. Trigger global recalibration
-        fixed_point_manager.trigger_global_recalibration()
+        self.manager.trigger_global_recalibration()
         
         # Run forward again
         q(data2)
@@ -61,7 +60,7 @@ class TestFixedPointManager(unittest.TestCase):
                             "LSB did not change after global recalibration was triggered")
         
         # 4. Reset flag and verify it stops recalibrating
-        fixed_point_manager.reset_global_flag()
+        self.manager.reset_global_flag()
         
         # Change data again
         data3 = torch.randn(100) * 0.001
@@ -69,6 +68,7 @@ class TestFixedPointManager(unittest.TestCase):
         
         self.assertEqual(q.search_result_lsb.item(), new_lsb, 
                          "LSB changed after global recalibration flag was reset")
+
 
 if __name__ == "__main__":
     unittest.main()
