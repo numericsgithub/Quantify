@@ -27,7 +27,9 @@ class SimpleQuantizedMNIST(nn.Module):
         )
         self.classifier = nn.Sequential(
             nn.Flatten(),
-            qnn.QuantLinear(64 * 5 * 5, 128, weight_quant=FixedPointPerTensorWeightQuant),
+            # 28x28 -> Conv(p=1) -> 28x28 -> MaxPool(2) -> 14x14 -> Conv(p=1) -> 14x14 -> MaxPool(2) -> 7x7
+            # Flattened size: 64 * 7 * 7 = 3136
+            qnn.QuantLinear(64 * 7 * 7, 128, weight_quant=FixedPointPerTensorWeightQuant),
             nn.ReLU(),
             qnn.QuantLinear(128, 10, weight_quant=FixedPointPerTensorWeightQuant),
         )
