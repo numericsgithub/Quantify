@@ -23,7 +23,8 @@ pip install -e ".[dev]"
 ├── scripts/             # Utility/debug scripts
 ├── tests/               # Pytest suite
 ├── utils/               # Shared utilities (ONNX export, workspace management)
-└── docs/                # Framework conventions, pitfalls, and skill guides
+└── docs/                # Project documentation
+    └── llm/             # LLM agent guides, third-party package refs, pitfalls, conventions
 ```
 
 ## 🚀 Quick Start
@@ -93,9 +94,9 @@ export_onnx_with_io(
 
 ## 📖 Documentation & Skills
 
-- **Conventions**: See `docs/developer/conventions.md` for dependency and skill management rules.
-- **Pitfalls**: Check `docs/developer/brevitas-pitfalls.md` for common Brevitas/ONNX export gotchas.
-- **Ultralytics Integration**: `docs/developer/ultralytics-integration.md` covers YOLOv8/QAT integration patterns.
+- **Conventions**: See `docs/llm/CONVENTIONS.md` for dependency and skill management rules.
+- **Pitfalls**: Check `docs/llm/pitfalls/brevitas_pitfalls.md` for common Brevitas/ONNX export gotchas.
+- **Ultralytics Integration**: `docs/llm/ULTRALYTICS_DOCUMENTATION.md` covers YOLOv8/QAT integration patterns.
 
 ## 🧪 Testing
 
@@ -106,7 +107,7 @@ pytest tests/ -v
 
 ## 🤝 Contributing
 
-1. Follow the established conventions in `docs/developer/conventions.md`.
-2. Add new reusable patterns to the `docs/developer/` folder.
-3. Document any new pitfalls in `docs/developer/brevitas-pitfalls.md`.
+1. Follow the established conventions in `docs/llm/CONVENTIONS.md`.
+2. Add new reusable patterns to the `docs/llm/` folder.
+3. Document any new pitfalls in `docs/llm/pitfalls/brevitas_pitfalls.md`.
 4. Ensure all tests pass before submitting changes.
