@@ -115,8 +115,13 @@ def train():
     criterion = nn.CrossEntropyLoss()
     optimizer = optim.Adam(model.parameters(), lr=lr)
 
-    # quantizer_manager.quantization_start_gap = 20
-    # quantizer_manager.set_annealing_for_n_inferences(6)
+    # --- Quantization Manager Setup ---
+    # Note: QuantizerManager is no longer a global singleton. 
+    # Instantiate it explicitly per training run to avoid state leakage across experiments or DDP ranks.
+    from quantizers.manager import QuantizerManager
+    quantizer_manager = QuantizerManager()
+    quantizer_manager.quantization_start_gap = 20
+    quantizer_manager.set_annealing_for_n_inferences(6)
 
     print(f"Training on {device}...")
 
