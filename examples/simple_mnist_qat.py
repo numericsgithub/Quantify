@@ -91,7 +91,7 @@ def train():
     # --- Configuration ---
     SEED = 42
     BATCH_SIZE = 256
-    EPOCHS = 5
+    EPOCHS = 50
     LR = 0.001
     WARMUP_STEPS = 100
     DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
