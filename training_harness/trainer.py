@@ -22,7 +22,7 @@ from .logger import ExperimentLogger
 from .metrics import MetricsTracker
 from .plotting import TrainingPlotter
 from .schedulers import QATWarmupScheduler, collect_scale_factors
-from .utils import EarlyStopping, EpochTimer, log_hardware_info, set_seed
+from .engine_utils import EarlyStopping, EpochTimer, log_hardware_info, set_seed
 
 
 class Trainer:
