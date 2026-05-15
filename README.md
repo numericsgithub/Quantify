@@ -7,7 +7,7 @@ A modular framework for Quantization-Aware Training (QAT) using [Brevitas](https
 ```bash
 conda create -n brevitas-qat python=3.12
 conda activate brevitas-qat
-pip install -r requirements.txt
+pip install -e ".[dev]"
 ```
 
 ## 📂 Project Structure
@@ -20,7 +20,7 @@ pip install -r requirements.txt
 ├── scripts/             # Utility/debug scripts
 ├── tests/               # Pytest suite
 ├── utils/               # Shared utilities (ONNX export, workspace management)
-└── documentation/       # Framework conventions, pitfalls, and skill guides
+└── docs/                # Framework conventions, pitfalls, and skill guides
 ```
 
 ## 🚀 Quick Start
@@ -76,7 +76,7 @@ This framework includes custom quantizers (`FixedPointPerTensorQuantizer`, `Coef
 
 ### Export to ONNX
 ```python
-from utils.onnx_export import export_onnx_with_io
+from utils import export_onnx_with_io
 
 export_onnx_with_io(
     model=model.eval(),
@@ -90,9 +90,9 @@ export_onnx_with_io(
 
 ## 📖 Documentation & Skills
 
-- **Conventions**: See `documentation/CONVENTIONS.md` for dependency and skill management rules.
-- **Pitfalls**: Check `documentation/pitfalls/brevitas_pitfalls.md` for common Brevitas/ONNX export gotchas.
-- **Ultralytics Integration**: `documentation/ULTRALYTICS_DOCUMENTATION.md` covers YOLOv8/QAT integration patterns.
+- **Conventions**: See `docs/developer/conventions.md` for dependency and skill management rules.
+- **Pitfalls**: Check `docs/developer/brevitas-pitfalls.md` for common Brevitas/ONNX export gotchas.
+- **Ultralytics Integration**: `docs/developer/ultralytics-integration.md` covers YOLOv8/QAT integration patterns.
 
 ## 🧪 Testing
 
@@ -103,7 +103,7 @@ pytest tests/ -v
 
 ## 🤝 Contributing
 
-1. Follow the established conventions in `documentation/CONVENTIONS.md`.
-2. Add new reusable patterns to the `documentation/skills/` folder.
-3. Document any new pitfalls in `documentation/pitfalls/brevitas_pitfalls.md`.
+1. Follow the established conventions in `docs/developer/conventions.md`.
+2. Add new reusable patterns to the `docs/developer/` folder.
+3. Document any new pitfalls in `docs/developer/brevitas-pitfalls.md`.
 4. Ensure all tests pass before submitting changes.
