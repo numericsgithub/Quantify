@@ -137,6 +137,13 @@ class MetricsTracker:
             self._meters[key] = AverageMeter(key)
         self._meters[key].update(value, n)
 
+    def log(self, name: str, value: float, phase: str = "train") -> None:
+        """
+        Log a metric value for the current phase.
+        Convenience alias for ``update_step``.
+        """
+        self.update_step(name, value, phase)
+
     def current_avg(self, name: str, phase: str = "train") -> float:
         """Return the running average for a metric in the current epoch."""
         key = f"{phase}_{name}"
