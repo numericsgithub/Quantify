@@ -1,13 +1,22 @@
 class QuantizerManager:
     """
-    Manager object for coordinating quantizer instances within a single model/run.
-    Used for global coordination, such as forcing re-calibration 
-    or tracking global quantization statistics.
-    
-    Note: This class is no longer a global singleton. Instantiate it explicitly
-    per training run or model to avoid state leakage across experiments or DDP ranks.
+    Singleton manager object for coordinating quantizer instances across the entire project.
+    Ensures a single shared reference exists for global coordination, such as forcing 
+    re-calibration or tracking global quantization statistics.
     """
+    _instance = None
+
+    def __new__(cls):
+        if cls._instance is None:
+            cls._instance = super().__new__(cls)
+        return cls._instance
+
     def __init__(self):
+        # Prevent re-initialization on subsequent calls to __new__
+        if hasattr(self, '_initialized'):
+            return
+        self._initialized = True
+        
         # Global flag to force all quantizers to re-run their search/calibration
         self.force_recalibration = False
         self.quantization_is_enabled_globally = True
