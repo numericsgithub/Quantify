@@ -1,12 +1,12 @@
-# Brevitas QAT Framework
+# Quantify
 
 A modular framework for Quantization-Aware Training (QAT) using [Brevitas](https://github.com/Xilinx/Brevitas), featuring custom fixed-point quantizers, a comprehensive training harness, and seamless ONNX export with custom nodes.
 
 ## 📦 Installation
 
 ```bash
-conda create -n brevitas-qat python=3.12
-conda activate brevitas-qat
+conda create -n quantify python=3.12
+conda activate quantify
 pip install -e ".[dev]"
 ```
 
