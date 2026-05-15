@@ -27,6 +27,17 @@ class QuantizerManager:
         self._id_counter = 0
         self._inference_sequence_id_counter = 0
 
+    def reset(self):
+        """
+        Reset the manager's internal state. Useful for testing or restarting experiments.
+        """
+        self.force_recalibration = False
+        self.quantization_is_enabled_globally = True
+        self.quantization_start_gap = 0
+        self.quantizers.clear()
+        self._id_counter = 0
+        self._inference_sequence_id_counter = 0
+
     def stop_quantization_for_n_inferences(self, n):
         for quant in self.quantizers.values():
             quant.inference_counter = -n
