@@ -146,7 +146,7 @@ def main(args):
     optimizer = optim.SGD(model.parameters(), lr=args.lr, momentum=args.momentum, weight_decay=args.weight_decay, nesterov=True)
     scheduler = optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=args.epochs)
 
-    # ---------------- training loop ----------------
+    # ---------------- training_harness loop ----------------
     best_acc = 0.0
     best_ckpt = ws.checkpoints / "best.pt"
     last_ckpt = ws.checkpoints / "last.pt"

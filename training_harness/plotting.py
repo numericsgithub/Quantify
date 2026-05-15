@@ -1,5 +1,5 @@
 """
-plotting.py — Training visualisation for the training harness.
+plotting.py — Training visualisation for the training_harness harness.
 
 Produces publication-ready plots from a MetricsTracker:
   - Loss curves (train + val)
@@ -37,7 +37,7 @@ _DPI = 150
 
 class TrainingPlotter:
     """
-    Generates training plots from a MetricsTracker.
+    Generates training_harness plots from a MetricsTracker.
 
     Usage::
 

@@ -157,7 +157,7 @@ def main(args):
     print(f"Test Loss: {test_loss:.4f}")
     print(f"Test Acc:  {test_acc:.2f}%")
 
-    # ---------------- training loop ----------------
+    # ---------------- training_harness loop ----------------
     best_acc = 0.0
     best_ckpt = ws.checkpoints / "best.pt"
     last_ckpt = ws.checkpoints / "last.pt"

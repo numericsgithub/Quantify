@@ -2,7 +2,7 @@
 ImageNet Fine-tuning for MobileNetV2.
 
 This script loads a pretrained MobileNetV2 model and fine-tunes it on the 
-ImageNet training dataset loaded from Hugging Face.
+ImageNet training_harness dataset loaded from Hugging Face.
 
 Run
 ---
@@ -104,7 +104,7 @@ def main(args):
     preprocess = weights.transforms()
 
     print("Loading ImageNet-1k datasets from Hugging Face...")
-    # Load training and validation splits
+    # Load training_harness and validation splits
     hf_train_dataset = load_dataset("ILSVRC/imagenet-1k", split="train", trust_remote_code=True)
     hf_val_dataset = load_dataset("ILSVRC/imagenet-1k", split="validation", trust_remote_code=True)
 
@@ -144,13 +144,13 @@ def main(args):
     optimizer = optim.Adam(model.parameters(), lr=args.lr)
     scheduler = optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=args.epochs)
 
-    # ---------------- training loop ----------------
+    # ---------------- training_harness loop ----------------
     best_acc = 0.0
     best_ckpt = ws.checkpoints / "best.pt"
     last_ckpt = ws.checkpoints / "last.pt"
     log_path  = ws.logs / "training_log.csv"
     
-    print(f"Starting training for {args.epochs} epochs...")
+    print(f"Starting training_harness for {args.epochs} epochs...")
     
     with CSVLogger(log_path, fieldnames=["epoch", "lr", "train_loss", "train_acc", "val_loss", "val_acc"]) as log:
         for epoch in range(1, args.epochs + 1):

@@ -8,7 +8,7 @@ New flag:
                          of loading the architecture from the .pt file.
                          The pretrained weights are still loaded.
 
-Everything else (dataset, YAML, training loop) is unchanged.
+Everything else (dataset, YAML, training_harness loop) is unchanged.
 """
 
 import argparse
@@ -107,7 +107,7 @@ def main(args):
     print(f"Dataset YAML created at: {yaml_path}")
 
     # ── Training ───────────────────────────────────────────────────────────
-    print("Starting YOLOv8 training...")
+    print("Starting YOLOv8 training_harness...")
     results = model.train(
         data    = str(yaml_path),
         epochs  = args.epochs,

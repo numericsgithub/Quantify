@@ -3,7 +3,7 @@ COCO Training for YOLOv8.
 
 This script loads a pretrained YOLOv8 model from Ultralytics, 
 downloads the COCO dataset from Hugging Face, converts it to 
-YOLO format, and starts the training process.
+YOLO format, and starts the training_harness process.
 
 Run
 ---
@@ -108,9 +108,9 @@ def main(args):
     create_yolo_yaml(output_dir, yaml_path)
     print(f"Dataset YAML created at: {yaml_path}")
 
-    # ---------------- training loop ----------------
-    print("Starting YOLOv8 training...")
-    # model.train() handles the training loop, optimizer, and logging internally
+    # ---------------- training_harness loop ----------------
+    print("Starting YOLOv8 training_harness...")
+    # model.train() handles the training_harness loop, optimizer, and logging internally
     results = model.train(
         data=str(yaml_path),
         epochs=args.epochs,

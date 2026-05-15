@@ -1,5 +1,5 @@
 """
-utils.py — Utility functions for the training harness.
+utils.py — Utility functions for the training_harness harness.
 
 Covers: reproducibility seeding, hardware diagnostics, early stopping,
 progress display, and ETA estimation.
@@ -42,7 +42,7 @@ def set_seed(seed: int, deterministic: bool = False) -> None:
         except AttributeError:
             pass  # Older PyTorch — best effort
     else:
-        # benchmark=True can speed up training when input sizes are fixed
+        # benchmark=True can speed up training_harness when input sizes are fixed
         torch.backends.cudnn.benchmark = True
 
 
@@ -98,7 +98,7 @@ def log_hardware_info(logger=None) -> None:
 
 class EarlyStopping:
     """
-    Halts training when a monitored metric stops improving.
+    Halts training_harness when a monitored metric stops improving.
 
     Usage::
 
@@ -124,7 +124,7 @@ class EarlyStopping:
             min_delta:             Minimum change in the metric that counts as improvement.
             mode:                  'min' for loss, 'max' for accuracy.
             restore_best_weights:  If True, save a copy of the best model state dict
-                                   and restore it when training stops.
+                                   and restore it when training_harness stops.
         """
         if mode not in ("min", "max"):
             raise ValueError(f"mode must be 'min' or 'max', got {mode!r}")
@@ -155,7 +155,7 @@ class EarlyStopping:
             epoch:  Current epoch number (for bookkeeping).
 
         Returns:
-            True if training should stop, False otherwise.
+            True if training_harness should stop, False otherwise.
         """
         if self._is_improvement(value):
             self._best = value
@@ -173,7 +173,7 @@ class EarlyStopping:
         return False
 
     def restore(self, model: torch.nn.Module) -> None:
-        """Restore the best weights saved during training."""
+        """Restore the best weights saved during training_harness."""
         if self._best_weights is not None:
             model.load_state_dict(self._best_weights)
         else:

@@ -2,7 +2,7 @@
 train_custom_yolo.py
 --------------------
 Train our custom YOLOv8nPANOnly reimplementation from scratch on COCO using the
-Ultralytics training infrastructure (optimizer, scheduler, augmentation,
+Ultralytics training_harness infrastructure (optimizer, scheduler, augmentation,
 loss, logging — all unchanged).
 
 The key mechanism: DetectionTrainer.setup_model() checks whether
@@ -13,7 +13,7 @@ which is cleaner than relying on that implicit skip behaviour.
 
 Run
 ---
-    # Full COCO training (300 epochs, Ultralytics defaults):
+    # Full COCO training_harness (300 epochs, Ultralytics defaults):
     python train_custom_yolo.py \\
         --data /path/to/coco_yolo_fmt/coco_train.yaml \\
         --workdir ./runs/custom_yolo_scratch
@@ -76,7 +76,7 @@ class CustomYOLOv8nTrainer(DetectionTrainer):
 
     The DFL freeze ("always_freeze_names = ['.dfl']") matches our
     detect.dfl submodule name, so DFL weights are correctly frozen
-    during training (they are fixed by construction anyway).
+    during training_harness (they are fixed by construction anyway).
 
     The loss function (v8DetectionLoss) reads model.model[-1] to get the
     Detect head's stride, nc, and reg_max. We attach a .model attribute
@@ -251,7 +251,7 @@ def main():
             # box=7.5, cls=0.5, dfl=1.5,
             # mosaic=1.0, hsv_h=0.015, hsv_s=0.7, hsv_v=0.4, ...
             # (see ultralytics/cfg/default.yaml for the full list)
-            pretrained=False,  # scratch training — no weight loading
+            pretrained=False,  # scratch training_harness — no weight loading
             verbose=True,
         )
     )

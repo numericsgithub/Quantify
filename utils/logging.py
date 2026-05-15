@@ -16,7 +16,7 @@ class CSVLogger:
             log.log(epoch=1, loss=0.5, acc=80.0)
 
     The file is flushed after every ``log()`` call so partial runs
-    are still inspectable from another shell while training.
+    are still inspectable from another shell while training_harness.
     """
 
     def __init__(self, path: Path | str, fieldnames: Sequence[str]):

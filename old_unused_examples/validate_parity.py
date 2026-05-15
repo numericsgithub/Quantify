@@ -18,7 +18,7 @@ Requirements
 
 Run
 ---
-    # Using your existing COCO yaml from the training script:
+    # Using your existing COCO yaml from the training_harness script:
     python validate_parity.py --data ./runs/yolo_coco_train/data/coco_yolo_fmt/coco_train.yaml
 
     # Or let Ultralytics use its own coco.yaml (downloads if needed):

@@ -1,5 +1,5 @@
 """
-brevitas_trainer — A training harness for Brevitas QAT experiments.
+brevitas_trainer — A training_harness harness for Brevitas QAT experiments.
 """
 
 from .trainer import Trainer

@@ -1,7 +1,7 @@
 read:
-  - CONVENTIONS.md
-  - skills/onnx-brevitas-custom-ops.md
-  - pitfalls/brevitas_pitfalls.md
-  - BREVITAS_DOCUMENTATION.md
-  - ULTRALYTICS_DOCUMENTATION.md
-  - BREVITAS_QUANTIZERS_DOCUMENTATION.md
+  - documentation/CONVENTIONS.md
+  - documentation/skills/onnx-brevitas-custom-ops.md
+  - documentation/pitfalls/brevitas_pitfalls.md
+  - documentation/ULTRALYTICS_DOCUMENTATION.md
+  - documentation/BREVITAS_DOCUMENTATION.md
+  - documentation/BREVITAS_QUANTIZERS_DOCUMENTATION.md

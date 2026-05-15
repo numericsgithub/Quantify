@@ -258,7 +258,6 @@ class FixedPointQuantFn(Function):
 
     @staticmethod
     def forward(ctx, x, scale, zero_point, lsb, bit_width, signed, narrow_range, rounding_mode):
-        FixedPointQuantFn._captured_integers = None
         ctx.save_for_backward(x)
         # Compute quantization for PyTorch inference/tracing
         quantized, integers = quantize_fixed_point_with_integers(
@@ -356,7 +355,7 @@ class FixedPointPerTensorQuantizer(BaseQuantizer):
     def _quantize(self, x: torch.Tensor, params: Any) -> torch.Tensor:
         """Apply quantization using the provided parameters."""
         # Use the custom Function only during ONNX export to emit the custom node.
-        # During training/inference, call the direct math function to avoid overhead.
+        # During training_harness/inference, call the direct math function to avoid overhead.
         if torch.onnx.is_in_onnx_export():
             quantized, _, _, _ = FixedPointQuantFn.apply(
                 x,

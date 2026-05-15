@@ -1,7 +1,7 @@
 """
-config.py — All configuration dataclasses for the training harness.
+config.py — All configuration dataclasses for the training_harness harness.
 
-A single TrainerConfig object fully describes a training run, making
+A single TrainerConfig object fully describes a training_harness run, making
 every run reproducible and self-documenting.
 """
 
@@ -72,7 +72,7 @@ class LoggingConfig:
     """Write a simple CSV log file — always available, zero dependencies."""
 
     log_every_n_steps: int = 10
-    """How often (in optimizer steps) to log training loss."""
+    """How often (in optimizer steps) to log training_harness loss."""
 
     plot_dir: str = "plots"
     """
@@ -81,7 +81,7 @@ class LoggingConfig:
     """
 
     save_plots: bool = True
-    """Save plots to disk after training (and optionally at checkpoints)."""
+    """Save plots to disk after training_harness (and optionally at checkpoints)."""
 
 
 # ---------------------------------------------------------------------------
@@ -91,12 +91,12 @@ class LoggingConfig:
 @dataclass
 class QuantScheduleConfig:
     """
-    Controls when quantization is enabled during training.
+    Controls when quantization is enabled during training_harness.
 
     Typical workflow:
       1. Train in full-precision for `float_warmup_epochs` epochs.
       2. Run a calibration pass to set initial quantization ranges.
-      3. Continue training with fake-quantization enabled.
+      3. Continue training_harness with fake-quantization enabled.
     """
 
     float_warmup_epochs: int = 5
@@ -114,7 +114,7 @@ class QuantScheduleConfig:
     track_scale_factors: bool = True
     """
     Record per-layer quantization scale factors at the end of every epoch
-    so you can plot how they evolve during training.
+    so you can plot how they evolve during training_harness.
     """
 
 
@@ -125,7 +125,7 @@ class QuantScheduleConfig:
 @dataclass
 class TrainerConfig:
     """
-    Master configuration for a training run.
+    Master configuration for a training_harness run.
 
     Pass a fully-constructed TrainerConfig to Trainer(config=...).
     All fields have sensible defaults so you only need to override what
@@ -158,7 +158,7 @@ class TrainerConfig:
 
     # ---- Training loop -----------------------------------------------------
     epochs: int = 50
-    """Total number of training epochs."""
+    """Total number of training_harness epochs."""
 
     batch_size: int = 64
     """Batch size (informational; the DataLoader is provided externally)."""
@@ -173,7 +173,7 @@ class TrainerConfig:
     """
     Max gradient norm for clipping.  Set to None to disable.
     Gradient clipping is especially important in QAT to prevent
-    scale-factor explosions in early training.
+    scale-factor explosions in early training_harness.
     """
 
     # ---- Hardware ----------------------------------------------------------
@@ -187,7 +187,7 @@ class TrainerConfig:
 
     mixed_precision: bool = False
     """
-    Enable torch.autocast + GradScaler for AMP training.
+    Enable torch.autocast + GradScaler for AMP training_harness.
     Automatically disabled on CPU.
     
     Note: Defaults to False for Brevitas QAT compatibility. 
@@ -211,7 +211,7 @@ class TrainerConfig:
     dry_run: bool = False
     """
     If True, run only 2 batches per phase (train + val) to verify the
-    pipeline end-to-end without a full training loop.
+    pipeline end-to-end without a full training_harness loop.
     """
 
     dry_run_batches: int = 2
@@ -225,7 +225,7 @@ class TrainerConfig:
     # ---- Early stopping ----------------------------------------------------
     early_stopping_patience: Optional[int] = None
     """
-    Stop training if the monitored metric does not improve for this many
+    Stop training_harness if the monitored metric does not improve for this many
     epochs. Uses the same metric as CheckpointConfig.monitor_metric.
     Set to None to disable early stopping.
     """

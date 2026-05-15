@@ -31,7 +31,7 @@ DEFAULT_ROOT = None
 
 @dataclass(frozen=True)
 class Workspace:
-    """Bundle of directories produced by a single training run.
+    """Bundle of directories produced by a single training_harness run.
 
     ``root`` is the only real attribute; the subdirectories are
     derived from it so there is a single source of truth.

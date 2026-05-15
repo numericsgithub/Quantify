@@ -95,7 +95,7 @@ def run_calibration(
                 if verbose and (i + 1) % max(1, n_batches // 5) == 0:
                     print(f"  [calibration] {i + 1}/{n_batches} batches done")
 
-    # Restore original training state
+    # Restore original training_harness state
     model.train(original_training)
 
     if verbose:

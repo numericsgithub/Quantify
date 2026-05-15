@@ -2,7 +2,7 @@
 yolov8n_adapter.py
 ------------------
 Thin adapter that makes YOLOv8n (our clean nn.Module) usable with the
-Ultralytics training infrastructure (model.train(), model.val(), etc.).
+Ultralytics training_harness infrastructure (model.train(), model.val(), etc.).
 
 Strategy
 --------
@@ -14,13 +14,13 @@ Rather than rewriting all of that, we subclass DetectionModel and replace
 its internal .model (the sequential layer list) with our clean module, while
 keeping all the Ultralytics plumbing (loss, metrics, NMS, etc.) intact.
 
-Key contract points DetectionModel must satisfy for Ultralytics training:
+Key contract points DetectionModel must satisfy for Ultralytics training_harness:
     - self.model        : the actual nn.Module (we replace this)
     - self.nc           : number of classes
     - self.names        : class names dict
     - self.stride       : anchor strides tensor (e.g. [8, 16, 32])
-    - self.args         : training args (populated by Ultralytics)
-    - forward(x)        : returns raw head outputs during training,
+    - self.args         : training_harness args (populated by Ultralytics)
+    - forward(x)        : returns raw head outputs during training_harness,
                           post-processed results during inference
     - loss(batch, preds): calls v8DetectionLoss
 

@@ -1,5 +1,5 @@
 """
-metrics.py — Metrics tracking for the training harness.
+metrics.py — Metrics tracking for the training_harness harness.
 
 Tracks loss, accuracy, and any user-defined metrics per step and per epoch.
 Also handles quantization-specific metrics like scale factor evolution.
@@ -84,7 +84,7 @@ class EpochMetrics:
 
 class MetricsTracker:
     """
-    Centralised store for all training metrics.
+    Centralised store for all training_harness metrics.
 
     Records per-step and per-epoch values, making them available to the
     plotter, logger, and checkpoint manager.
@@ -93,7 +93,7 @@ class MetricsTracker:
 
         tracker = MetricsTracker()
 
-        # Inside the training loop
+        # Inside the training_harness loop
         tracker.update_step("train_loss", loss.item())
 
         # At the end of an epoch
@@ -229,7 +229,7 @@ class MetricsTracker:
         return None
 
     def summary(self) -> Dict[str, Any]:
-        """Return a flat dict summarising the full training run."""
+        """Return a flat dict summarising the full training_harness run."""
         result = {"total_epochs": len(self.history)}
         # Collect all metric names that ever appeared
         all_metrics: set = set()

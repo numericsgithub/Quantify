@@ -1,5 +1,5 @@
 """
-logger.py — Experiment logging for the training harness.
+logger.py — Experiment logging for the training_harness harness.
 
 Provides a unified ExperimentLogger that writes to one or more backends:
   - CSV  (always available, zero extra dependencies)
@@ -34,7 +34,7 @@ class ExperimentLogger:
 
         logger.log_hparams(config.to_dict())
 
-        # During training
+        # During training_harness
         logger.log_step(step=100, metrics={"train_loss": 0.42}, phase="train")
         logger.log_epoch(epoch=5, metrics={"val_loss": 0.38, "val_acc": 0.91})
 
@@ -147,7 +147,7 @@ class ExperimentLogger:
         Log scalar metrics at the step level.
 
         Args:
-            step:    Global training step number.
+            step:    Global training_harness step number.
             metrics: Dict of metric_name → value.
             phase:   'train' or 'val' (used as a prefix in TB).
         """
@@ -227,7 +227,7 @@ class ExperimentLogger:
                 pass
 
     def log_image(self, tag: str, image_path: str, epoch: int = 0) -> None:
-        """Log a saved image (e.g. a training curve plot) to W&B."""
+        """Log a saved image (e.g. a training_harness curve plot) to W&B."""
         if self._wandb is not None:
             try:
                 self._wandb.log({tag: self._wandb.Image(image_path)}, step=epoch)

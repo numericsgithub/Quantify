@@ -198,7 +198,7 @@ class DetectHead(nn.Module):
     Outputs during inference:
         (batch, 4 + nc, total_anchors)   where total_anchors = H1*W1 + H2*W2 + H3*W3
 
-    During training the raw branch outputs are returned as a list so that the
+    During training_harness the raw branch outputs are returned as a list so that the
     Ultralytics loss function can consume them directly (it expects that format).
     """
 
@@ -355,7 +355,7 @@ class YOLOv8n(nn.Module):
     def forward(self, x, **kwargs):
         """
         Dispatch based on input type:
-          - dict  → training: compute and return loss
+          - dict  → training_harness: compute and return loss
           - tensor → inference or feature extraction (kwargs like augment/embed
                      passed by the Ultralytics validator are accepted but ignored;
                      augmented inference is not implemented for our custom model)
@@ -403,11 +403,11 @@ class YOLOv8n(nn.Module):
         """Compute v8DetectionLoss. Called by forward() when batch is a dict,
         and also by the validator as model.loss(batch, preds) where preds is
         the already-decoded inference tensor — in that case we ignore preds
-        and recompute from the image in training mode."""
+        and recompute from the image in training_harness mode."""
         if getattr(self, 'criterion', None) is None:
             self.criterion = self.init_criterion()
         # If preds is a plain tensor (inference output from the validator) rather
-        # than the training dict, discard it and recompute in training mode.
+        # than the training_harness dict, discard it and recompute in training_harness mode.
         if preds is None or isinstance(preds, torch.Tensor):
             was_training = self.training
             self.train()

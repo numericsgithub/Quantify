@@ -230,13 +230,13 @@ def main(args):
     optimizer = optim.Adam(model.parameters(), lr=args.lr)
     scheduler = optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=args.epochs)
 
-    # ---------------- training loop ----------------
+    # ---------------- training_harness loop ----------------
     best_acc = 0.0
     best_ckpt = ws.checkpoints / "best.pt"
     last_ckpt = ws.checkpoints / "last.pt"
     log_path  = ws.logs / "training_log.csv"
     
-    print(f"Starting training for {args.epochs} epochs...")
+    print(f"Starting training_harness for {args.epochs} epochs...")
     
     with CSVLogger(log_path, fieldnames=["epoch", "lr", "train_loss", "train_acc", "val_loss", "val_acc"]) as log:
         for epoch in range(1, args.epochs + 1):

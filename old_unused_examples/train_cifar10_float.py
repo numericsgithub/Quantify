@@ -1,5 +1,5 @@
 """
-CIFAR-10 Floating-Point training — small VGG-style CNN.
+CIFAR-10 Floating-Point training_harness — small VGG-style CNN.
 
 Uses qatlab's shared Workspace/CSVLogger so all artifacts land in
 a consistent directory layout under ``--workdir``.
@@ -63,7 +63,7 @@ def evaluate(model, loader, criterion, device):
 # CLI
 # --------------------------------------------------------------------
 def parse_args():
-    p = argparse.ArgumentParser(description="Floating Point training on CIFAR-10")
+    p = argparse.ArgumentParser(description="Floating Point training_harness on CIFAR-10")
     # Use a different name to avoid overwriting quantized results
     add_workspace_args(p, name="cifar10_vgg_float")
     p.add_argument("--epochs",       type=int,   default=50)
@@ -126,7 +126,7 @@ def main(args):
     scheduler = optim.lr_scheduler.CosineAnnealingLR(optimizer,
                                                     T_max=args.epochs)
 
-    # ---------------- training loop ----------------
+    # ---------------- training_harness loop ----------------
     best_acc = 0.0
     best_ckpt = ws.checkpoints / "best_float.pt"
     last_ckpt = ws.checkpoints / "last_float.pt"

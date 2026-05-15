@@ -1,7 +1,7 @@
 """
 trainer.py — The main Trainer class for Brevitas QAT experiments.
 
-Orchestrates: training loop, validation, checkpointing, logging,
+Orchestrates: training_harness loop, validation, checkpointing, logging,
 metric tracking, QAT schedule, calibration, and plotting.
 """
 
@@ -27,7 +27,7 @@ from .utils import EarlyStopping, EpochTimer, log_hardware_info, set_seed
 
 class Trainer:
     """
-    End-to-end training harness for Brevitas QAT.
+    End-to-end training_harness harness for Brevitas QAT.
 
     The Trainer wires together every component of the harness:
       - Config-driven setup (device, seed, AMP)
@@ -180,7 +180,7 @@ class Trainer:
         after_epoch_hook: Optional[Callable] = None,
     ) -> MetricsTracker:
         """
-        Run the full training loop.
+        Run the full training_harness loop.
 
         Args:
             resume:             Resume from the last checkpoint if available.
@@ -301,7 +301,7 @@ class Trainer:
                     self.early_stopper.restore(self.model)
                 break
 
-        # ── Post-training ─────────────────────────────────────────────
+        # ── Post-training_harness ─────────────────────────────────────────────
         self._post_training()
         return self.tracker
 
@@ -316,7 +316,7 @@ class Trainer:
         after_step_hook: Optional[Callable] = None,
     ) -> Dict[str, float]:
         """
-        Run one epoch (training or validation).
+        Run one epoch (training_harness or validation).
 
         Returns:
             Dict of metric_name → epoch average.
@@ -391,7 +391,7 @@ class Trainer:
         return snap.metrics
 
     # ------------------------------------------------------------------
-    # Post-training
+    # Post-training_harness
     # ------------------------------------------------------------------
 
     def _post_training(self) -> None:

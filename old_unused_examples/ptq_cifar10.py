@@ -4,7 +4,7 @@ CIFAR-10 PTQ with Brevitas — small MobileNet-style CNN.
 This script performs Post-Training Quantization (PTQ). It loads a pretrained 
 floating-point model, initializes a quantized version of the architecture, 
 loads the weights, calibrates activation statistics using a small subset 
-of the training data, and evaluates the result.
+of the training_harness data, and evaluates the result.
 
 Run
 ---

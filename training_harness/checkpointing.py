@@ -1,8 +1,8 @@
 """
-checkpointing.py — Checkpoint management for the training harness.
+checkpointing.py — Checkpoint management for the training_harness harness.
 
 Handles saving/loading model state, optimizer state, scheduler state,
-and training metadata. Maintains a top-K ranking so only the best
+and training_harness metadata. Maintains a top-K ranking so only the best
 checkpoints are kept on disk. Automatically exports to ONNX alongside
 each saved checkpoint.
 """
@@ -68,14 +68,14 @@ def _build_payload(
 
 class CheckpointManager:
     """
-    Manages saving and loading of training checkpoints.
+    Manages saving and loading of training_harness checkpoints.
 
     Features:
     - Saves model, optimizer, scheduler, and metadata.
     - Keeps only the top-K checkpoints ranked by a monitored metric.
     - Optionally keeps a 'last.pt' checkpoint separate from the top-K.
     - Automatically exports the model to ONNX alongside each saved checkpoint.
-    - Provides a simple resume() method to restore a full training state.
+    - Provides a simple resume() method to restore a full training_harness state.
     - Gracefully handles Brevitas scale/buffer mismatches during load.
 
     Usage::
@@ -91,7 +91,7 @@ class CheckpointManager:
             scheduler=scheduler,
         )
 
-        # To resume training:
+        # To resume training_harness:
         start_epoch = ckpt.resume(model, optimizer, scheduler)
     """
 
@@ -228,7 +228,7 @@ class CheckpointManager:
         reset_calibration: bool = True,
     ) -> int:
         """
-        Load a checkpoint and restore training state.
+        Load a checkpoint and restore training_harness state.
 
         Args:
             model:             Model to restore weights into.

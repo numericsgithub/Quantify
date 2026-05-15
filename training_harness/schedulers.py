@@ -92,7 +92,7 @@ class WarmupCosineScheduler(LRScheduler):
 
 class QATWarmupScheduler:
     """
-    Controls the quantization state of a Brevitas model across training.
+    Controls the quantization state of a Brevitas model across training_harness.
 
     Training phases
     ---------------
@@ -164,7 +164,7 @@ class QATWarmupScheduler:
 
     @property
     def in_float_warmup(self) -> bool:
-        """True while training in full precision (before fake-quant is on)."""
+        """True while training_harness in full precision (before fake-quant is on)."""
         return not self._quant_enabled
 
     @property
@@ -204,7 +204,7 @@ def _set_quant_enabled(model: nn.Module, enabled: bool) -> None:
 
 def freeze_bn(model: nn.Module) -> None:
     """
-    Freeze all BatchNorm layers: fix running stats and disable training mode.
+    Freeze all BatchNorm layers: fix running stats and disable training_harness mode.
 
     After freezing, BN layers act as fixed affine transforms, which
     prevents quantization ranges from shifting in late-stage QAT.

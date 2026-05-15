@@ -1,7 +1,7 @@
 """
 example.py — Full usage example for brevitas_trainer.
 
-Shows how to wire a Brevitas QAT model into the training harness
+Shows how to wire a Brevitas QAT model into the training_harness harness
 with all features enabled: checkpointing, logging, plotting,
 QAT schedule, calibration, and early stopping.
 """
@@ -17,7 +17,7 @@ try:
 except ImportError:
     BREVITAS_AVAILABLE = False
 
-from training import (
+from training_harness import (
     Trainer,
     TrainerConfig,
     CheckpointConfig,
@@ -114,7 +114,7 @@ config = TrainerConfig(
 
     # QAT schedule
     quant_schedule = QuantScheduleConfig(
-        float_warmup_epochs   = 5,     # 5 epochs of float training first
+        float_warmup_epochs   = 5,     # 5 epochs of float training_harness first
         calibration_batches   = 50,    # then run 50-batch calibration
         freeze_bn_after_epoch = 15,    # freeze BN stats from epoch 15
         track_scale_factors   = True,  # record scale factor evolution
@@ -158,7 +158,7 @@ if __name__ == "__main__":
     optimizer    = torch.optim.AdamW(model.parameters(), lr=config.learning_rate)
 
     # Optional: LR scheduler (step-level cosine warmup)
-    from training import WarmupCosineScheduler
+    from training_harness import WarmupCosineScheduler
     total_steps = config.epochs * len(train_loader)
     scheduler   = WarmupCosineScheduler(
         optimizer,
