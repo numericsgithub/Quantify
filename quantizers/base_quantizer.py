@@ -37,11 +37,24 @@ class BaseQuantizer(nn.Module, ABC):
         self.inference_sequence_id = -1
         self.annealing_alpha_step = 0.1
 
-        # Register annealing state buffers for checkpoint persistence
-        self.register_buffer('annealing_alpha', torch.tensor(1.0))
+        # Register annealing state buffers for checkpoint persistence.
+        # Default 0.0: pass-through until QuantizerManager.set_annealing_for_n_inferences
+        # primes the ramp.
+        self.register_buffer('annealing_alpha', torch.tensor(0.0))
+
+        # Bit-width-annealing buffer. Defaults to the target bit_width so the
+        # quantizer behaves normally unless someone (e.g. QATWarmupScheduler in
+        # 'bit_width' mode) calls QuantizerManager.set_bit_width(N) to lower it.
+        self.register_buffer(
+            'effective_bit_width', torch.tensor(self.bit_width, dtype=torch.long)
+        )
 
         # Calibration state buffers
         self.register_buffer('search_done', torch.tensor(False, dtype=torch.bool))
+        # Generation counter to detect when global recalibration has been
+        # triggered between forwards (e.g., by QuantizerManager.set_bit_width).
+        # Stored as a regular attribute (not a buffer) — it's reset on each run.
+        self._last_calibration_generation = -1
         
         # Use provided manager or create a local instance to avoid global state
         self.quantizer_manager = quantizer_manager if quantizer_manager is not None else QuantizerManager()
@@ -67,12 +80,22 @@ class BaseQuantizer(nn.Module, ABC):
 
         # 2. Calibration check
         is_exporting = torch.onnx.is_in_onnx_export()
-        should_calibrate = not self.search_done.item() or self.quantizer_manager.force_recalibration
-        
+        # Three triggers: (a) never calibrated, (b) legacy global force flag,
+        # (c) generation counter has advanced since our last calibration. The
+        # generation path is per-quantizer so it survives multiple quantizers
+        # running within a single forward pass.
+        manager_generation = self.quantizer_manager.calibration_generation
+        should_calibrate = (
+            not self.search_done.item()
+            or self.quantizer_manager.force_recalibration
+            or self._last_calibration_generation < manager_generation
+        )
+
         if not is_exporting and should_calibrate:
             params = self._calibrate(x)
             self._save_calibration(params)
-            # Reset global flag after triggering recalibration to avoid forcing it on every forward
+            self._last_calibration_generation = manager_generation
+            # Keep the legacy one-shot flag well-behaved.
             self.quantizer_manager.reset_global_flag()
         else:
             params = self._load_calibration()
@@ -81,11 +104,11 @@ class BaseQuantizer(nn.Module, ABC):
         quantized = self._quantize(x, params)
         scale, zero_point, bit_width = self._get_metadata(params, x)
 
-        if self.annealing_alpha < 1.0:
-            result = (1 - self.annealing_alpha) * x + self.annealing_alpha * quantized
-            self.annealing_alpha = min(self.annealing_alpha + self.annealing_alpha_step, 1.0)
-            if self.annealing_alpha == 1.0:
-                print("WOAH!", self.inference_sequence_id, self.annealing_alpha)
+        alpha = float(self.annealing_alpha.item())
+        if alpha < 1.0:
+            result = (1.0 - alpha) * x + alpha * quantized
+            if self.training:
+                self.annealing_alpha.fill_(min(alpha + self.annealing_alpha_step, 1.0))
         else:
             result = quantized
 

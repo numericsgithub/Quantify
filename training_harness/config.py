@@ -117,6 +117,28 @@ class QuantScheduleConfig:
     so you can plot how they evolve during training_harness.
     """
 
+    annealing_mode: str = "alpha"
+    """
+    Which annealing strategy to use during the warmup window.
+
+      'alpha'      — convex mix between float and quantized outputs; per-batch
+                     ramp from α=0 (pure float) to α=1 (pure quantized).
+                     Stable, original behaviour.
+      'bit_width'  — keep α=1.0 the whole time but anneal the *effective*
+                     bit-width from `start_bit_width` down to the target
+                     bit-width over `float_warmup_epochs` epochs. At every step
+                     the model operates on a real quantized grid (no fictional
+                     convex midpoints), and downstream layers see a much
+                     smaller distribution shift at the boundary.
+    """
+
+    start_bit_width: int = 16
+    """
+    Initial bit-width when `annealing_mode='bit_width'`. The schedule walks
+    linearly from this value to the quantizer's target bit-width over
+    `float_warmup_epochs` epochs (one step per epoch). Ignored in 'alpha' mode.
+    """
+
 
 # ---------------------------------------------------------------------------
 # Top-level trainer config
