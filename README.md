@@ -63,6 +63,20 @@ The `training_harness` provides an end-to-end QAT pipeline:
 | `"alpha"` (default) | Per-batch ramp of `α` from 0 → 1 over the warmup window. Each quantizer's output is `(1−α)·x + α·quantize(x)`. | Drop-in compatibility with the original recipe. |
 | `"bit_width"` | Per-epoch step of the *effective* bit-width from `start_bit_width` (e.g. 16) down to the quantizer's target (e.g. 8). `α` pinned at 1.0. Recalibration runs at every step. | Recommended. Cleaner transition, no fictional convex midpoints, model trains continuously through the schedule. |
 
+#### Quantizer support matrix
+
+Not every quantizer participates in bit-width annealing — it requires a uniform fixed-point grid that can be made finer or coarser by changing the bit-width.
+
+| Quantizer | `"alpha"` mode | `"bit_width"` mode | Notes |
+|---|---|---|---|
+| `FixedPointPerTensorQuantizer` | ✓ | ✓ | Reads `effective_bit_width` in calibrate/quantize/metadata. |
+| `SiLUTensorQuant` | ✓ | ✓ | Same — fully annealable. |
+| `CoefficientPerTensorWeightQuantizer` | ✓ | — | Grid is defined by an explicit coefficient set loaded from a file; there's no natural notion of "higher-bit-width version" so bit-width changes are silently ignored. The layer stays fully quantized to its coefficient set from epoch 0. |
+
+For **mixed models** (e.g. some Coefficient + some FixedPoint layers) in `"bit_width"` mode you get an asymmetric anneal: the FixedPoint / SiLU layers gradually tighten from `start_bit_width` toward target, while the Coefficient layers are at full strength throughout. This usually still works in practice but the "smooth transition" benefit is partial.
+
+**Writing a custom quantizer that should participate in bit-width annealing**: your `BaseQuantizer` subclass inherits the `effective_bit_width` buffer for free, but you must read `int(self.effective_bit_width.item())` (instead of `self.bit_width`) inside `_calibrate`, `_quantize`, and `_get_metadata` — including in the STE clamp bounds if you have one. `QuantizerManager.set_bit_width(N)` will set the buffer on your quantizer, but it'll silently have no effect unless you read it.
+
 ### Basic Usage
 ```python
 from training_harness.trainer import Trainer
