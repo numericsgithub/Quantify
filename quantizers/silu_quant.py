@@ -72,8 +72,9 @@ class SiLUTensorQuant(BaseQuantizer):
     def _calibrate(self, x: torch.Tensor) -> Any:
         """Calibrate by finding the optimal LSB for the SiLU output."""
         x_silu = torch.nn.functional.silu(x)
+        effective_bw = int(self.effective_bit_width.item())
         lsb, _ = find_optimal_lsb(
-            x_silu, self.bit_width, self.signed, self.rounding_mode
+            x_silu, effective_bw, self.signed, self.rounding_mode
         )
         return {'lsb': lsb}
 
@@ -95,17 +96,30 @@ class SiLUTensorQuant(BaseQuantizer):
                 x, scale, zero_point, params['lsb'], self.bit_width, self.signed, self.rounding_mode
             )
             return quantized
-            
+
         x_silu = torch.nn.functional.silu(x)
-        return quantize_fixed_point(
-            x_silu, int(params['lsb']), self.bit_width, self.signed, self.rounding_mode
+        lsb = int(params['lsb'])
+        effective_bw = int(self.effective_bit_width.item())
+        quantized = quantize_fixed_point(
+            x_silu, lsb, effective_bw, self.signed, self.rounding_mode
         )
+        # Clipped-STE through the round/clamp; SiLU gradient still flows normally.
+        step = 2.0 ** lsb
+        if self.signed:
+            int_min = -(2 ** (effective_bw - 1))
+            int_max = 2 ** (effective_bw - 1) - 1
+        else:
+            int_min = 0
+            int_max = 2 ** effective_bw - 1
+        clamped = torch.clamp(x_silu, min=int_min * step, max=int_max * step)
+        return clamped + (quantized - clamped).detach()
 
     def _get_metadata(self, params: Any, x: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         """Return scale, zero_point, and bit_width tensors."""
         scale = torch.tensor(2.0 ** params['lsb'], dtype=x.dtype, device=x.device)
         zero_point = torch.tensor(0.0, dtype=x.dtype, device=x.device)
-        bit_width = torch.tensor(float(self.bit_width), dtype=x.dtype, device=x.device)
+        effective_bw = int(self.effective_bit_width.item())
+        bit_width = torch.tensor(float(effective_bw), dtype=x.dtype, device=x.device)
         return scale, zero_point, bit_width
 
 

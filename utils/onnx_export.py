@@ -113,17 +113,35 @@ def export_onnx_with_io(
 
     inject_zero_biases(model)
 
-    # 1. Export via torch.onnx.export
-    torch.onnx.export(
-        model,
-        dummy_input,
-        filepath,
-        opset_version=opset_version,
-        do_constant_folding=True,
-        custom_opsets=custom_opsets,
-        dynamo=dynamo,
-        **export_kwargs,
-    )
+    # 1. Force-enable quantization on every Brevitas proxy for the duration of
+    #    the export so the graph captures the quantized model even when the
+    #    trainer is still in float-warmup (proxies otherwise pass `x` through
+    #    and no Quantify::FixedPointQuant nodes get emitted).
+    saved_disable_quant: dict[int, bool] = {}
+    for m in model.modules():
+        if hasattr(m, "disable_quant"):
+            saved_disable_quant[id(m)] = bool(m.disable_quant)
+            m.disable_quant = False
+
+    # 2. Export via QuantifyONNXManager so our FixedPoint handlers get installed
+    #    and `Quantify::FixedPointQuant` nodes land in the graph. Imported lazily
+    #    to avoid an import cycle with quantizers/*.
+    try:
+        from utils.quantify_export_manager import QuantifyONNXManager
+        QuantifyONNXManager.export(
+            model,
+            args=dummy_input,
+            export_path=filepath,
+            opset_version=opset_version,
+            do_constant_folding=True,
+            custom_opsets=custom_opsets,
+            dynamo=dynamo,
+            **export_kwargs,
+        )
+    finally:
+        for m in model.modules():
+            if id(m) in saved_disable_quant:
+                m.disable_quant = saved_disable_quant[id(m)]
 
     # 2. Compute reference output
     with torch.no_grad():

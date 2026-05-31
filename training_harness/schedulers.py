@@ -130,29 +130,83 @@ class QATWarmupScheduler:
         model: nn.Module,
         float_warmup_epochs: int = 5,
         freeze_bn_after_epoch: Optional[int] = None,
+        annealing_mode: str = "alpha",
+        start_bit_width: int = 16,
     ):
         self.model = model
         self.float_warmup_epochs = float_warmup_epochs
         self.freeze_bn_after_epoch = freeze_bn_after_epoch
+        self.annealing_mode = annealing_mode
+        self.start_bit_width = start_bit_width
 
-        self._quant_enabled: bool = False
         self._bn_frozen: bool = False
-
-        # Start with quant disabled
-        disable_quant(model)
+        self._annealing_primed: bool = False
+        self._bw_schedule: list[int] = []   # populated by prime_bit_width
+        self._target_bit_width: Optional[int] = None
 
     # ------------------------------------------------------------------
 
+    def prime_annealing(self, batches_per_epoch: int) -> None:
+        """
+        Prime every registered quantizer for a smooth alpha ramp 0→1 over the
+        full warmup window. Call once at trainer init, after the model has been
+        instantiated (so all quantizers are registered with QuantizerManager).
+        """
+        from quantizers.manager import QuantizerManager
+        total = max(1, self.float_warmup_epochs * batches_per_epoch)
+        QuantizerManager().set_annealing_for_n_inferences(total)
+        self._annealing_primed = True
+        print(
+            f"[qat_sched] Alpha annealing primed: alpha 0→1 over "
+            f"{self.float_warmup_epochs} epoch(s) × {batches_per_epoch} batches "
+            f"= {total} training forwards"
+        )
+
+    def prime_bit_width(self, target_bit_width: int) -> None:
+        """
+        Prime an epoch-grained bit-width schedule from `start_bit_width` down to
+        `target_bit_width` over `float_warmup_epochs` epochs. Pins alpha=1.0 so
+        the soft-mix path is a no-op for this mode.
+        """
+        from quantizers.manager import QuantizerManager
+
+        # No mixing in this mode
+        QuantizerManager().force_alpha_one()
+
+        self._target_bit_width = int(target_bit_width)
+        n_epochs = max(1, self.float_warmup_epochs)
+        if self.start_bit_width <= self._target_bit_width:
+            # Nothing to anneal — just sit at target.
+            self._bw_schedule = [self._target_bit_width]
+        else:
+            # Linear epoch-grained interpolation. Schedule length = warmup_epochs + 1
+            # so we cover the start, intermediate, and target levels.
+            n_steps = n_epochs + 1
+            step = (self.start_bit_width - self._target_bit_width) / (n_steps - 1)
+            self._bw_schedule = [
+                max(self._target_bit_width, round(self.start_bit_width - i * step))
+                for i in range(n_steps)
+            ]
+        # Apply the initial bit-width before the first epoch.
+        QuantizerManager().set_bit_width(self._bw_schedule[0])
+        self._annealing_primed = True
+        print(
+            f"[qat_sched] Bit-width annealing primed: "
+            f"{self._bw_schedule} over {n_epochs} epoch(s)"
+        )
+
     def step(self, epoch: int) -> None:
-        """Call at the start of each epoch to update the model's quant state."""
+        """Call at the start of each epoch."""
+        # Bit-width schedule advance
+        if self.annealing_mode == "bit_width" and self._bw_schedule:
+            from quantizers.manager import QuantizerManager
+            idx = min(epoch, len(self._bw_schedule) - 1)
+            target_bw = self._bw_schedule[idx]
+            current = self.current_bit_width
+            if target_bw != current:
+                QuantizerManager().set_bit_width(target_bw)
+                print(f"[qat_sched] Epoch {epoch}: effective bit-width → {target_bw}")
 
-        # Phase transition: float → QAT
-        if epoch == self.float_warmup_epochs and not self._quant_enabled:
-            enable_quant(self.model)
-            self._quant_enabled = True
-            print(f"[qat_sched] Epoch {epoch}: fake-quantization ENABLED ✓")
-
-        # BN freeze
         if (
             self.freeze_bn_after_epoch is not None
             and epoch >= self.freeze_bn_after_epoch
@@ -164,13 +218,38 @@ class QATWarmupScheduler:
 
     @property
     def in_float_warmup(self) -> bool:
-        """True while training_harness in full precision (before fake-quant is on)."""
-        return not self._quant_enabled
+        """True while annealing is still in progress."""
+        if self.annealing_mode == "bit_width":
+            return self.current_bit_width != self._target_bit_width
+        from quantizers.manager import QuantizerManager
+        return not QuantizerManager().is_quantizing_everything_fully
 
     @property
     def in_qat(self) -> bool:
-        """True once fake-quantization has been enabled."""
-        return self._quant_enabled
+        """True once annealing has finished and we're at target precision."""
+        return not self.in_float_warmup
+
+    @property
+    def current_alpha(self) -> float:
+        """Representative alpha across all registered quantizers (any one will do)."""
+        from quantizers.manager import QuantizerManager
+        quantizers = QuantizerManager().quantizers
+        if not quantizers:
+            return 0.0
+        any_q = next(iter(quantizers.values()))
+        return float(any_q.annealing_alpha.item())
+
+    @property
+    def current_bit_width(self) -> int:
+        """Effective bit-width currently in use across registered quantizers."""
+        from quantizers.manager import QuantizerManager
+        quantizers = QuantizerManager().quantizers
+        if not quantizers:
+            return 0
+        any_q = next(iter(quantizers.values()))
+        if not hasattr(any_q, 'effective_bit_width'):
+            return int(getattr(any_q, 'bit_width', 0))
+        return int(any_q.effective_bit_width.item())
 
 
 # ---------------------------------------------------------------------------

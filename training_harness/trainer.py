@@ -21,7 +21,7 @@ from .logger import ExperimentLogger
 from .metrics import MetricsTracker
 from .plotting import TrainingPlotter
 from .schedulers import QATWarmupScheduler, collect_scale_factors
-from .engine_utils import EarlyStopping, EpochTimer, log_hardware_info, set_seed, LossPlateauDetector
+from .engine_utils import EarlyStopping, EpochTimer, log_hardware_info, set_seed
 from quantizers.manager import QuantizerManager
 
 
@@ -146,7 +146,16 @@ class Trainer:
             model               = model,
             float_warmup_epochs = config.quant_schedule.float_warmup_epochs,
             freeze_bn_after_epoch = config.quant_schedule.freeze_bn_after_epoch,
+            annealing_mode      = config.quant_schedule.annealing_mode,
+            start_bit_width     = config.quant_schedule.start_bit_width,
         )
+        # Prime the selected annealing strategy. The two modes are mutually
+        # exclusive — picked by config.quant_schedule.annealing_mode.
+        if config.quant_schedule.annealing_mode == "bit_width":
+            target_bw = self._infer_target_bit_width()
+            self.qat_scheduler.prime_bit_width(target_bit_width=target_bw)
+        else:
+            self.qat_scheduler.prime_annealing(len(self.train_loader))
 
         self.early_stopper: Optional[EarlyStopping] = None
         if config.early_stopping_patience is not None:
@@ -155,9 +164,6 @@ class Trainer:
                 min_delta  = config.early_stopping_min_delta,
                 mode       = config.checkpoint.monitor_mode,
             )
-
-        # Loss plateau detector for QAT activation
-        self.loss_plateau_detector = LossPlateauDetector(patience=5)
 
         # AMP scaler (disabled on CPU / MPS)
         self._use_amp = config.mixed_precision and str(self.device).startswith("cuda")
@@ -168,6 +174,9 @@ class Trainer:
 
         # LR history (for plotting)
         self._lr_history: List[float] = []
+
+        # Dummy input for per-checkpoint ONNX export, sniffed lazily from train_loader
+        self._dummy_input: Optional[torch.Tensor] = None
 
     # ------------------------------------------------------------------
     # Primary entry point
@@ -261,20 +270,13 @@ class Trainer:
                 scheduler    = self.scheduler,
                 metrics_dict = all_metrics,
                 config_dict  = self.config.to_dict(),
+                dummy_input  = self._get_dummy_input(),
             )
 
-            # Plateau detection & QAT activation
-            if QuantizerManager().is_not_quantizing_at_all:
-                is_plateau = self.loss_plateau_detector.step(monitor_val)
-                if is_plateau:
-                    print(f"[trainer] Training loss plateaued. Activating QAT...")
-                    mgr = QuantizerManager()
-                    mgr.set_annealing_for_n_inferences(6)
-                    mgr.quantization_start_gap = 20
-
-            # Early stopping: only trigger when QAT has actually started
+            # Early stopping: only trigger once annealing has finished and the
+            # model is fully quantized (otherwise we'd stop mid-ramp).
             stop = False
-            if self.early_stopper is not None and not QuantizerManager().is_not_quantizing_at_all:
+            if self.early_stopper is not None and QuantizerManager().is_quantizing_everything_fully:
                 stop = self.early_stopper.step(monitor_val, model=self.model, epoch=epoch)
 
             # Progress line
@@ -438,11 +440,51 @@ class Trainer:
         parts.append(f"  {elapsed:5.1f}s  ETA {eta}")
         for k, v in metrics.items():
             parts.append(f"  {k}: {v:.4f}")
-        if self.qat_scheduler.in_float_warmup:
-            parts.append("  [float warmup]")
+        if self.config.quant_schedule.annealing_mode == "bit_width":
+            bw = self.qat_scheduler.current_bit_width
+            if self.qat_scheduler.in_float_warmup:
+                parts.append(f"  [anneal bw={bw}]")
+            else:
+                parts.append(f"  [QAT bw={bw}]")
         else:
-            parts.append("  [QAT]")
+            alpha = self.qat_scheduler.current_alpha
+            if alpha < 1.0:
+                parts.append(f"  [anneal α={alpha:.2f}]")
+            else:
+                parts.append("  [QAT]")
         print("".join(parts))
+
+    # ------------------------------------------------------------------
+    # Bit-width target detection (for bit_width annealing mode)
+    # ------------------------------------------------------------------
+
+    def _infer_target_bit_width(self) -> int:
+        """Read the target bit-width from any registered Quantify quantizer."""
+        quantizers = QuantizerManager().quantizers
+        if not quantizers:
+            raise RuntimeError(
+                "annealing_mode='bit_width' requires Quantify quantizers to be "
+                "registered before Trainer init. None were found."
+            )
+        any_q = next(iter(quantizers.values()))
+        return int(any_q.bit_width)
+
+    # ------------------------------------------------------------------
+    # Dummy input for ONNX export
+    # ------------------------------------------------------------------
+
+    def _get_dummy_input(self) -> Optional[torch.Tensor]:
+        """Sample one batch from train_loader on first call; cached afterwards."""
+        if self._dummy_input is not None:
+            return self._dummy_input
+        try:
+            batch = next(iter(self.train_loader))
+            inputs, _ = self._unpack_batch(batch)
+            self._dummy_input = inputs[:1].detach().to(self.device)
+        except Exception as e:
+            warnings.warn(f"Could not derive dummy input for ONNX export: {e}")
+            return None
+        return self._dummy_input
 
     # ------------------------------------------------------------------
     # Quantization introspection

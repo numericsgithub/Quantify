@@ -32,7 +32,11 @@ import torch
 import torch.nn as nn
 
 from quantizers.base_injector import BaseWeightQuant, BaseActivationQuant
-from brevitas.proxy.parameter_quant import BiasQuantProxyFromInjector
+from quantizers.fixedpoint_proxy import (
+    FixedPointActQuantProxy,
+    FixedPointBiasQuantProxy,
+    FixedPointWeightQuantProxy,
+)
 from torch.autograd import Function
 from torch.onnx import symbolic_helper
 from quantizers.base_quantizer import BaseQuantizer
@@ -327,9 +331,10 @@ class FixedPointPerTensorQuantizer(BaseQuantizer):
             self.signed = False
         else:
             self.signed = True
+        effective_bw = int(self.effective_bit_width.item())
         lsb, num_unique = find_optimal_lsb(
             x,
-            self.bit_width,
+            effective_bw,
             self.signed,
             self.rounding_mode,
             self.narrow_range,
@@ -354,8 +359,8 @@ class FixedPointPerTensorQuantizer(BaseQuantizer):
 
     def _quantize(self, x: torch.Tensor, params: Any) -> torch.Tensor:
         """Apply quantization using the provided parameters."""
-        # Use the custom Function only during ONNX export to emit the custom node.
-        # During training_harness/inference, call the direct math function to avoid overhead.
+        # Use the custom Function only during ONNX export to emit the custom node
+        # at the *target* bit-width (effective_bit_width is for training-time annealing).
         if torch.onnx.is_in_onnx_export():
             quantized, _, _, _ = FixedPointQuantFn.apply(
                 x,
@@ -368,20 +373,34 @@ class FixedPointPerTensorQuantizer(BaseQuantizer):
                 self.rounding_mode
             )
             return quantized
-        return quantize_fixed_point(
-            x,
-            int(params['lsb']),
-            self.bit_width,
-            params['signed'],
-            self.rounding_mode,
-            self.narrow_range
+
+        lsb = int(params['lsb'])
+        signed = params['signed']
+        effective_bw = int(self.effective_bit_width.item())
+        quantized = quantize_fixed_point(
+            x, lsb, effective_bw, signed, self.rounding_mode, self.narrow_range
         )
+        # Clipped-STE: forward value is `quantized` (round + clamp applied);
+        # backward gradient is 1 inside the representable range, 0 outside —
+        # so the optimizer can adapt weights to the fixed-point grid.
+        step = 2.0 ** lsb
+        if signed:
+            int_min = -(2 ** (effective_bw - 1)) + (1 if self.narrow_range else 0)
+            int_max = 2 ** (effective_bw - 1) - 1
+        else:
+            int_min = 0
+            int_max = 2 ** effective_bw - 1
+        clamped = torch.clamp(x, min=int_min * step, max=int_max * step)
+        return clamped + (quantized - clamped).detach()
 
     def _get_metadata(self, params: Any, x: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         """Return scale, zero_point, and bit_width tensors matching x's dtype/device."""
         scale = torch.tensor(2.0 ** params['lsb'], dtype=x.dtype, device=x.device)
         zero_point = torch.tensor(0.0, dtype=x.dtype, device=x.device)
-        bit_width = torch.tensor(float(self.bit_width), dtype=x.dtype, device=x.device)
+        # Report the *effective* bit-width during training (so downstream Brevitas
+        # bookkeeping sees what's actually quantized); export still uses target.
+        effective_bw = int(self.effective_bit_width.item())
+        bit_width = torch.tensor(float(effective_bw), dtype=x.dtype, device=x.device)
         return scale, zero_point, bit_width
 
     def detect_signed(self, inputs: torch.Tensor) -> bool:
@@ -419,6 +438,7 @@ class FixedPointPerTensorWeightQuant(BaseWeightQuant):
     narrow_range = False
     signed = True  # Explicitly declared to match proxy expectation and avoid QuantTensor validity errors
     tensor_quant = FixedPointPerTensorQuantizer
+    proxy_class = FixedPointWeightQuantProxy
 
 
 # ------ Brevitas Injector ------
@@ -435,6 +455,7 @@ class FixedPointPerTensorActivationQuant(BaseActivationQuant):
     narrow_range = False
     signed = False  # Explicitly declared to match proxy expectation
     tensor_quant = FixedPointPerTensorQuantizer
+    proxy_class = FixedPointActQuantProxy
 
 
 # ------ Brevitas Injector for Bias ------
@@ -450,7 +471,7 @@ class FixedPointPerTensorBiasQuant(BaseWeightQuant):
         )
     """
 
-    proxy_class = BiasQuantProxyFromInjector
+    proxy_class = FixedPointBiasQuantProxy
     requires_input_scale = False  # Bias scale is computed from bias data itself
     rounding_mode = RoundingMode.ROUND
     narrow_range = False

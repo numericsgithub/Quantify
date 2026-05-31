@@ -159,10 +159,11 @@ class CoefficientPerTensorWeightQuantizer(BaseQuantizer):
             return quantized
 
         quantized, _, _ = apply_non_uniform_quantization(x, chosen_coeffs, bit_shift_scale)
-        return quantized
-
-        quantized, _, _ = apply_non_uniform_quantization(x, chosen_coeffs, bit_shift_scale)
-        return quantized
+        # Clipped-STE: representable range is [scaled_coeffs.min(), scaled_coeffs.max()].
+        scale = 2.0 ** bit_shift_scale
+        scaled_coeffs = chosen_coeffs * scale
+        clamped = torch.clamp(x, min=scaled_coeffs.min(), max=scaled_coeffs.max())
+        return clamped + (quantized - clamped).detach()
 
     def _get_metadata(self, params: Any, x: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         """Return scale, zero_point, and bit_width tensors matching x's dtype/device."""

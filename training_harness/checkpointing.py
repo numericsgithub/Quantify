@@ -382,9 +382,9 @@ class CheckpointManager:
     def _export_onnx(self, model: nn.Module, onnx_path: str, dummy_input: Optional[torch.Tensor]) -> None:
         """Export model to ONNX format alongside the checkpoint using the centralized exporter."""
         if dummy_input is None:
-            # Fallback to a simple random tensor if no dummy input is provided.
-            dummy_input = torch.randn(1, 3, 32, 32)
-        
+            print(f"  [ckpt] ONNX export skipped: no dummy_input provided (pass one to save())")
+            return
+
         try:
             # export_onnx_with_io handles model.eval() and torch.no_grad() internally
             export_onnx_with_io(
