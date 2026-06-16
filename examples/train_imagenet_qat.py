@@ -80,13 +80,29 @@ def parse_args() -> argparse.Namespace:
     # ---- Data --------------------------------------------------------------
     d = p.add_argument_group("data")
     d.add_argument(
+        "--data-dir",
+        type=str,
+        default=None,
+        metavar="PATH",
+        help="Path to ImageFolder dataset (train/ and val/ subdirs). "
+             "When set, uses NVIDIA DALI instead of the HuggingFace dataloader. "
+             "Extract with: python scripts/extract_imagenet.py --output-dir PATH",
+    )
+    d.add_argument(
         "--hf-dataset",
         type=str,
         default="ILSVRC/imagenet-1k",
-        help="Hugging Face dataset name",
+        help="Hugging Face dataset name (ignored when --data-dir is set)",
     )
-    d.add_argument("--num-workers", type=int, default=20,
-                   help="DataLoader worker processes. Rule of thumb: #physical_cores - 4.")
+    d.add_argument(
+        "--num-workers", type=int, default=20,
+        help="HuggingFace DataLoader workers (ignored when --data-dir is set)",
+    )
+    d.add_argument(
+        "--dali-threads", type=int, default=4,
+        help="DALI CPU preprocessing threads (used when --data-dir is set). "
+             "DALI offloads most work to GPU so 4 is usually enough.",
+    )
 
     # ---- Quantization ------------------------------------------------------
     q = p.add_argument_group("quantization")
@@ -279,15 +295,31 @@ class HFDatasetWrapper(Dataset):
         return img, item["label"]
 
 
-def _build_dataloaders(args) -> tuple[DataLoader, DataLoader]:
+def _build_dataloaders(args):
+    if args.data_dir:
+        return _build_dali_loaders(args)
+    return _build_hf_loaders(args)
+
+
+def _build_dali_loaders(args):
+    from utils.dali_pipeline import build_dali_loaders
+    print(f"Building DALI loaders from {args.data_dir} …")
+    train_loader, val_loader = build_dali_loaders(
+        data_dir=args.data_dir,
+        batch_size=args.batch_size,
+        num_threads=args.dali_threads,
+    )
+    print(f"  train: {len(train_loader):,} batches   val: {len(val_loader):,} batches")
+    return train_loader, val_loader
+
+
+def _build_hf_loaders(args):
     normalize = T.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
     bicubic = T.InterpolationMode.BICUBIC
 
     # RSB-aligned recipe (matches timm resnet18/50 a1_in1k pretraining):
     #   train: bicubic crop + RandAugment(2,9) + RandomErasing
     #   val:   Resize(236, bicubic) + CenterCrop(224)  [crop_pct=0.95]
-    # Using a mismatched val pipeline would hide ~3-4 pp accuracy from the
-    # pretrained baseline (standard 256→224 bilinear only yields ~69.8%).
     train_preprocess = T.Compose([
         T.RandomResizedCrop(224, interpolation=bicubic),
         T.RandomHorizontalFlip(),
@@ -352,7 +384,10 @@ def main() -> None:
     print(f"  Bias Q     : B{args.bias_bits}")
     print(f"  Pretrained : {args.pretrained}")
     print(f"  AMP        : {args.mixed_precision}")
-    print(f"  Workers    : {args.num_workers}  prefetch={args.prefetch_factor}")
+    if args.data_dir:
+        print(f"  Data       : DALI  ({args.data_dir})  threads={args.dali_threads}")
+    else:
+        print(f"  Data       : HuggingFace ({args.hf_dataset})  workers={args.num_workers}")
     print(f"{'═'*60}\n")
 
     # Build model

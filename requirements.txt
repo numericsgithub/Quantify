@@ -9,5 +9,6 @@ inflect
 Pillow
 tqdm
 timm
+nvidia-dali-cuda120
 datasets==4.8.4
 ultralytics[dill]==8.4.18
