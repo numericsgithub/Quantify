@@ -85,7 +85,8 @@ def parse_args() -> argparse.Namespace:
         default="ILSVRC/imagenet-1k",
         help="Hugging Face dataset name",
     )
-    d.add_argument("--num-workers", type=int, default=4)
+    d.add_argument("--num-workers", type=int, default=12,
+                   help="DataLoader worker processes. Rule of thumb: #CPU_cores / 2.")
 
     # ---- Quantization ------------------------------------------------------
     q = p.add_argument_group("quantization")
@@ -117,6 +118,20 @@ def parse_args() -> argparse.Namespace:
     t.add_argument(
         "--label-smoothing", type=float, default=0.1,
         help="Label smoothing for CrossEntropyLoss (0 = off)",
+    )
+    t.add_argument(
+        "--mixed-precision",
+        action="store_true",
+        default=True,
+        help="Enable AMP (autocast + GradScaler). Disable if Brevitas fake-quant "
+             "ops cause NaN losses during QAT (use --no-mixed-precision).",
+    )
+    t.add_argument("--no-mixed-precision", dest="mixed_precision", action="store_false")
+    t.add_argument(
+        "--prefetch-factor",
+        type=int,
+        default=3,
+        help="DataLoader prefetch factor (batches queued per worker ahead of GPU)",
     )
 
     # ---- QAT schedule ------------------------------------------------------
@@ -292,15 +307,19 @@ def _build_dataloaders(args) -> tuple[DataLoader, DataLoader]:
     hf_train = load_dataset(args.hf_dataset, split="train",      trust_remote_code=True)
     hf_val   = load_dataset(args.hf_dataset, split="validation", trust_remote_code=True)
 
+    persistent = args.num_workers > 0
+    prefetch   = args.prefetch_factor if args.num_workers > 0 else None
     train_loader = DataLoader(
         HFDatasetWrapper(hf_train, train_preprocess),
         batch_size=args.batch_size, shuffle=True,
         num_workers=args.num_workers, pin_memory=True,
+        persistent_workers=persistent, prefetch_factor=prefetch,
     )
     val_loader = DataLoader(
         HFDatasetWrapper(hf_val, val_preprocess),
         batch_size=args.batch_size, shuffle=False,
         num_workers=args.num_workers, pin_memory=True,
+        persistent_workers=persistent, prefetch_factor=prefetch,
     )
     return train_loader, val_loader
 
@@ -332,6 +351,8 @@ def main() -> None:
     print(f"  Act Q      : A{args.act_bits}")
     print(f"  Bias Q     : B{args.bias_bits}")
     print(f"  Pretrained : {args.pretrained}")
+    print(f"  AMP        : {args.mixed_precision}")
+    print(f"  Workers    : {args.num_workers}  prefetch={args.prefetch_factor}")
     print(f"{'═'*60}\n")
 
     # Build model
@@ -364,6 +385,7 @@ def main() -> None:
         weight_decay=args.weight_decay,
         grad_clip_norm=1.0,
         num_workers=args.num_workers,
+        mixed_precision=args.mixed_precision,
 
         dry_run=args.dry_run,
         dry_run_batches=args.dry_run_batches,
