@@ -114,6 +114,10 @@ def parse_args() -> argparse.Namespace:
     t.add_argument("--batch-size", type=int, default=1024)
     t.add_argument("--lr", type=float, default=1e-4)
     t.add_argument("--weight-decay", type=float, default=1e-5)
+    t.add_argument(
+        "--label-smoothing", type=float, default=0.1,
+        help="Label smoothing for CrossEntropyLoss (0 = off)",
+    )
 
     # ---- QAT schedule ------------------------------------------------------
     s = p.add_argument_group("qat schedule")
@@ -262,14 +266,23 @@ class HFDatasetWrapper(Dataset):
 
 def _build_dataloaders(args) -> tuple[DataLoader, DataLoader]:
     normalize = T.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
+    bicubic = T.InterpolationMode.BICUBIC
+
+    # RSB-aligned recipe (matches timm resnet18/50 a1_in1k pretraining):
+    #   train: bicubic crop + RandAugment(2,9) + RandomErasing
+    #   val:   Resize(236, bicubic) + CenterCrop(224)  [crop_pct=0.95]
+    # Using a mismatched val pipeline would hide ~3-4 pp accuracy from the
+    # pretrained baseline (standard 256→224 bilinear only yields ~69.8%).
     train_preprocess = T.Compose([
-        T.RandomResizedCrop(224),
+        T.RandomResizedCrop(224, interpolation=bicubic),
         T.RandomHorizontalFlip(),
+        T.RandAugment(num_ops=2, magnitude=9, interpolation=bicubic),
         T.ToTensor(),
         normalize,
+        T.RandomErasing(p=0.25),
     ])
     val_preprocess = T.Compose([
-        T.Resize(256),
+        T.Resize(236, interpolation=bicubic),
         T.CenterCrop(224),
         T.ToTensor(),
         normalize,
@@ -383,7 +396,7 @@ def main() -> None:
         optimizer=optimizer,
         train_loader=train_loader,
         val_loader=val_loader,
-        loss_fn=nn.CrossEntropyLoss(),
+        loss_fn=nn.CrossEntropyLoss(label_smoothing=args.label_smoothing),
         scheduler=scheduler,
         onnx_dummy_input=torch.zeros(1, 3, 224, 224),
     )
