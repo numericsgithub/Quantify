@@ -26,6 +26,9 @@ from __future__ import annotations
 
 import argparse
 import os  # still used for os.path.splitext in experiment name
+import warnings
+
+warnings.filterwarnings("ignore", message="Corrupt EXIF data", category=UserWarning)
 
 import torch
 import torch.nn as nn
