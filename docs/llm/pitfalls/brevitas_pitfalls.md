@@ -53,6 +53,31 @@
 **How to Prevent It:**
 - Keep `return_quant_tensor=False` (default) unless specifically required by the architecture or export target.
 
+## 9. Brevitas `Injector` Subclasses Are Immutable After Definition
+
+**When this happens:** You dynamically create an `Injector` subclass at runtime (e.g., to set `bit_width` or `filepath` from a CLI arg) and then try to set any attribute on the class object itself — including cosmetic ones like `__name__` or `__qualname__`.
+
+**The Problem:** Brevitas injectors inherit from `_dependencies.Injector`, which overrides `__setattr__` to raise `DependencyError: 'Injector' modification is not allowed`. This applies to *any* attribute set on the class after its `class` block is evaluated, not just quantization-specific ones. Example that breaks:
+
+```python
+class WeightQuant(FixedPointPerTensorWeightQuant):
+    bit_width = bw
+WeightQuant.__name__ = "MyQuant"   # ← DependencyError here
+```
+
+**How to Prevent It:**
+- All injector attributes must be set **inside** the `class` body — never after the `class` statement.
+- This includes cosmetic attributes like `__name__`. If you need a descriptive name, embed it directly in the class definition using a string variable before the class block:
+
+```python
+# Correct: all attributes set inside the class body
+bw = args.weight_bits
+class WeightQuant(FixedPointPerTensorWeightQuant):
+    bit_width = bw          # ← fine: captured from enclosing scope at class creation time
+```
+
+- Never call `setattr()` on an injector class either — it hits the same guard.
+
 ## 8. Custom ONNX Nodes Don't Run in ORT
 **When this happens:** You export a model with `Quantify::CustomOp` and expect ONNX Runtime to execute it natively.
 **The Problem:** ORT only executes standard ONNX ops or registered custom kernels. Unregistered `Quantify::` nodes will cause fallback warnings or runtime errors.

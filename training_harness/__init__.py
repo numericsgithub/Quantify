@@ -12,7 +12,12 @@ from .calibration import run_calibration, enable_quant, disable_quant
 from .logger import ExperimentLogger
 from .engine_utils import set_seed, get_hardware_info, EarlyStopping
 
+# V2 — corrected protocol for the project's custom quantizers
+from .trainer_v2 import QATTrainerV2
+from .config_v2 import TrainerConfigV2, QATScheduleConfigV2
+
 __all__ = [
+    # V1
     "Trainer",
     "TrainerConfig",
     "QuantScheduleConfig",
@@ -30,4 +35,8 @@ __all__ = [
     "set_seed",
     "get_hardware_info",
     "EarlyStopping",
+    # V2
+    "QATTrainerV2",
+    "TrainerConfigV2",
+    "QATScheduleConfigV2",
 ]

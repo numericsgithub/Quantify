@@ -83,9 +83,8 @@ class BaseQuantizer(nn.Module, ABC):
 
         if self.annealing_alpha < 1.0:
             result = (1 - self.annealing_alpha) * x + self.annealing_alpha * quantized
-            self.annealing_alpha = min(self.annealing_alpha + self.annealing_alpha_step, 1.0)
-            if self.annealing_alpha == 1.0:
-                print("WOAH!", self.inference_sequence_id, self.annealing_alpha)
+            new_alpha = min(self.annealing_alpha.item() + self.annealing_alpha_step, 1.0)
+            self.annealing_alpha.data.fill_(new_alpha)
         else:
             result = quantized
 
