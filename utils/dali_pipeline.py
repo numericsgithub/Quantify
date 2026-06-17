@@ -51,15 +51,6 @@ def _train_pipeline(file_root: str, num_shards: int, shard_id: int, crop: int = 
         device="gpu",
         horizontal=fn.random.coin_flip(probability=0.5),
     )
-    # Color jitter — approximates the RSB RandAugment color ops on GPU
-    images = fn.color_twist(
-        images,
-        device="gpu",
-        brightness=fn.random.uniform(range=[0.6, 1.4]),
-        contrast=fn.random.uniform(range=[0.6, 1.4]),
-        saturation=fn.random.uniform(range=[0.6, 1.4]),
-        hue=fn.random.uniform(range=[-0.1, 0.1]),
-    )
     images = fn.crop_mirror_normalize(
         images,
         device="gpu",
