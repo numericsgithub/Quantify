@@ -224,6 +224,9 @@ class QATTrainerV2:
                 val_metrics = self._run_epoch(epoch, "val")
 
             all_metrics = {**train_metrics, **val_metrics}
+            if self._qat_active:
+                fully, total = self._quant_progress()
+                all_metrics["quant_pct"] = fully / total if total > 0 else 0.0
             self.logger.log_epoch(epoch, all_metrics)
 
             monitor_val = all_metrics.get(
@@ -407,7 +410,12 @@ class QATTrainerV2:
             n = batch_idx + 1
             running_loss = running_loss + (loss.item() - running_loss) / n
             running_acc  = running_acc  + (acc         - running_acc)  / n
-            pbar.set_postfix(loss=f"{running_loss:.4f}", acc=f"{running_acc:.3f}")
+            postfix = {"loss": f"{running_loss:.4f}", "acc": f"{running_acc:.3f}"}
+            if self._qat_active:
+                fully, total = self._quant_progress()
+                pct = int(fully / total * 100) if total > 0 else 0
+                postfix["quant"] = f"{pct}% ({fully}/{total})"
+            pbar.set_postfix(**postfix)
 
         pbar.close()
         snap = self.tracker.commit_epoch(epoch, phase=phase)
@@ -437,6 +445,13 @@ class QATTrainerV2:
     # Display
     # ------------------------------------------------------------------
 
+    def _quant_progress(self) -> tuple[int, int]:
+        """Return (n_fully_quantized, n_total) from the active QuantizerManager."""
+        mgr = QuantizerManager()
+        total  = len(mgr.quantizers)
+        fully  = sum(1 for q in mgr.quantizers.values() if q.annealing_alpha >= 1.0)
+        return fully, total
+
     def _print_epoch_summary(
         self,
         epoch: int,
@@ -452,10 +467,9 @@ class QATTrainerV2:
         if not self._qat_active:
             parts.append("  [float]")
         else:
-            mgr = QuantizerManager()
-            fully = sum(1 for q in mgr.quantizers.values() if q.annealing_alpha >= 1.0)
-            total = len(mgr.quantizers)
-            parts.append(f"  [QAT {fully}/{total} fully quantized]")
+            fully, total = self._quant_progress()
+            pct = int(fully / total * 100) if total > 0 else 0
+            parts.append(f"  [QAT {pct}% ({fully}/{total}) fully quantized]")
 
         print("".join(parts))
 
