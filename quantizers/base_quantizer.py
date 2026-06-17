@@ -77,6 +77,17 @@ class BaseQuantizer(nn.Module, ABC):
         _calibration_triggered = should_calibrate and not is_exporting
 
         if not is_exporting and should_calibrate:
+            if not self.training and self.annealing_alpha.item() > 0.0:
+                qid = getattr(self, "quant_id", repr(id(self)))
+                raise RuntimeError(
+                    f"Quantizer {qid!r} has not been calibrated (search_done=False) "
+                    f"but is active (annealing_alpha={self.annealing_alpha.item():.2f}) "
+                    f"while the model is in eval mode. "
+                    f"Quantizing with uncalibrated parameters produces garbage output. "
+                    f"Call QuantizerManager().disable_quantization() before evaluating "
+                    f"an uncalibrated model, or run a calibration forward pass in "
+                    f"training mode first."
+                )
             params = self._calibrate(x)
             self._save_calibration(params)
             # Reset global flag after triggering recalibration to avoid forcing it on every forward

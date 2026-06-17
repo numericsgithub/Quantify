@@ -15,6 +15,7 @@ from .engine_utils import set_seed, get_hardware_info, EarlyStopping
 # V2 — corrected protocol for the project's custom quantizers
 from .trainer_v2 import QATTrainerV2
 from .config_v2 import TrainerConfigV2, QATScheduleConfigV2
+from .lr_finder import find_lr, LRFindResult
 
 __all__ = [
     # V1
@@ -39,4 +40,6 @@ __all__ = [
     "QATTrainerV2",
     "TrainerConfigV2",
     "QATScheduleConfigV2",
+    "find_lr",
+    "LRFindResult",
 ]

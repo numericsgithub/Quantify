@@ -49,6 +49,7 @@ from training_harness.trainer_v2 import QATTrainerV2
 from training_harness.config_v2 import TrainerConfigV2, QATScheduleConfigV2
 from training_harness.config import CheckpointConfig
 from training_harness.schedulers import WarmupCosineScheduler
+from training_harness.lr_finder import find_lr
 from utils.weight_mapping import load_pretrained_weights
 
 
@@ -200,6 +201,34 @@ def parse_args() -> argparse.Namespace:
         help="Number of batches per epoch when --dry-run is active",
     )
 
+    # ---- LR Finder ---------------------------------------------------------
+    lr = p.add_argument_group("lr finder")
+    lr.add_argument(
+        "--find-lr",
+        action="store_true",
+        help=(
+            "Run the two-phase LR Range Test instead of normal training. "
+            "Uses whichever model weights are active at startup "
+            "(--pretrained or default init)."
+        ),
+    )
+    lr.add_argument(
+        "--find-lr-sweep-start", type=float, default=1e-8,
+        help="Start of the LR sweep (default: 1e-8)",
+    )
+    lr.add_argument(
+        "--find-lr-sweep-end", type=float, default=1e-2,
+        help="End of the LR sweep (default: 1e-2)",
+    )
+    lr.add_argument(
+        "--find-lr-steps", type=int, default=100,
+        help="Number of steps in the LR sweep (default: 100)",
+    )
+    lr.add_argument(
+        "--find-lr-calib-steps", type=int, default=10,
+        help="Calibration pre-pass steps in Phase 1 (default: 10)",
+    )
+
     return p.parse_args()
 
 
@@ -313,6 +342,40 @@ def _build_dali_loaders(args):
     return train_loader, val_loader
 
 
+def _build_train_eval_loader(args):
+    """
+    Loader over the training images with val-style transforms (center-crop, no
+    augmentation). Comparing its accuracy against val_loader shows how well the
+    model fits the training distribution; using training augmentations here would
+    make training accuracy look artificially low.
+    """
+    if args.data_dir:
+        from utils.dali_pipeline import build_train_eval_dali_loader
+        return build_train_eval_dali_loader(
+            data_dir=args.data_dir,
+            batch_size=args.batch_size,
+            num_threads=args.dali_threads,
+        )
+
+    normalize = T.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
+    bicubic = T.InterpolationMode.BICUBIC
+    val_preprocess = T.Compose([
+        T.Resize(236, interpolation=bicubic),
+        T.CenterCrop(224),
+        T.ToTensor(),
+        normalize,
+    ])
+    hf_train = load_dataset(args.hf_dataset, split="train")
+    persistent = args.num_workers > 0
+    prefetch   = args.prefetch_factor if args.num_workers > 0 else None
+    return DataLoader(
+        HFDatasetWrapper(hf_train, val_preprocess),
+        batch_size=args.batch_size, shuffle=False,
+        num_workers=args.num_workers, pin_memory=True,
+        persistent_workers=persistent, prefetch_factor=prefetch,
+    )
+
+
 def _build_hf_loaders(args):
     normalize = T.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
     bicubic = T.InterpolationMode.BICUBIC
@@ -398,10 +461,28 @@ def main() -> None:
     # Data
     train_loader, val_loader = _build_dataloaders(args)
 
-    # Optimizer + cosine LR with warmup
+    # Optimizer
     optimizer = torch.optim.AdamW(
         model.parameters(), lr=args.lr, weight_decay=args.weight_decay,
     )
+
+    # ── LR Finder mode ───────────────────────────────────────────────────────
+    if args.find_lr:
+        find_lr(
+            model=model,
+            optimizer=optimizer,
+            train_loader=train_loader,
+            loss_fn=nn.CrossEntropyLoss(label_smoothing=0.1),
+            device="auto",
+            calibration_steps=args.find_lr_calib_steps,
+            sweep_start_lr=args.find_lr_sweep_start,
+            sweep_end_lr=args.find_lr_sweep_end,
+            sweep_steps=args.find_lr_steps,
+            out_dir=os.path.join(args.output_dir, "lr_finder"),
+            grad_clip_norm=1.0,
+        )
+        return
+    # ─────────────────────────────────────────────────────────────────────────
     total_steps = len(train_loader) * args.epochs
     scheduler = WarmupCosineScheduler(
         optimizer,
@@ -457,6 +538,13 @@ def main() -> None:
         scheduler=scheduler,
         onnx_dummy_input=torch.zeros(1, 3, 224, 224),
     )
+
+    train_eval_loader = _build_train_eval_loader(args)
+
+    print("\nPre-training evaluation (eval mode, quantization disabled, val transforms):")
+    trainer.evaluate(val_loader,        label="val  ")
+    trainer.evaluate(train_eval_loader, label="train")
+    print()
 
     tracker = trainer.fit()
 

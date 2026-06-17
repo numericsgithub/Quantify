@@ -175,7 +175,7 @@ class TestFindOptimalLsb:
         bw = 4
         mode = RoundingMode.ROUND_TO_NEAREST_EVEN
 
-        best_lsb , _ = find_optimal_lsb(weights, bw, signed, mode)
+        best_lsb, _, _ = find_optimal_lsb(weights, bw, signed, mode)
 
         # Verify: no other nearby LSB gives strictly more unique values
         best_q = quantize_fixed_point(weights, best_lsb, bw, signed, mode)
@@ -196,7 +196,7 @@ class TestFindOptimalLsb:
         bw = 8  # more bits → more likely to tie on unique count
         mode = RoundingMode.ROUND_TO_NEAREST_EVEN
 
-        best_lsb , _ = find_optimal_lsb(weights, bw, signed, mode)
+        best_lsb, _, _ = find_optimal_lsb(weights, bw, signed, mode)
         best_q = quantize_fixed_point(weights, best_lsb, bw, signed, mode)
         best_unique = torch.unique(best_q).numel()
         best_sad = torch.sum(torch.abs(weights - best_q)).item()
@@ -214,7 +214,7 @@ class TestFindOptimalLsb:
     def test_all_zeros(self):
         """All-zero weights should not crash."""
         weights = torch.zeros(64)
-        lsb , _ = find_optimal_lsb(weights, 4, False, RoundingMode.ROUND_TO_NEAREST_EVEN)
+        lsb, _, _ = find_optimal_lsb(weights, 4, False, RoundingMode.ROUND_TO_NEAREST_EVEN)
         assert isinstance(lsb, int)
 
     def test_positive_weights_choose_unsigned_range(self):
@@ -223,9 +223,9 @@ class TestFindOptimalLsb:
         weights = torch.rand(256) * 3.0  # [0, 3)
         bw = 4
 
-        lsb_unsigned , _ = find_optimal_lsb(weights, bw, signed=False,
+        lsb_unsigned, _, _ = find_optimal_lsb(weights, bw, signed=False,
                                         rounding_mode=RoundingMode.ROUND_TO_NEAREST_EVEN)
-        lsb_signed , _ = find_optimal_lsb(weights, bw, signed=True,
+        lsb_signed, _, _ = find_optimal_lsb(weights, bw, signed=True,
                                       rounding_mode=RoundingMode.ROUND_TO_NEAREST_EVEN)
 
         q_unsigned = quantize_fixed_point(weights, lsb_unsigned, bw, False,
@@ -817,6 +817,60 @@ class TestBiasQuantizerIntegration(unittest.TestCase):
         out = layer(x)
         self.assertEqual(out.shape, (1, 32))
         self.assertTrue(torch.isfinite(out).all())
+
+
+# =========================================================================
+# 18. Eval-mode guard for uncalibrated quantizers
+# =========================================================================
+
+
+class TestUncalibratedEvalGuard(unittest.TestCase):
+    def setUp(self):
+        from quantizers.manager import QuantizerManager
+        QuantizerManager().reset()
+
+    def test_raises_in_eval_mode_before_calibration(self):
+        """Active, uncalibrated quantizer must raise in eval mode."""
+        q = FixedPointPerTensorQuantizer(bit_width=8)
+        q.eval()
+        # annealing_alpha=1.0 (active) and search_done=False (uncalibrated)
+        with self.assertRaises(RuntimeError, msg="Expected RuntimeError for uncalibrated eval"):
+            q(torch.randn(4, 4))
+
+    def test_no_raise_in_train_mode_before_calibration(self):
+        """Calibration in training mode must succeed without error."""
+        q = FixedPointPerTensorQuantizer(bit_width=8)
+        q.train()
+        out, *_ = q(torch.randn(4, 4))  # calibrates on first forward
+        self.assertTrue(q.search_done.item())
+
+    def test_no_raise_when_disabled_in_eval_mode(self):
+        """alpha=0 (disabled) must not raise even if uncalibrated."""
+        from quantizers.manager import QuantizerManager
+        q = FixedPointPerTensorQuantizer(bit_width=8)
+        QuantizerManager().disable_quantization()
+        q.eval()
+        x = torch.randn(4, 4)
+        out, *_ = q(x)  # passes through unchanged
+        # Output is x regardless of calibration because alpha=0
+        self.assertTrue(torch.allclose(out, x))
+
+    def test_no_raise_after_calibration_in_eval_mode(self):
+        """Once calibrated in training mode, eval mode must work fine."""
+        q = FixedPointPerTensorQuantizer(bit_width=8)
+        q.train()
+        q(torch.randn(4, 4))      # calibrate
+        q.eval()
+        out, *_ = q(torch.randn(4, 4))  # must not raise
+        self.assertTrue(torch.isfinite(out).all())
+
+    def test_error_message_names_quantizer(self):
+        """Error message should include the quantizer's quant_id."""
+        q = FixedPointPerTensorQuantizer(bit_width=8)
+        q.eval()
+        with self.assertRaises(RuntimeError) as ctx:
+            q(torch.randn(4, 4))
+        self.assertIn("quant_", str(ctx.exception))
 
 
 if __name__ == "__main__":

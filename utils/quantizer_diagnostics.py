@@ -321,45 +321,81 @@ def _save_search_plot(
     if not search_records:
         return
 
+    from matplotlib.patches import Patch
+
     # Sort low → high for a natural left-to-right x-axis
-    records = sorted(search_records, key=lambda r: r[0])
+    records   = sorted(search_records, key=lambda r: r[0])
     lsb_vals  = [r[0] for r in records]
     n_uniq    = [r[1] for r in records]
     sad_vals  = [r[2] for r in records]
     n_max     = 2 ** bit_width
 
+    global_max_unique = max(n_uniq)
+    min_sad           = min(sad_vals)
+    min_sad_lsb       = lsb_vals[sad_vals.index(min_sad)]
+
     fig, ax_sad = plt.subplots(figsize=(14, 5))
     ax_uniq = ax_sad.twinx()
 
-    # ── SAD bars ────────────────────────────────────────────────────────────
-    bar_colors = ["orangered" if lsb == best_lsb else "steelblue" for lsb in lsb_vals]
-    ax_sad.bar(lsb_vals, sad_vals, color=bar_colors, alpha=0.75, width=0.6,
-               label="SAD (Sum of Absolute Differences)")
+    # ── SAD bars ─────────────────────────────────────────────────────────────
+    # orangered = selected, gold = lowest SAD, steelblue = everything else.
+    # If selected and lowest-SAD coincide, orangered wins.
+    def _bar_color(lsb):
+        if lsb == best_lsb:    return "orangered"
+        if lsb == min_sad_lsb: return "gold"
+        return "steelblue"
+
+    ax_sad.bar(lsb_vals, sad_vals, color=[_bar_color(l) for l in lsb_vals],
+               alpha=0.75, width=0.6)
     ax_sad.set_xlabel("LSB position")
     ax_sad.set_ylabel("SAD", color="steelblue")
     ax_sad.tick_params(axis="y", labelcolor="steelblue")
 
-    # ── Unique-values line ───────────────────────────────────────────────────
-    ax_uniq.plot(lsb_vals, n_uniq, color="green", marker="o", markersize=4,
-                 linewidth=1.5, label=f"Unique values")
-    ax_uniq.axhline(n_max, color="green", linestyle=":", linewidth=1.0, alpha=0.6,
-                    label=f"Max representable ({n_max})")
+    # ── Unique-values line + markers ─────────────────────────────────────────
+    # Line connecting all points, then two scatter series:
+    #   • circles  for positions that did NOT reach global max unique count
+    #   • stars (★) for positions that DID reach global max unique count
+    ax_uniq.plot(lsb_vals, n_uniq, color="green", linewidth=1.5, zorder=2)
+
+    non_max_x = [lsb_vals[i] for i, u in enumerate(n_uniq) if u < global_max_unique]
+    non_max_y = [u           for u in n_uniq                if u < global_max_unique]
+    if non_max_x:
+        ax_uniq.scatter(non_max_x, non_max_y, color="green", marker="o",
+                        s=20, zorder=3)
+
+    max_x = [lsb_vals[i] for i, u in enumerate(n_uniq) if u == global_max_unique]
+    max_y = [u           for u in n_uniq                if u == global_max_unique]
+    ax_uniq.scatter(max_x, max_y, color="darkgreen", marker="*",
+                    s=180, zorder=4)
+
+    ax_uniq.axhline(n_max, color="green", linestyle=":", linewidth=1.0, alpha=0.6)
     ax_uniq.set_ylabel(f"Unique values  (max {n_max})", color="green")
     ax_uniq.tick_params(axis="y", labelcolor="green")
     ax_uniq.set_ylim(bottom=0, top=n_max * 1.12)
 
-    # ── Selected LSB marker ─────────────────────────────────────────────────
-    ax_sad.axvline(best_lsb, color="red", linestyle="--", linewidth=1.5,
-                   label=f"Selected  LSB={best_lsb}")
+    # ── Selected LSB marker ───────────────────────────────────────────────────
+    ax_sad.axvline(best_lsb, color="red", linestyle="--", linewidth=1.5)
 
-    # ── Integer x-ticks ─────────────────────────────────────────────────────
+    # ── Integer x-ticks ──────────────────────────────────────────────────────
     ax_sad.set_xticks(lsb_vals)
     ax_sad.tick_params(axis="x", rotation=45)
 
-    # ── Combined legend ──────────────────────────────────────────────────────
-    h1, l1 = ax_sad.get_legend_handles_labels()
-    h2, l2 = ax_uniq.get_legend_handles_labels()
-    ax_sad.legend(h1 + h2, l1 + l2, loc="upper left", fontsize=8)
+    # ── Manual legend (mix of bar patches, line, and scatter markers) ─────────
+    from matplotlib.lines import Line2D
+    selected_label = f"Selected  LSB={best_lsb}"
+    if best_lsb == min_sad_lsb:
+        selected_label += "  (also min SAD)"
+    legend_handles = [
+        Patch(facecolor="orangered", alpha=0.75, label=selected_label),
+        Patch(facecolor="gold",      alpha=0.75, label=f"Min SAD  LSB={min_sad_lsb}"),
+        Patch(facecolor="steelblue", alpha=0.75, label="SAD"),
+        Line2D([0], [0], color="green", linewidth=1.5, label="Unique values"),
+        Line2D([0], [0], color="darkgreen", marker="*", markersize=9,
+               linestyle="None", label=f"Max unique ({global_max_unique}) — {len(max_x)} positions"),
+        Line2D([0], [0], color="green", linestyle=":", linewidth=1.0,
+               label=f"Max representable ({n_max})"),
+    ]
+    ax_sad.legend(handles=legend_handles, loc="upper left", fontsize=8)
 
     rule = ("highest LSB with max unique values"
             if quantizer_role == "activation"

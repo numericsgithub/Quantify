@@ -143,6 +143,51 @@ class QATTrainerV2:
         self._onnx_dummy_input = onnx_dummy_input
 
     # ------------------------------------------------------------------
+    # Pre-training / standalone evaluation
+    # ------------------------------------------------------------------
+
+    def evaluate(self, loader, label: str = "eval") -> Dict[str, float]:
+        """
+        Evaluate the model in eval mode on the full loader with all quantization
+        disabled. Safe to call before fit(); fit() will re-initialise state.
+
+        Returns a dict with ``{label}_loss`` and ``{label}_acc`` keys.
+        """
+        self.model.to(self.device)
+        _reset_and_register(self.model)
+        _fully_disable_quantization(self.model)
+
+        self.model.eval()
+        total_loss = 0.0
+        total_correct = 0
+        total_samples = 0
+        with torch.no_grad():
+            pbar = tqdm(loader, desc=f"  [{label}]", leave=False, dynamic_ncols=True)
+            for batch in pbar:
+                inputs, targets = _unpack_batch(batch)
+                inputs  = inputs.to(self.device)
+                targets = targets.to(self.device)
+                with torch.autocast(device_type=self.device.type, enabled=self._use_amp):
+                    outputs = self.model(inputs)
+                    loss    = self.loss_fn(outputs, targets)
+                preds = outputs.argmax(dim=-1)
+                total_loss    += loss.item() * targets.size(0)
+                total_correct += (preds == targets).sum().item()
+                total_samples += targets.size(0)
+            pbar.close()
+
+        metrics = {
+            f"{label}_loss": total_loss / total_samples,
+            f"{label}_acc":  total_correct / total_samples,
+        }
+        print(
+            f"  [{label}]  loss={metrics[f'{label}_loss']:.4f}"
+            f"  acc={metrics[f'{label}_acc']:.4f}"
+            f"  ({total_samples:,} samples)"
+        )
+        return metrics
+
+    # ------------------------------------------------------------------
     # Primary entry point
     # ------------------------------------------------------------------
 

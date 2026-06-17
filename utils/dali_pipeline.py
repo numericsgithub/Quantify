@@ -141,6 +141,36 @@ class DALILoader:
 # Public factory
 # ---------------------------------------------------------------------------
 
+def build_train_eval_dali_loader(
+    data_dir: str | Path,
+    batch_size: int,
+    num_threads: int = 4,
+    device_id: int = 0,
+    crop: int = 224,
+    resize_shorter: int = 236,
+) -> DALILoader:
+    """
+    DALI loader that reads training images with val-style transforms (center-crop,
+    no augmentation). Use this for pre-training accuracy checks: comparing this
+    number against the val loader result shows how well the model fits the
+    training distribution without the confounding effect of random augmentation.
+    """
+    data_dir = Path(data_dir)
+    pipe = _val_pipeline(
+        file_root=str(data_dir / "train"),
+        num_shards=1,
+        shard_id=0,
+        crop=crop,
+        resize_shorter=resize_shorter,
+        batch_size=batch_size,
+        num_threads=num_threads,
+        device_id=device_id,
+    )
+    pipe.build()
+    n_train = pipe.epoch_size("Reader")
+    return DALILoader(pipe, n_train, batch_size, LastBatchPolicy.PARTIAL, already_built=True)
+
+
 def build_dali_loaders(
     data_dir: str | Path,
     batch_size: int,
