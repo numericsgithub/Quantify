@@ -64,7 +64,7 @@ def _train_pipeline(file_root: str, num_shards: int, shard_id: int, crop: int = 
 
 @pipeline_def
 def _val_pipeline(file_root: str, num_shards: int, shard_id: int,
-                  crop: int = 224, resize_shorter: int = 236):
+                  crop: int = 224, resize_shorter: int = 256):
     jpegs, labels = fn.readers.file(
         file_root=file_root,
         random_shuffle=False,
@@ -139,7 +139,7 @@ def build_dali_loaders(
     num_threads: int = 4,
     device_id: int = 0,
     crop: int = 224,
-    resize_shorter: int = 236,
+    resize_shorter: int = 256,
 ) -> tuple[DALILoader, DALILoader]:
     """
     Build DALI train and val loaders from an ImageFolder directory.
@@ -150,8 +150,8 @@ def build_dali_loaders(
         num_threads:     CPU threads for pre-processing stages before GPU.
         device_id:       CUDA device index.
         crop:            Output spatial size (default 224).
-        resize_shorter:  Val resize-shorter target before center-crop (default 236,
-                         matching timm's crop_pct=0.95 for the RSB recipe).
+        resize_shorter:  Val resize-shorter target before center-crop (default 256,
+                         matching the standard torchvision IMAGENET1K recipe).
 
     Returns:
         (train_loader, val_loader)

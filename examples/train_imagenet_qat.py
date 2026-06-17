@@ -281,20 +281,19 @@ def _build_model(args, weight_quant, act_quant, bias_quant) -> nn.Module:
 
 
 def _load_pretrained(model: nn.Module, args) -> nn.Module:
-    import timm
-    from torchvision.models import mobilenet_v2, MobileNet_V2_Weights
+    from torchvision.models import (
+        resnet18, ResNet18_Weights,
+        resnet50, ResNet50_Weights,
+        mobilenet_v2, MobileNet_V2_Weights,
+    )
 
-    if args.model in ("resnet18", "resnet50"):
-        # timm provides better-trained weights than torchvision V1:
-        #   resnet18 → ~73.3% top-1  (vs torchvision V1 69.8%)
-        #   resnet50 → ~80.9% top-1  (vs torchvision V1 76.1%)
-        # timm's default ResNet uses the same parameter naming as torchvision,
-        # so the existing name-based weight mapping works without changes.
-        print(f"[pretrained] Loading timm/{args.model} pretrained weights …")
-        float_model = timm.create_model(args.model, pretrained=True)
+    if args.model == "resnet18":
+        print(f"[pretrained] Loading torchvision resnet18 (IMAGENET1K_V1) …")
+        float_model = resnet18(weights=ResNet18_Weights.DEFAULT)
+    elif args.model == "resnet50":
+        print(f"[pretrained] Loading torchvision resnet50 (IMAGENET1K_V2) …")
+        float_model = resnet50(weights=ResNet50_Weights.DEFAULT)
     elif args.model == "mobilenetv2":
-        # timm's MobileNetV2 uses different layer naming; torchvision naming
-        # matches our QuantMobileNetV2 module structure directly.
         print(f"[pretrained] Loading torchvision mobilenet_v2 pretrained weights …")
         float_model = mobilenet_v2(weights=MobileNet_V2_Weights.DEFAULT)
     else:
@@ -345,21 +344,18 @@ def _build_dali_loaders(args):
 
 def _build_hf_loaders(args):
     normalize = T.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
-    bicubic = T.InterpolationMode.BICUBIC
 
-    # RSB-aligned recipe (matches timm resnet18/50 a1_in1k pretraining):
-    #   train: bicubic crop + RandAugment(2,9) + RandomErasing
-    #   val:   Resize(236, bicubic) + CenterCrop(224)  [crop_pct=0.95]
+    # Standard torchvision recipe (matches IMAGENET1K_V1/V2 pretrained weights):
+    #   train: RandomResizedCrop(224) + RandomHorizontalFlip
+    #   val:   Resize(256) + CenterCrop(224)
     train_preprocess = T.Compose([
-        T.RandomResizedCrop(224, interpolation=bicubic),
+        T.RandomResizedCrop(224),
         T.RandomHorizontalFlip(),
-        T.RandAugment(num_ops=2, magnitude=9, interpolation=bicubic),
         T.ToTensor(),
         normalize,
-        T.RandomErasing(p=0.25),
     ])
     val_preprocess = T.Compose([
-        T.Resize(236, interpolation=bicubic),
+        T.Resize(256),
         T.CenterCrop(224),
         T.ToTensor(),
         normalize,
