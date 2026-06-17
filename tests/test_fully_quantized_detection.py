@@ -146,14 +146,13 @@ class TestAnnealingMechanics:
         _run_forward(q, 10, training=True)  # more than enough
         assert q.annealing_alpha.item() == pytest.approx(1.0)
 
-    def test_alpha_increments_in_eval_mode_too(self):
-        # Annealing advances regardless of train/eval — only gating is
-        # training-mode-only.
+    def test_alpha_does_not_increment_in_eval_mode(self):
+        # Both gating and annealing are now training-mode-only.
+        # Eval passes use the current alpha for blending but do not advance it.
         q = _fresh_quantizer()
         QuantizerManager().set_annealing_for_n_inferences(10)
         _run_forward(q, 5, training=False)
-        # alpha should have advanced during eval passes
-        assert q.annealing_alpha.item() > 0.0
+        assert q.annealing_alpha.item() == pytest.approx(0.0)
 
     def test_fully_quantized_flag_flips_after_n_inferences(self):
         q = _fresh_quantizer()
@@ -225,10 +224,6 @@ class TestGatingMechanics:
             q1(x); q2(x)
 
         assert q2.inference_counter == counter_after_train  # counter frozen
-
-        # NOTE: q1 (non-gated) DOES advance alpha during eval passes because
-        # the annealing block runs regardless of training mode.  This is the
-        # intended design — only the gating countdown is training-mode-only.
         assert q2.annealing_alpha.item() == pytest.approx(0.0)  # gated, never annealed
 
     def test_quantizer_starts_annealing_after_gate_passes(self):
