@@ -342,39 +342,6 @@ def _build_dali_loaders(args):
     return train_loader, val_loader
 
 
-def _build_train_eval_loader(args):
-    """
-    Loader over the training images with val-style transforms (center-crop, no
-    augmentation). Comparing its accuracy against val_loader shows how well the
-    model fits the training distribution; using training augmentations here would
-    make training accuracy look artificially low.
-    """
-    if args.data_dir:
-        from utils.dali_pipeline import build_train_eval_dali_loader
-        return build_train_eval_dali_loader(
-            data_dir=args.data_dir,
-            batch_size=args.batch_size,
-            num_threads=args.dali_threads,
-        )
-
-    normalize = T.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
-    bicubic = T.InterpolationMode.BICUBIC
-    val_preprocess = T.Compose([
-        T.Resize(236, interpolation=bicubic),
-        T.CenterCrop(224),
-        T.ToTensor(),
-        normalize,
-    ])
-    hf_train = load_dataset(args.hf_dataset, split="train")
-    persistent = args.num_workers > 0
-    prefetch   = args.prefetch_factor if args.num_workers > 0 else None
-    return DataLoader(
-        HFDatasetWrapper(hf_train, val_preprocess),
-        batch_size=args.batch_size, shuffle=False,
-        num_workers=args.num_workers, pin_memory=True,
-        persistent_workers=persistent, prefetch_factor=prefetch,
-    )
-
 
 def _build_hf_loaders(args):
     normalize = T.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
@@ -539,11 +506,9 @@ def main() -> None:
         onnx_dummy_input=torch.zeros(1, 3, 224, 224),
     )
 
-    train_eval_loader = _build_train_eval_loader(args)
-
-    print("\nPre-training evaluation (eval mode, quantization disabled, val transforms):")
-    trainer.evaluate(val_loader,        label="val  ")
-    trainer.evaluate(train_eval_loader, label="train")
+    print("\nPre-training evaluation (eval mode, quantization disabled):")
+    trainer.evaluate(val_loader,   label="val  ")
+    trainer.evaluate(train_loader, label="train")
     print()
 
     tracker = trainer.fit()
