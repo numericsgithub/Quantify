@@ -78,6 +78,7 @@ checkpoints/
 logs/
 data/
 plots/
+output/
 *.csv
 *.json
 .aider*
