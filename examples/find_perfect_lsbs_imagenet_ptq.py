@@ -586,7 +586,6 @@ def main() -> None:
     # ── Disable all quantizers; prevent accidental calibration triggers ───────
     for _, q in mgr.quantizers.items():
         q.annealing_alpha.data.fill_(0.0)
-        q.annealing_alpha_step = 0.0
         q.search_done.fill_(True)
 
     # ── Output directory & log ───────────────────────────────────────────────
@@ -721,8 +720,6 @@ def main() -> None:
 
         calib_lsb    = int(q.search_result_lsb.item())
         calib_signed = bool(q.search_result_is_signed.item())
-        # alpha is now 1.0 — jumped there by annealing_alpha_step=1 during the active step
-        q.annealing_alpha_step = 0.0   # freeze: no further annealing changes
         print(f"  Calibrated in {calib_steps} step(s): LSB={calib_lsb}  signed={calib_signed}")
 
         # ── Sweep LSB candidates ───────────────────────────────────────────────
