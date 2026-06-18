@@ -21,6 +21,13 @@ def _relu(act_quant):
     return nn.ReLU(inplace=True)
 
 
+def _quant_identity(act_quant):
+    """Return a QuantIdentity for quantizing pre-add / skip-path activations, or None."""
+    if act_quant is not None:
+        return qnn.QuantIdentity(act_quant=act_quant)
+    return None
+
+
 # ---------------------------------------------------------------------------
 # Building blocks
 # ---------------------------------------------------------------------------
@@ -43,6 +50,7 @@ class QuantBasicBlock(nn.Module):
             weight_quant=weight_quant,
         )
         self.bn2 = nn.BatchNorm2d(planes)
+        self.pre_add_quant = _quant_identity(act_quant)
         self.relu2 = _relu(act_quant)
         self.downsample = downsample
 
@@ -50,6 +58,8 @@ class QuantBasicBlock(nn.Module):
         identity = x
         out = self.relu1(self.bn1(self.conv1(x)))
         out = self.bn2(self.conv2(out))
+        if self.pre_add_quant is not None:
+            out = self.pre_add_quant(out)
         if self.downsample is not None:
             identity = self.downsample(x)
         return self.relu2(out + identity)
@@ -75,6 +85,7 @@ class QuantBottleneck(nn.Module):
             planes, planes * self.expansion, 1, bias=False, weight_quant=weight_quant,
         )
         self.bn3 = nn.BatchNorm2d(planes * self.expansion)
+        self.pre_add_quant = _quant_identity(act_quant)
         self.relu3 = _relu(act_quant)
         self.downsample = downsample
 
@@ -83,6 +94,8 @@ class QuantBottleneck(nn.Module):
         out = self.relu1(self.bn1(self.conv1(x)))
         out = self.relu2(self.bn2(self.conv2(out)))
         out = self.bn3(self.conv3(out))
+        if self.pre_add_quant is not None:
+            out = self.pre_add_quant(out)
         if self.downsample is not None:
             identity = self.downsample(x)
         return self.relu3(out + identity)
@@ -129,6 +142,7 @@ class QuantResNet(nn.Module):
         self.layer4 = self._make_layer(block, 512, layers[3], stride=2)
 
         self.avgpool = nn.AdaptiveAvgPool2d((1, 1))
+        self.flatten = nn.Flatten()
         fc_kw = {"bias_quant": bias_quant} if bias_quant is not None else {}
         self.fc = qnn.QuantLinear(
             512 * block.expansion, num_classes, bias=True,
@@ -138,13 +152,16 @@ class QuantResNet(nn.Module):
     def _make_layer(self, block, planes, num_blocks, stride=1):
         downsample = None
         if stride != 1 or self._in_planes != planes * block.expansion:
-            downsample = nn.Sequential(
+            ds_modules = [
                 qnn.QuantConv2d(
                     self._in_planes, planes * block.expansion, 1,
                     stride=stride, bias=False, weight_quant=self._weight_quant,
                 ),
                 nn.BatchNorm2d(planes * block.expansion),
-            )
+            ]
+            if self._act_quant is not None:
+                ds_modules.append(qnn.QuantIdentity(act_quant=self._act_quant))
+            downsample = nn.Sequential(*ds_modules)
 
         layers = [block(
             self._in_planes, planes, stride=stride,
@@ -167,7 +184,7 @@ class QuantResNet(nn.Module):
         x = self.layer3(x)
         x = self.layer4(x)
         x = self.avgpool(x)
-        x = x.flatten(1)
+        x = self.flatten(x)
         return self.fc(x)
 
 

@@ -78,6 +78,41 @@ class WeightQuant(FixedPointPerTensorWeightQuant):
 
 - Never call `setattr()` on an injector class either — it hits the same guard.
 
+## 10. Residual Paths Are Not Quantized Without Explicit `QuantIdentity`
+
+**When this happens:** You build a quantized residual network (ResNet-style) and pass `act_quant` to the blocks, expecting all activations to be quantized.
+
+**The Problem:** Two paths in a residual block produce unquantized tensors unless you explicitly add `QuantIdentity`:
+
+1. **Pre-add main path**: After the last `conv → BN` in each block (before the residual add), the BN output is a plain float. The `QuantReLU` only quantizes the output of the *sum*, not the individual branches.
+2. **Downsample skip path**: The `1×1 QuantConv2d → BN` in the downsample branch produces an unquantized tensor. Without a `QuantIdentity` after the BN, the identity branch is float when it reaches the add.
+
+These unquantized tensors are not fake-quantized during QAT, so the simulation does not match the deployed hardware behavior.
+
+**How to Prevent It:**
+
+Add `QuantIdentity` to both paths. In each block, add a `pre_add_quant` module after the last BN:
+
+```python
+self.pre_add_quant = qnn.QuantIdentity(act_quant=act_quant) if act_quant else None
+
+# In forward():
+out = self.bn2(self.conv2(out))
+if self.pre_add_quant is not None:
+    out = self.pre_add_quant(out)
+```
+
+And append a `QuantIdentity` to the downsample `Sequential` when `act_quant` is set:
+
+```python
+ds_modules = [QuantConv2d(...), BatchNorm2d(...)]
+if act_quant is not None:
+    ds_modules.append(qnn.QuantIdentity(act_quant=act_quant))
+downsample = nn.Sequential(*ds_modules)
+```
+
+`QuantIdentity` accepts `act_quant` injectors designed for activations. The `FixedPointPerTensorQuantizer` auto-detects signed/unsigned during calibration, so it correctly handles the negative BN outputs on the pre-add path even though `FixedPointPerTensorActivationQuant` defaults to `signed=False`.
+
 ## 8. Custom ONNX Nodes Don't Run in ORT
 **When this happens:** You export a model with `Quantify::CustomOp` and expect ONNX Runtime to execute it natively.
 **The Problem:** ORT only executes standard ONNX ops or registered custom kernels. Unregistered `Quantify::` nodes will cause fallback warnings or runtime errors.
