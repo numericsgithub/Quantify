@@ -479,9 +479,9 @@ def run_diagnostics(
     m["n_plot_samples"] = n_plot
 
     if n_total > MAX_PLOT_SAMPLES:
-        idx   = torch.randperm(n_total, device=x_d.device)[:MAX_PLOT_SAMPLES]
-        x_cpu = x_d.ravel()[idx].cpu()
-        q_cpu = q_d.ravel()[idx].cpu()
+        idx   = torch.randperm(n_total)[:MAX_PLOT_SAMPLES]  # CPU — avoids large GPU alloc
+        x_cpu = x_d.ravel().cpu()[idx]
+        q_cpu = q_d.ravel().cpu()[idx]
     else:
         x_cpu = x_d.cpu()
         q_cpu = q_d.cpu()
