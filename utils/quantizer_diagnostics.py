@@ -479,12 +479,11 @@ def run_diagnostics(
     m["n_plot_samples"] = n_plot
 
     if n_total > MAX_PLOT_SAMPLES:
-        idx   = torch.randperm(n_total)[:MAX_PLOT_SAMPLES]  # CPU — avoids large GPU alloc
-        x_cpu = x_d.ravel().cpu()[idx]
-        q_cpu = q_d.ravel().cpu()[idx]
+        x_cpu = x_d.ravel()[:MAX_PLOT_SAMPLES].cpu()
+        q_cpu = q_d.ravel()[:MAX_PLOT_SAMPLES].cpu()
     else:
-        x_cpu = x_d.cpu()
-        q_cpu = q_d.cpu()
+        x_cpu = x_d.ravel().cpu()
+        q_cpu = q_d.ravel().cpu()
 
     log_path  = Path(out_dir) / f"quantizer_{quant_id}.txt"
     safe      = trigger.replace(" ", "_")
