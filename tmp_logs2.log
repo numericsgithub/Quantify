@@ -1,0 +1,39 @@
+Traceback (most recent call last):
+  File "<frozen runpy>", line 198, in _run_module_as_main
+  File "<frozen runpy>", line 88, in _run_code
+  File "/home/th/Desktop/brevitas-quantizers/examples/train_custom_yolo.py", line 38, in <module>
+    from models.yolov8PanOnly import YOLOv8nPANOnly
+  File "/home/th/Desktop/brevitas-quantizers/models/yolov8PanOnly.py", line 34, in <module>
+    from models.yolov8n import (
+  File "/home/th/Desktop/brevitas-quantizers/models/yolov8n.py", line 57, in <module>
+    import brevitas.nn as qnn
+  File "/home/th/miniconda3/envs/brevitas-qat/lib/python3.12/site-packages/brevitas/nn/__init__.py", line 4, in <module>
+    from .hadamard_classifier import HadamardClassifier
+  File "/home/th/miniconda3/envs/brevitas-qat/lib/python3.12/site-packages/brevitas/nn/hadamard_classifier.py", line 19, in <module>
+    from .mixin.base import QuantLayerMixin
+  File "/home/th/miniconda3/envs/brevitas-qat/lib/python3.12/site-packages/brevitas/nn/mixin/__init__.py", line 4, in <module>
+    from .acc import AccQuantType
+  File "/home/th/miniconda3/envs/brevitas-qat/lib/python3.12/site-packages/brevitas/nn/mixin/acc.py", line 11, in <module>
+    from brevitas.proxy.runtime_quant import AccQuantProxyProtocol
+  File "/home/th/miniconda3/envs/brevitas-qat/lib/python3.12/site-packages/brevitas/proxy/__init__.py", line 4, in <module>
+    from .float_parameter_quant import WeightFloatQuantProxyFromInjector
+  File "/home/th/miniconda3/envs/brevitas-qat/lib/python3.12/site-packages/brevitas/proxy/float_parameter_quant.py", line 15, in <module>
+    from brevitas.proxy.parameter_quant import BiasQuantProxyFromInjectorBase
+  File "/home/th/miniconda3/envs/brevitas-qat/lib/python3.12/site-packages/brevitas/proxy/parameter_quant.py", line 27, in <module>
+    from brevitas.utils.quant_utils import _CachedIO
+  File "/home/th/miniconda3/envs/brevitas-qat/lib/python3.12/site-packages/brevitas/utils/quant_utils.py", line 9, in <module>
+    from brevitas.core.quant import RescalingIntQuant
+  File "/home/th/miniconda3/envs/brevitas-qat/lib/python3.12/site-packages/brevitas/core/quant/__init__.py", line 12, in <module>
+    from .int import PrescaledRestrictIntQuant
+  File "/home/th/miniconda3/envs/brevitas-qat/lib/python3.12/site-packages/brevitas/core/quant/int.py", line 15, in <module>
+    from brevitas.core.scaling import TruncMsbScaling
+  File "/home/th/miniconda3/envs/brevitas-qat/lib/python3.12/site-packages/brevitas/core/scaling/__init__.py", line 10, in <module>
+    from brevitas.core.stats import SCALAR_SHAPE
+  File "/home/th/miniconda3/envs/brevitas-qat/lib/python3.12/site-packages/brevitas/core/stats/__init__.py", line 8, in <module>
+    from .stats_op import AbsAve
+  File "/home/th/miniconda3/envs/brevitas-qat/lib/python3.12/site-packages/brevitas/core/stats/stats_op.py", line 419, in <module>
+    class L1Norm(brevitas.jit.ScriptModule):
+  File "/home/th/miniconda3/envs/brevitas-qat/lib/python3.12/site-packages/brevitas/core/stats/stats_op.py", line 419, in L1Norm
+    class L1Norm(brevitas.jit.ScriptModule):
+    
+KeyboardInterrupt

@@ -536,6 +536,45 @@ class QATTrainerV2:
 # Module-level helpers
 # ------------------------------------------------------------------
 
+# Maps the Brevitas proxy suffix in a named_modules() path to an explicit
+# role tag that appears in the final quant_id.  Checked in order so longer
+# (more specific) suffixes win.
+_PROXY_SUFFIX_TO_ROLE: list[tuple[str, str]] = [
+    (".weight_quant.tensor_quant",                              "_weight"),
+    (".bias_quant.tensor_quant",                                "_bias"),
+    (".input_quant.tensor_quant",                               "_act_in"),
+    (".output_quant.tensor_quant",                              "_act_out"),
+    (".act_quant.fused_activation_quant_proxy.tensor_quant",    "_act"),
+    (".act_quant.tensor_quant",                                 "_act"),
+    # proxies without a nested tensor_quant (non-standard direct attachment)
+    (".weight_quant",                                           "_weight"),
+    (".bias_quant",                                             "_bias"),
+    (".input_quant",                                            "_act_in"),
+    (".output_quant",                                           "_act_out"),
+    (".act_quant",                                              "_act"),
+]
+
+
+def _make_quant_id(path: str) -> str:
+    """
+    Convert a named_modules() dotted path into a descriptive quant_id.
+
+    Strips the Brevitas proxy/tensor_quant suffix and appends an explicit
+    role tag so logs and plot file names are immediately readable:
+      features.3.conv.0.weight_quant.tensor_quant  →  features_3_conv_0_weight
+      features.3.conv.0.bias_quant.tensor_quant    →  features_3_conv_0_bias
+      features.3.conv.0.input_quant.tensor_quant   →  features_3_conv_0_act_in
+      features.3.conv.0.output_quant.tensor_quant  →  features_3_conv_0_act_out
+    """
+    for suffix, role in _PROXY_SUFFIX_TO_ROLE:
+        if path.endswith(suffix):
+            parent = path[: -len(suffix)]
+            base = parent.replace(".", "_") if parent else "root"
+            return f"{base}{role}"
+    # Fallback: non-standard path — clean dots to underscores
+    return path.replace(".", "_")
+
+
 def _reset_and_register(model: nn.Module) -> None:
     """
     Clear the QuantizerManager singleton state from any prior run, then
@@ -557,6 +596,24 @@ def _reset_and_register(model: nn.Module) -> None:
             module.inference_sequence_id = -1
             module.annealing_alpha.data.fill_(1.0)
             module.annealing_alpha_step = 0.1
+
+    # Assign descriptive location-based names.
+    # _make_quant_id strips Brevitas proxy noise and appends an explicit role
+    # tag (_weight / _bias / _act_in / _act_out / _act).
+    seen: dict[str, str] = {}  # qid → original path, for collision diagnostics
+    for path, module in model.named_modules():
+        if isinstance(module, _BaseQ):
+            qid = _make_quant_id(path)
+            if qid in seen:
+                raise RuntimeError(
+                    f"Duplicate quant_id {qid!r} produced from paths "
+                    f"{seen[qid]!r} and {path!r}. Please report this as a bug."
+                )
+            seen[qid] = path
+            module.quant_id = qid
+
+    # Keep the manager's registry keys in sync with the descriptive names.
+    mgr.quantizers = {q.quant_id: q for q in mgr.quantizers.values()}
 
 
 def _fully_disable_quantization(model: nn.Module) -> None:
