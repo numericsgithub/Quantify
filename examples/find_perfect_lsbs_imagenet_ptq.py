@@ -672,23 +672,46 @@ def main() -> None:
         q.annealing_alpha.data.fill_(0.0)
         q.annealing_alpha_step = 1.0
 
+        # Advance inference_counter to exactly the gap threshold so calibration
+        # fires on the very first training step.  The gap mechanism is designed
+        # for QAT multi-epoch training where steps accumulate naturally; for PTQ
+        # we force the counter to the threshold instead of waiting for it to
+        # accumulate organically (which may require many steps per quantizer).
+        gap_threshold = q.inference_sequence_id * mgr.quantization_start_gap
+        if q.inference_counter < gap_threshold:
+            q.inference_counter = gap_threshold
+
         # BN stats are frozen; only the quantizer calibration needs train mode.
         model.train()
         for m in model.modules():
             if isinstance(m, (nn.BatchNorm2d, nn.BatchNorm1d)):
                 m.eval()
 
-        # Loop until this quantizer's search_done flips True.  With
-        # quantization_start_gap=2 the quantizer at forward-pass position N
-        # gates for N*2 steps before firing; those steps accumulate organically
-        # from all prior calibration loops so in practice calibration usually
-        # triggers on the first or second step here.
+        # Run training steps until search_done flips True.  With the counter
+        # pre-advanced above, calibration fires on step 1 for all quantizers.
+        # The loop guards against the degenerate case where find_optimal_lsb
+        # sees only 1 unique value in the calibration data and refuses to mark
+        # calibration as done (_save_calibration only sets search_done=True when
+        # num_unique > 1); a hard limit prevents an infinite loop in that case.
+        MAX_CALIB_STEPS = 10
         calib_steps = 0
         while not q.search_done.item():
             calib_steps += 1
-            print(f"  calib step {calib_steps} (inference_counter={q.inference_counter}"
-                  f"  need≥{q.inference_sequence_id * mgr.quantization_start_gap}) …",
+            print(f"  calib step {calib_steps}/{MAX_CALIB_STEPS}"
+                  f"  (counter={q.inference_counter}"
+                  f"  threshold={gap_threshold}"
+                  f"  training={q.training}) …",
                   end="\r", flush=True)
+            if calib_steps > MAX_CALIB_STEPS:
+                print(f"\n  [WARNING] calibration did not complete after {MAX_CALIB_STEPS} steps"
+                      f" — search_done={q.search_done.item()}"
+                      f"  counter={q.inference_counter}"
+                      f"  threshold={gap_threshold}"
+                      f"  training={q.training}"
+                      f"  alpha={q.annealing_alpha.item()}")
+                print(f"  Forcing search_done=True with calibrated LSB={q.search_result_lsb.item()}")
+                q.search_done.fill_(True)
+                break
             optimizer.zero_grad()
             outputs = model(calib_images)
             loss = loss_fn(outputs, calib_labels)
