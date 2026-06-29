@@ -435,12 +435,19 @@ def _build_dali_loaders(args):
 def _build_hf_loaders(args):
     normalize = T.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
 
-    # Standard torchvision recipe (matches IMAGENET1K_V1/V2 pretrained weights):
-    #   train: RandomResizedCrop(224) + RandomHorizontalFlip
+    # TF-style recipe (matches MobileNet/EfficientNet training):
+    #   train: constrained RandomResizedCrop (area 5–100%, ratio 0.75–1.33, bilinear)
+    #          + RandomHorizontalFlip + ColorJitter (brightness ±32/255, saturation 0.5–1.5)
     #   val:   Resize(256) + CenterCrop(224)
     train_preprocess = T.Compose([
-        T.RandomResizedCrop(224),
+        T.RandomResizedCrop(
+            224,
+            scale=(0.05, 1.0),
+            ratio=(0.75, 1.33),
+            interpolation=T.InterpolationMode.BILINEAR,
+        ),
         T.RandomHorizontalFlip(),
+        T.ColorJitter(brightness=32.0 / 255.0, saturation=(0.5, 1.5)),
         T.ToTensor(),
         normalize,
     ])
