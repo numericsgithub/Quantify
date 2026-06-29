@@ -69,6 +69,19 @@ class QATScheduleConfigV2:
     track_scale_factors: bool = True
     """Log per-layer quantization scale factors at the end of each QAT epoch."""
 
+    preserve_calibrated_quantizers: bool = False
+    """
+    If True, quantizers that are already calibrated (search_done=True) when
+    QAT activates — e.g. because the model was initialized from a PTQ
+    checkpoint produced by examples/find_perfect_lsbs_imagenet_ptq.py — keep
+    their existing search_done/search_result_lsb and jump straight to
+    annealing_alpha=1.0 instead of being reset to search_done=False and
+    annealing_alpha=0.0 like a freshly-built, never-calibrated quantizer.
+    Quantizers that are NOT yet calibrated still go through the normal
+    reset + gradual annealing ramp. Default False preserves the original
+    behavior (every quantizer re-calibrates fresh against converged weights).
+    """
+
 
 @dataclass
 class TrainerConfigV2:

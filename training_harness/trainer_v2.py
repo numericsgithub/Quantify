@@ -362,11 +362,17 @@ class QATTrainerV2:
         4. Freeze BatchNorm statistics.
         """
         self._qat_active = True
+        preserve = self.config.qat.preserve_calibrated_quantizers
 
-        # Reset calibration buffers — forces fresh calibration with converged weights
+        # Reset calibration buffers — forces fresh calibration with converged
+        # weights. Skip quantizers that are already calibrated (search_done=True)
+        # when preserve_calibrated_quantizers is set, e.g. because the model was
+        # initialized from a PTQ checkpoint and its LSBs should be kept as-is.
         for m in self.model.modules():
             for name, buf in m.named_buffers():
                 if "search_done" in name or "calibration_done" in name:
+                    if preserve and buf.item():
+                        continue
                     buf.fill_(False)
 
         # Re-enable Brevitas proxy layers (disabled during float warmup by
@@ -375,8 +381,12 @@ class QATTrainerV2:
         _set_quant_enabled(self.model, enabled=True)
 
         mgr = QuantizerManager()
-        mgr.set_annealing_for_n_inferences(self.config.qat.annealing_steps)
+        mgr.set_annealing_for_n_inferences(
+            self.config.qat.annealing_steps, skip_calibrated=preserve,
+        )
         mgr.quantization_start_gap = self.config.qat.quantization_start_gap
+        if preserve:
+            mgr.skip_gating_for_calibrated_quantizers()
         mgr.diagnostics_dir = self.config.diagnostics_dir
 
         if self.config.qat.freeze_bn_at_qat:

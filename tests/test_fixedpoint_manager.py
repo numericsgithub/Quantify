@@ -13,6 +13,11 @@ class TestFixedPointManager(unittest.TestCase):
         QuantizerManager().reset()
         self.manager = QuantizerManager()
 
+    def tearDown(self):
+        # Reset again so state set by this test (e.g. quantization_start_gap)
+        # doesn't leak into later test files via the shared singleton.
+        QuantizerManager().reset()
+
     def test_quantizer_registration(self):
         """Verify that quantizer instances are automatically registered with the manager and given IDs."""
         # Instantiate quantizers normally (they create their own local managers by default)
@@ -80,8 +85,72 @@ class TestFixedPointManager(unittest.TestCase):
         data3 = torch.randn(100) * 0.001
         q(data3)
         
-        self.assertEqual(q.search_result_lsb.item(), new_lsb, 
+        self.assertEqual(q.search_result_lsb.item(), new_lsb,
                          "LSB changed after global recalibration flag was reset")
+
+    def test_quantizers_in_execution_order_basic(self):
+        """Sequence id ordering reflects forward call order, not registration order."""
+        q1 = FixedPointPerTensorQuantizer(bit_width=8)
+        q2 = FixedPointPerTensorQuantizer(bit_width=8)
+        q3 = FixedPointPerTensorQuantizer(bit_width=8)
+        # Forward in a deliberately different order than registration (q1, q2, q3).
+        q3(torch.randn(10))
+        q1(torch.randn(10))
+        q2(torch.randn(10))
+
+        ordered = self.manager.quantizers_in_execution_order()
+        self.assertEqual([q.quant_id for q in ordered], [q3.quant_id, q1.quant_id, q2.quant_id])
+
+    def test_quantizers_in_execution_order_raises_before_forward(self):
+        """Calling before any forward pass must raise, not return a misleading order."""
+        FixedPointPerTensorQuantizer(bit_width=8)
+        FixedPointPerTensorQuantizer(bit_width=8)
+        with self.assertRaises(RuntimeError):
+            self.manager.quantizers_in_execution_order()
+
+    def test_quantizers_in_execution_order_empty_registry_returns_empty_list(self):
+        """Empty registry is a normal state (e.g. right after reset()), not a misuse."""
+        self.assertEqual(self.manager.quantizers_in_execution_order(), [])
+
+    def test_quantizers_in_execution_order_excludes_ghosts_by_default(self):
+        """A registered-but-never-forwarded quantizer (inference_sequence_id == -1)
+        is dropped by default, matching the Brevitas injector-ghost scenario."""
+        q1 = FixedPointPerTensorQuantizer(bit_width=8)
+        q2 = FixedPointPerTensorQuantizer(bit_width=8)  # never forwarded — simulates a ghost
+        q1(torch.randn(10))
+
+        ordered = self.manager.quantizers_in_execution_order()
+        self.assertEqual([q.quant_id for q in ordered], [q1.quant_id])
+
+        ordered_incl = self.manager.quantizers_in_execution_order(include_unreached=True)
+        self.assertIn(q2.quant_id, [q.quant_id for q in ordered_incl])
+
+    def test_skip_gating_bypasses_calibrated_quantizer(self):
+        """A preserved (search_done=True) quantizer must skip the staggered
+        gating wait, not just have its annealing alpha forced to 1.0."""
+        q = FixedPointPerTensorQuantizer(bit_width=8)
+        q(torch.randn(10))  # assigns inference_sequence_id, calibrates (search_done=True)
+        q.inference_sequence_id = 5  # pretend this is a deep-in-the-network quantizer
+        self.manager.quantization_start_gap = 100
+
+        self.manager.skip_gating_for_calibrated_quantizers()
+        self.assertEqual(q.inference_counter, 5 * 100)
+
+        q.train()
+        _, scale, _, _ = q(torch.randn(10))
+        self.assertNotEqual(scale.item(), 1.0, "quantizer was gated instead of bypassed")
+
+    def test_skip_gating_leaves_uncalibrated_quantizer_untouched(self):
+        """A never-calibrated quantizer (search_done=False) must still go
+        through the normal staggered gating wait."""
+        q = FixedPointPerTensorQuantizer(bit_width=8)
+        q(torch.randn(10))
+        q.search_done.fill_(False)
+        q.inference_sequence_id = 5
+        self.manager.quantization_start_gap = 100
+
+        self.manager.skip_gating_for_calibrated_quantizers()
+        self.assertEqual(q.inference_counter, 0)
 
 
 if __name__ == "__main__":

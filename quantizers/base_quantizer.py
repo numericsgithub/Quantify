@@ -100,7 +100,7 @@ class BaseQuantizer(nn.Module, ABC):
         scale, zero_point, bit_width = self._get_metadata(params, x)
 
         alpha_before = self.annealing_alpha.item()
-        if self.annealing_alpha < 1.0:
+        if alpha_before < 1.0:
             result = (1 - self.annealing_alpha) * x + self.annealing_alpha * quantized
             if self.training:
                 new_alpha = min(alpha_before + self.annealing_alpha_step, 1.0)

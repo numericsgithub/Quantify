@@ -62,10 +62,12 @@ from models.mobilenetv2_quant import QuantMobileNetV2
 from quantizers.fixedpoint_per_tensor import (
     FixedPointPerTensorActivationQuant,
     FixedPointPerTensorWeightQuant,
+    FixedPointPerTensorBiasQuant,
 )
 from quantizers.base_quantizer import BaseQuantizer
 from quantizers.manager import QuantizerManager
 from utils.weight_mapping import load_pretrained_weights
+from utils.bn_fusion import fuse_bn_into_conv
 
 
 # ---------------------------------------------------------------------------
@@ -85,9 +87,13 @@ def parse_args() -> argparse.Namespace:
     )
     p.add_argument(
         "--mode",
-        choices=["weights", "activations"],
+        choices=["weights", "activations", "bias"],
         required=True,
-        help="Quantize weights or activations (not both — biases are skipped)",
+        help="Quantize weights, activations, or bias (one role per run — "
+             "chain the others in via --init-from-ckpt). Bias quantization "
+             "(fc layer only) calibrates against the bias values themselves "
+             "(FixedPointPerTensorBiasQuant sets requires_input_scale=False), "
+             "so it has no dependency on activation quantization having run.",
     )
     p.add_argument("--bit-width", type=int, default=10,
                    help="Bit width applied to whichever quantizer role is selected by --mode")
@@ -96,6 +102,30 @@ def parse_args() -> argparse.Namespace:
         "--pretrained",
         action="store_true",
         help="Load torchvision pretrained weights (supported: resnet18, resnet50, mobilenetv2)",
+    )
+    p.add_argument(
+        "--fuse-bn",
+        action="store_true",
+        help="Fuse BatchNorm into the preceding conv/linear weights before the "
+             "quantizer search. Calibrates against the same weight distribution "
+             "a BN-folded deployment graph will actually use.",
+    )
+    p.add_argument(
+        "--init-from-ckpt",
+        type=str, default=None, metavar="PATH",
+        help="Checkpoint from a previous run of this script (e.g. --mode "
+             "weights), loaded with strict=False before this run's search "
+             "begins. The model is built with a quantizer for every role "
+             "already calibrated in the checkpoint (extra.role_bit_widths) "
+             "PLUS --mode's role: previously-calibrated roles keep their "
+             "LSBs and stay fully active throughout, while --mode's role is "
+             "freshly searched on top (e.g. quantize bias on an already "
+             "weight-quantized model, then activations on top of both). If "
+             "the checkpoint's role set already includes --mode's role, this "
+             "just warm-starts the same search from the checkpoint's "
+             "weights. Must use the same --fuse-bn setting as the "
+             "checkpoint's run, since fusing changes the model's module "
+             "structure.",
     )
 
     d = p.add_argument_group("data")
@@ -135,16 +165,17 @@ def parse_args() -> argparse.Namespace:
 # Model construction
 # ---------------------------------------------------------------------------
 
-def _build_model(args, weight_quant, act_quant) -> nn.Module:
+def _build_model(args, weight_quant, act_quant, bias_quant=None) -> nn.Module:
     nc = args.num_classes
     if args.model == "resnet18":
-        return QuantResNet18(nc, weight_quant, act_quant)
+        return QuantResNet18(nc, weight_quant, act_quant, bias_quant)
     if args.model == "resnet50":
-        return QuantResNet50(nc, weight_quant, act_quant)
+        return QuantResNet50(nc, weight_quant, act_quant, bias_quant)
     if args.model == "mobilenetv1":
-        return QuantMobileNetV1(nc, weight_quant, act_quant)
+        return QuantMobileNetV1(nc, weight_quant, act_quant, bias_quant)
     if args.model == "mobilenetv2":
-        return QuantMobileNetV2(nc, weight_quant=weight_quant, act_quant=act_quant)
+        return QuantMobileNetV2(nc, weight_quant=weight_quant, act_quant=act_quant,
+                                 bias_quant=bias_quant)
     raise ValueError(f"Unknown model: {args.model!r}")
 
 
@@ -287,28 +318,45 @@ def _assign_descriptive_ids(model: nn.Module) -> None:
     """
     Replace generic quant_N ids with location-based names derived from
     model.named_modules() paths, then sync the QuantizerManager registry.
+
+    Each quantizer gets two names:
+      quant_id     — filesystem-safe (underscores, no spaces), used for filenames
+      display_name — human-readable with original dots and role in brackets,
+                     e.g. "layer1.0.conv1 [weight]"
     """
     mgr  = QuantizerManager()
     seen: dict[str, int] = {}
     for path, module in model.named_modules():
         if not isinstance(module, BaseQuantizer):
             continue
-        qid = path
         for suffix, role in _PROXY_SUFFIXES:
             if path.endswith(suffix):
-                parent = path[: -len(suffix)].replace(".", "_")
-                qid = f"{parent}{role}" if parent else f"root{role}"
+                parent_dots = path[: -len(suffix)]
+                parent_us   = parent_dots.replace(".", "_")
+                role_label  = role.lstrip("_")
+                qid          = f"{parent_us}_{role_label}" if parent_us else f"root_{role_label}"
+                display_name = (f"{parent_dots} [{role_label}]"
+                                if parent_dots else f"[{role_label}]")
                 break
         else:
-            qid = path.replace(".", "_")
+            qid          = path.replace(".", "_")
+            display_name = path
         # Deduplicate with a counter suffix
         if qid in seen:
             seen[qid] += 1
-            qid = f"{qid}_{seen[qid]}"
+            suffix_n      = f"_{seen[qid]}"
+            qid          += suffix_n
+            display_name += suffix_n
         else:
             seen[qid] = 0
-        module.quant_id = qid
+        module.quant_id     = qid
+        module.display_name = display_name
     mgr.quantizers = {q.quant_id: q for q in mgr.quantizers.values()}
+    # Any quantizer registered in the manager but not reachable via named_modules()
+    # (e.g. Brevitas internal proxy objects) gets a plain quant_id as its display name.
+    for q in mgr.quantizers.values():
+        if not hasattr(q, "display_name"):
+            q.display_name = q.quant_id
 
 
 # ---------------------------------------------------------------------------
@@ -321,6 +369,7 @@ def _save_ptq_search_plot(
     calib_lsb: int,
     selected_lsb: int,
     quant_id: str,
+    display_name: str,
     quantizer_role: str,
     bit_width: int,
     quantizer_index: int,
@@ -389,7 +438,7 @@ def _save_ptq_search_plot(
     ax_loss.legend(handles=legend_handles, loc="upper left", fontsize=8)
 
     info = (
-        f"Quantizer [{quantizer_index}/{n_quantizers}]: {quant_id}\n"
+        f"Quantizer [{quantizer_index}/{n_quantizers}]: {display_name}\n"
         f"Role: {quantizer_role}  |  Bit width: {bit_width}b\n"
         f"Calibrated  LSB={calib_lsb:>4}  val_loss={calib_r[1]:.4f}  acc={calib_r[2]:.2f}%\n"
         f"Selected    LSB={selected_lsb:>4}  val_loss={selected_r[1]:.4f}  acc={selected_r[2]:.2f}%\n"
@@ -405,8 +454,7 @@ def _save_ptq_search_plot(
     change_str = (f"  (Δacc={delta_acc:+.2f}%)" if calib_lsb != selected_lsb
                   else "  (same as calibrated)")
     fig.suptitle(
-        f"PTQ LSB Search  [{quantizer_index}/{n_quantizers}]  —  {quant_id}  "
-        f"[{quantizer_role}]  [{bit_width}b]\n"
+        f"PTQ LSB Search  [{quantizer_index}/{n_quantizers}]  —  {display_name}  [{bit_width}b]\n"
         f"Calibrated LSB={calib_lsb}  →  Selected LSB={selected_lsb}{change_str}",
         fontsize=10,
     )
@@ -426,6 +474,7 @@ def _save_ptq_search_plot(
 def _save_summary_plot(
     *,
     quant_ids: List[str],
+    display_names: List[str],
     selected_lsbs: List[int],
     val_losses: List[float],
     val_accs: List[float],
@@ -462,7 +511,7 @@ def _save_summary_plot(
 
     ax_acc.set_xticks(x)
     ax_acc.set_xticklabels(
-        [f"{qid}\nLSB={lsb}" for qid, lsb in zip(quant_ids, selected_lsbs)],
+        [f"{name}\nLSB={lsb}" for name, lsb in zip(display_names, selected_lsbs)],
         rotation=45, ha="right", fontsize=7,
     )
     ax_acc.set_ylabel("Val acc (%)",  color="green")
@@ -490,6 +539,66 @@ def _save_summary_plot(
 
 
 # ---------------------------------------------------------------------------
+# LSB choice histogram (calibrated vs. actually-selected)
+# ---------------------------------------------------------------------------
+
+def _save_lsb_histogram_plot(
+    *,
+    calib_lsbs: List[int],
+    selected_lsbs: List[int],
+    out_dir: Path,
+) -> None:
+    """
+    Two side-by-side bar charts, sharing a y-axis and a common x-axis (LSB
+    position): how many quantizers calibration directly chose at each LSB
+    (left, find_optimal_lsb's raw answer) vs. how many ended up selected
+    after the full validation sweep (right, min val_loss). A large mismatch
+    between the two panels means the calibration heuristic and the
+    measured-best LSB disagree often.
+    """
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+    from collections import Counter
+
+    calib_counts = Counter(calib_lsbs)
+    sel_counts   = Counter(selected_lsbs)
+    all_lsbs = sorted(set(calib_counts) | set(sel_counts))
+
+    fig, (ax1, ax2) = plt.subplots(
+        1, 2, figsize=(max(10, len(all_lsbs) * 0.7 + 4), 5), sharey=True,
+    )
+
+    ax1.bar(all_lsbs, [calib_counts.get(l, 0) for l in all_lsbs],
+            color="gold", alpha=0.85, width=0.6)
+    ax1.set_title(f"Calibrated LSB  (find_optimal_lsb)\n{len(calib_lsbs)} quantizers")
+    ax1.set_xlabel("LSB position")
+    ax1.set_ylabel("Number of quantizers")
+    ax1.set_xticks(all_lsbs)
+    ax1.tick_params(axis="x", rotation=45)
+
+    ax2.bar(all_lsbs, [sel_counts.get(l, 0) for l in all_lsbs],
+            color="orangered", alpha=0.85, width=0.6)
+    ax2.set_title(f"Selected LSB  (min val_loss sweep)\n{len(selected_lsbs)} quantizers")
+    ax2.set_xlabel("LSB position")
+    ax2.set_xticks(all_lsbs)
+    ax2.tick_params(axis="x", rotation=45)
+
+    n_match = sum(1 for c, s in zip(calib_lsbs, selected_lsbs) if c == s)
+    fig.suptitle(
+        f"LSB Choice Distribution — calibrated vs. selected"
+        f"  ({n_match}/{len(calib_lsbs)} quantizers agree)",
+        fontsize=11,
+    )
+    plt.tight_layout()
+
+    base = out_dir / "ptq_lsb_histogram"
+    fig.savefig(base.with_suffix(".svg"), format="svg", bbox_inches="tight")
+    fig.savefig(base.with_suffix(".png"), dpi=200, bbox_inches="tight")
+    plt.close(fig)
+
+
+# ---------------------------------------------------------------------------
 # Text log
 # ---------------------------------------------------------------------------
 
@@ -497,6 +606,7 @@ def _log_quantizer_result(
     log_path: Path,
     *,
     quant_id: str,
+    display_name: str,
     quantizer_role: str,
     bit_width: int,
     calib_lsb: int,
@@ -510,7 +620,7 @@ def _log_quantizer_result(
     lines = [
         "",
         "=" * 68,
-        f"  Quantizer : {quant_id}   Role: {quantizer_role}   [{ts}]",
+        f"  Quantizer : {display_name}   [{ts}]",
         "=" * 68,
         f"  Bit width        : {bit_width}b",
         f"  Calibrated LSB   : {calib_lsb:>4}  "
@@ -538,6 +648,177 @@ def _log_quantizer_result(
 
 
 # ---------------------------------------------------------------------------
+# Sanity check
+# ---------------------------------------------------------------------------
+
+def _sanity_check_quantizer(q: BaseQuantizer, lsb: int, bit_width: int) -> str:
+    """
+    Run the quantizer on a synthetic linspace input spanning the full
+    representable range plus a 20% margin on each side, then verify that the
+    number of distinct quantized codes and the output range match what the
+    (lsb, bit_width, signed) triple predicts.
+
+    Returns a one-line summary string (also printed to console).
+    """
+    step   = 2.0 ** lsb
+    signed = bool(q.search_result_is_signed.item())
+    if signed:
+        q_min = -(2 ** (bit_width - 1)) * step
+        q_max = (2 ** (bit_width - 1) - 1) * step
+    else:
+        q_min = 0.0
+        q_max = (2 ** bit_width - 1) * step
+    n_expected = 2 ** bit_width
+
+    span   = q_max - q_min
+    margin = 0.20 * span if span > 0 else max(step, 1.0)
+    n_points = min(max(n_expected * 4, 1000), 200_000)
+    x = torch.linspace(float(q_min - margin), float(q_max + margin), steps=n_points)
+
+    was_training = q.training
+    q.eval()
+    with torch.no_grad():
+        out, _, _, _ = q(x)
+    q.train(was_training)
+
+    n_unique = int(torch.unique(out).numel())
+    out_min  = out.min().item()
+    out_max  = out.max().item()
+
+    uniq_ok  = n_unique == n_expected
+    range_ok = (abs(out_min - q_min) <= step * 1.5) and (abs(out_max - q_max) <= step * 1.5)
+
+    msg = (
+        f"  Sanity [{bit_width}b {'signed' if signed else 'unsigned'}]  "
+        f"step=2^{lsb}={step:.6g}  "
+        f"expected_range=[{q_min:.6g}, {q_max:.6g}]  "
+        f"unique={n_unique}/{n_expected} {'✓' if uniq_ok else '✗'}  "
+        f"actual_range=[{out_min:.6g}, {out_max:.6g}] {'✓' if range_ok else '✗'}"
+    )
+    print(msg)
+    if not (uniq_ok and range_ok):
+        print("    [WARNING] Sanity check failed — quantizer output does not "
+              "match the expected grid for this LSB/bit-width.")
+    return msg
+
+
+# ---------------------------------------------------------------------------
+# Model + checkpoint-chaining setup
+# ---------------------------------------------------------------------------
+
+_MODE_TO_ROLE = {"weights": "weight", "activations": "activation", "bias": "bias"}
+
+
+def _build_quantized_model(
+    args: argparse.Namespace, device: torch.device,
+) -> tuple[nn.Module, str, int, dict, dict]:
+    """
+    Build the (possibly combined weight+activation+bias) quantized model for
+    this run, optionally continuing from a checkpoint produced by a previous
+    run of this script (--init-from-ckpt).
+
+    Returns (model, target_role, bw, prev_extra, prev_role_bit_widths):
+      target_role:          "weight", "activation", or "bias" — the role --mode searches
+      bw:                   bit-width for target_role this run
+      prev_extra:           loaded checkpoint's "extra" dict, or {} if none
+      prev_role_bit_widths: {role: bit_width} already calibrated by a prior
+                             run, or {} if --init-from-ckpt was not given
+    """
+    bw = args.bit_width
+    target_role = _MODE_TO_ROLE[args.mode]
+
+    prev_payload = None
+    prev_extra: dict = {}
+    prev_role_bit_widths: dict[str, int] = {}
+    if args.init_from_ckpt:
+        prev_payload = torch.load(args.init_from_ckpt, map_location="cpu")
+        prev_extra = prev_payload.get("extra", {})
+        prev_role_bit_widths = dict(prev_extra.get("role_bit_widths", {}))
+        if not prev_role_bit_widths:
+            # Backward compat with checkpoints that only recorded a single
+            # role/bit_width (no chaining support yet when they were saved).
+            single_mode = prev_extra.get("ptq_search_mode")
+            single_bw   = prev_extra.get("bit_width")
+            if single_mode is None or single_bw is None:
+                raise ValueError(
+                    f"{args.init_from_ckpt} is missing extra.role_bit_widths "
+                    f"(or the older extra.ptq_search_mode / extra.bit_width) "
+                    f"— was it produced by this script?"
+                )
+            prev_role_bit_widths = {_MODE_TO_ROLE[single_mode]: single_bw}
+        print(f"[init-from-ckpt] {args.init_from_ckpt}  "
+              f"(roles already calibrated: {prev_role_bit_widths})")
+
+    # ── Quantizer injector classes ───────────────────────────────────────────
+    # Always build the quantizer for --mode's role. Additionally build any
+    # OTHER role(s) already calibrated in the loaded checkpoint (at their
+    # original bit-width), so that already-calibrated role stays present and
+    # active while the new role is searched on top of it.
+    build_weights = (args.mode == "weights")     or ("weight" in prev_role_bit_widths)
+    build_acts    = (args.mode == "activations") or ("activation" in prev_role_bit_widths)
+    build_bias    = (args.mode == "bias")        or ("bias" in prev_role_bit_widths)
+
+    weight_quant = None
+    if build_weights:
+        w_bw = bw if args.mode == "weights" else prev_role_bit_widths["weight"]
+        class _WQ(FixedPointPerTensorWeightQuant):
+            bit_width = w_bw
+        weight_quant = _WQ
+
+    act_quant = None
+    if build_acts:
+        a_bw = bw if args.mode == "activations" else prev_role_bit_widths["activation"]
+        class _AQ(FixedPointPerTensorActivationQuant):
+            bit_width = a_bw
+        act_quant = _AQ
+
+    bias_quant = None
+    if build_bias:
+        b_bw = bw if args.mode == "bias" else prev_role_bit_widths["bias"]
+        class _BQ(FixedPointPerTensorBiasQuant):
+            bit_width = b_bw
+        bias_quant = _BQ
+
+    # ── Build model ──────────────────────────────────────────────────────────
+    QuantizerManager().reset()
+    model = _build_model(args, weight_quant, act_quant, bias_quant).to(device)
+    if args.pretrained:
+        model = _load_pretrained(model, args.model)
+    if args.fuse_bn:
+        n_fused = fuse_bn_into_conv(model)
+        print(f"Fused {n_fused} BatchNorm layer(s) into preceding conv/linear weights.")
+    if prev_payload is not None:
+        incompatible = model.load_state_dict(prev_payload["model_state_dict"], strict=False)
+        print(f"[init-from-ckpt] missing keys: {len(incompatible.missing_keys)}"
+              f"  unexpected keys: {len(incompatible.unexpected_keys)}")
+        if incompatible.unexpected_keys:
+            print(f"  {incompatible.unexpected_keys}")
+    _assign_descriptive_ids(model)
+
+    return model, target_role, bw, prev_extra, prev_role_bit_widths
+
+
+def _disable_target_role_keep_others_active(mgr: QuantizerManager, target_role: str) -> None:
+    """
+    Disable target-role quantizers (about to be searched fresh this run);
+    keep any already-calibrated other-role quantizers (e.g. loaded via
+    --init-from-ckpt) fully active throughout this run.
+    """
+    for _, q in mgr.quantizers.items():
+        if q.quantizer_role == target_role:
+            q.annealing_alpha.data.fill_(0.0)
+            q.search_done.fill_(True)
+        elif q.search_done.item():
+            # Already calibrated from a previous run — keep it fully active.
+            q.annealing_alpha.data.fill_(1.0)
+            q.annealing_alpha_step = 0.0
+        else:
+            # Not the role being searched and not calibrated — disable safely.
+            q.annealing_alpha.data.fill_(0.0)
+            q.search_done.fill_(True)
+
+
+# ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
 
@@ -545,25 +826,7 @@ def main() -> None:
     args = parse_args()
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-    # ── Quantizer injector classes ───────────────────────────────────────────
-    bw = args.bit_width
-    if args.mode == "weights":
-        class _WQ(FixedPointPerTensorWeightQuant):
-            bit_width = bw
-        weight_quant, act_quant = _WQ, None
-        target_role = "weight"
-    else:
-        class _AQ(FixedPointPerTensorActivationQuant):
-            bit_width = bw
-        weight_quant, act_quant = None, _AQ
-        target_role = "activation"
-
-    # ── Build model ──────────────────────────────────────────────────────────
-    QuantizerManager().reset()
-    model = _build_model(args, weight_quant, act_quant).to(device)
-    if args.pretrained:
-        model = _load_pretrained(model, args.model)
-    _assign_descriptive_ids(model)
+    model, target_role, bw, prev_extra, prev_role_bit_widths = _build_quantized_model(args, device)
 
     # ── Identify quantizers to optimise (in forward-pass order) ─────────────
     mgr = QuantizerManager()
@@ -582,16 +845,14 @@ def main() -> None:
     mgr.quantization_start_gap = 2   # each quantizer at position N gates for N*2 steps before
                                      # activating — cleared naturally by prior calibration loops
 
-    # ── Disable all quantizers; prevent accidental calibration triggers ───────
-    for _, q in mgr.quantizers.items():
-        q.annealing_alpha.data.fill_(0.0)
-        q.search_done.fill_(True)
+    _disable_target_role_keep_others_active(mgr, target_role)
 
     # ── Output directory & log ───────────────────────────────────────────────
     exp_name = (args.experiment_name
                 or f"{args.model}_{args.mode}_{bw}b_r{args.search_radius}")
     out_dir  = Path(args.output_dir) / exp_name
     out_dir.mkdir(parents=True, exist_ok=True)
+    print(f"Output directory : {out_dir.resolve()}")
     log_path = out_dir / "ptq_search.log"
 
     with open(log_path, "w") as fh:
@@ -600,6 +861,8 @@ def main() -> None:
             f"{'='*68}\n"
             f"  Model          : {args.model}\n"
             f"  Mode           : {args.mode}  ({bw}b)\n"
+            f"  Init from ckpt : {args.init_from_ckpt or 'none'}"
+            f"{f' (roles already calibrated: {prev_role_bit_widths})' if prev_role_bit_widths else ''}\n"
             f"  Pretrained     : {args.pretrained}\n"
             f"  Search radius  : ±{args.search_radius}\n"
             f"  Eval batches   : {args.eval_batches or 'full'}\n"
@@ -640,6 +903,44 @@ def main() -> None:
             f"  val_loss={baseline_loss:.6f}  val_acc={baseline_acc:.3f}%\n"
         )
 
+    # The baseline forward pass above is the first time every quantizer that is
+    # actually wired into the model's execution graph runs forward() — that's
+    # when inference_sequence_id flips from -1 to a real value (base_quantizer.py).
+    # Brevitas's injector machinery also instantiates throwaway quantizer objects
+    # while resolving each injector; those register with QuantizerManager too but
+    # are never attached to any module the model actually calls, so their
+    # inference_sequence_id stays -1 forever. Drop them here so the search only
+    # touches quantizers that are genuinely part of the model.
+    # Search upstream -> downstream so each quantizer's optimum reflects the
+    # FINAL settings of everything feeding into it, instead of being
+    # calibrated against not-yet-searched upstream quantizers and going stale
+    # once those change later in the loop. Also drops Brevitas's internal
+    # "ghost" quantizer objects (registered but never reached by forward()).
+    ordered_ids = {
+        q.quant_id: i for i, q in enumerate(mgr.quantizers_in_execution_order())
+    }
+    n_before = len(target_items)
+    target_items = [item for item in target_items if item[1].quant_id in ordered_ids]
+    n_ghosts = n_before - len(target_items)
+    if n_ghosts:
+        print(f"  Skipping {n_ghosts} internal Brevitas {target_role} quantizer object(s) "
+              f"never reached by the model's forward pass (not real layers).")
+    if not target_items:
+        print(f"[ERROR] No reachable {target_role} quantizers after filtering. "
+              "Check model construction arguments.")
+        return
+    target_items.sort(key=lambda item: ordered_ids[item[1].quant_id])
+
+    n_total = len(target_items)
+    print(f"  Quantizers in execution path: {n_total}\n")
+
+    # Point BaseQuantizer's built-in diagnostics at the same output directory so
+    # the calibration-time LSB search plot (find_optimal_lsb's search_records —
+    # SAD bars + unique-count line vs LSB position) and the histogram plot are
+    # saved as quantizer_<id>_calibration_N.{svg,png} /
+    # quantizer_<id>_calibration_N_lsb_search.{svg,png} alongside the ptq_* plots.
+    mgr.diagnostics_dir = str(out_dir)
+
     # Pre-fetch one calibration batch from the training set and reuse it for
     # every quantizer.  Weights stay nearly fixed (lr=1e-10), so one batch is
     # representative enough for PTQ calibration.
@@ -649,17 +950,19 @@ def main() -> None:
         break
 
     # ── Per-quantizer search ──────────────────────────────────────────────────
-    summary_qids:   List[str]   = []
-    summary_lsbs:   List[int]   = []
-    summary_accs:   List[float] = []
-    summary_losses: List[float] = []
+    summary_qids:         List[str]   = []
+    summary_display_names: List[str]  = []
+    summary_calib_lsbs:   List[int]   = []
+    summary_lsbs:         List[int]   = []
+    summary_accs:         List[float] = []
+    summary_losses:       List[float] = []
 
     sep = "─" * 68
 
     for qi, (qid, q) in enumerate(target_items, start=1):
         t0 = time.time()
         print(sep)
-        print(f"[{qi}/{n_total}]  {qid}  ({target_role}, {bw}b)")
+        print(f"[{qi}/{n_total}]  {q.display_name}  ({target_role}, {bw}b)")
         print(sep)
 
         # ── Calibrate ─────────────────────────────────────────────────────────
@@ -757,10 +1060,14 @@ def main() -> None:
               f"(Δ vs calib: loss={delta_l:+.4f}, acc={delta_a:+.2f}%)  "
               f"[{elapsed:.0f}s]")
 
+        # ── Sanity check ──────────────────────────────────────────────────────
+        _sanity_check_quantizer(q, best_lsb, bw)
+
         # ── Log + plot ─────────────────────────────────────────────────────────
         _log_quantizer_result(
             log_path,
-            quant_id=qid, quantizer_role=target_role, bit_width=bw,
+            quant_id=qid, display_name=q.display_name,
+            quantizer_role=target_role, bit_width=bw,
             calib_lsb=calib_lsb, selected_lsb=best_lsb, results=results,
         )
         _save_ptq_search_plot(
@@ -768,14 +1075,19 @@ def main() -> None:
             calib_lsb=calib_lsb,
             selected_lsb=best_lsb,
             quant_id=qid,
+            display_name=q.display_name,
             quantizer_role=target_role,
             bit_width=bw,
             quantizer_index=qi,
             n_quantizers=n_total,
             out_dir=out_dir,
         )
+        plot_path = (out_dir / f"ptq_{qid.replace('/', '_')}.png").resolve()
+        print(f"  Plot: {plot_path}")
 
         summary_qids.append(qid)
+        summary_display_names.append(q.display_name)
+        summary_calib_lsbs.append(calib_lsb)
         summary_lsbs.append(best_lsb)
         summary_accs.append(best_r[2])
         summary_losses.append(best_r[1])
@@ -805,6 +1117,7 @@ def main() -> None:
     if summary_qids:
         _save_summary_plot(
             quant_ids=summary_qids,
+            display_names=summary_display_names,
             selected_lsbs=summary_lsbs,
             val_losses=summary_losses,
             val_accs=summary_accs,
@@ -812,8 +1125,51 @@ def main() -> None:
             baseline_acc=baseline_acc,
             out_dir=out_dir,
         )
+        _save_lsb_histogram_plot(
+            calib_lsbs=summary_calib_lsbs,
+            selected_lsbs=summary_lsbs,
+            out_dir=out_dir,
+        )
 
-    print(f"\nAll results saved to: {out_dir}")
+    # ── Save calibrated model checkpoint ─────────────────────────────────────
+    # Matches the {epoch, model_state_dict, optimizer_state_dict, metrics,
+    # config, extra} shape used by training_harness.checkpointing._build_payload
+    # so it can be loaded with CheckpointManager.resume(..., reset_calibration=False)
+    # to start QAT from these PTQ-found LSBs (reset_calibration=True, the
+    # harness default, would wipe search_done and force re-calibration).
+    ckpt_path = out_dir / "ptq_calibrated_model.pt"
+    ckpt_payload = {
+        "epoch": 0,
+        "model_state_dict": model.state_dict(),
+        "optimizer_state_dict": optimizer.state_dict(),
+        "metrics": {
+            "baseline_val_loss": baseline_loss,
+            "baseline_val_acc": baseline_acc,
+            "final_val_loss": final_loss,
+            "final_val_acc": final_acc,
+        },
+        "config": vars(args),
+        "extra": {
+            "ptq_search_mode": args.mode,
+            "bit_width": bw,
+            "role_bit_widths": {**prev_role_bit_widths, target_role: bw},
+            "fuse_bn": args.fuse_bn,
+            "calibrated_lsbs": {
+                **prev_extra.get("calibrated_lsbs", {}),
+                **dict(zip(summary_qids, summary_calib_lsbs)),
+            },
+            "selected_lsbs": {
+                **prev_extra.get("selected_lsbs", {}),
+                **dict(zip(summary_qids, summary_lsbs)),
+            },
+        },
+    }
+    torch.save(ckpt_payload, ckpt_path)
+    print(f"\nSaved PTQ-calibrated model checkpoint: {ckpt_path.resolve()}")
+    print(f"  Load for QAT with reset_calibration=False to keep these LSBs, e.g.:")
+    print(f"    CheckpointManager(...).resume(model, path={str(ckpt_path)!r}, reset_calibration=False)")
+
+    print(f"\nAll results saved to: {out_dir.resolve()}")
 
 
 if __name__ == "__main__":

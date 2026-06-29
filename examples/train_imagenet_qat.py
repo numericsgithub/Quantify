@@ -51,11 +51,39 @@ from training_harness.config import CheckpointConfig
 from training_harness.schedulers import WarmupCosineScheduler
 from training_harness.lr_finder import find_lr
 from utils.weight_mapping import load_pretrained_weights
+from utils.bn_fusion import fuse_bn_into_conv
 
 
 # ---------------------------------------------------------------------------
 # Argument parsing
 # ---------------------------------------------------------------------------
+
+def _print_args(parser: argparse.ArgumentParser, args: argparse.Namespace) -> None:
+    """Print every parsed argument, grouped the same way --help groups them."""
+    print(f"\n{'='*70}")
+    print("  train_imagenet_qat.py — arguments")
+    print(f"{'='*70}")
+
+    seen: set = set()
+    for group in parser._action_groups:
+        rows = []
+        for action in group._group_actions:
+            # --flag/--no-flag pairs (e.g. --mixed-precision/--no-mixed-precision)
+            # share one dest and both land in the same group; only list it once.
+            if action.dest == "help" or action.dest in seen:
+                continue
+            seen.add(action.dest)
+            rows.append((action.dest, getattr(args, action.dest)))
+        if not rows:
+            continue
+
+        print(f"\n  [{group.title}]")
+        width = max(len(dest) for dest, _ in rows)
+        for dest, value in rows:
+            print(f"    {dest:<{width}} : {value}")
+
+    print(f"\n{'='*70}\n")
+
 
 def parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(
@@ -131,7 +159,7 @@ def parse_args() -> argparse.Namespace:
     t.add_argument("--epochs", type=int, default=150)
     t.add_argument("--batch-size", type=int, default=1024)
     t.add_argument("--lr", type=float, default=1e-4)
-    t.add_argument("--weight-decay", type=float, default=1e-5)
+    t.add_argument("--weight-decay", type=float, default=0.0)
     t.add_argument(
         "--label-smoothing", type=float, default=0.1,
         help="Label smoothing for CrossEntropyLoss (0 = off)",
@@ -229,7 +257,30 @@ def parse_args() -> argparse.Namespace:
         help="Calibration pre-pass steps in Phase 1 (default: 10)",
     )
 
-    return p.parse_args()
+    # ---- Init from a PTQ checkpoint -----------------------------------------
+    ptq = p.add_argument_group("ptq init")
+    ptq.add_argument(
+        "--init-from-ptq",
+        type=str,
+        default=None,
+        metavar="PATH",
+        help=(
+            "Path to a checkpoint produced by "
+            "examples/find_perfect_lsbs_imagenet_ptq.py — typically the "
+            "activations-mode run, chained from a weights-mode run via that "
+            "script's --init-from-ckpt so both roles are calibrated. Loaded "
+            "with strict=False after model construction (and after "
+            "--pretrained, if both are given — the checkpoint's weights win). "
+            "Automatically sets preserve_calibrated_quantizers=True so the "
+            "PTQ-found LSBs survive the float-warmup -> QAT transition instead "
+            "of being reset and re-derived from scratch. Consider pairing with "
+            "--float-warmup-epochs 0 since the model is already calibrated."
+        ),
+    )
+
+    args = p.parse_args()
+    _print_args(p, args)
+    return args
 
 
 # ---------------------------------------------------------------------------
@@ -302,6 +353,45 @@ def _load_pretrained(model: nn.Module, args) -> nn.Module:
 
     print(f"[pretrained] Mapping weights to quantized model …")
     return load_pretrained_weights(model, float_model)
+
+
+def _load_ptq_checkpoint(model: nn.Module, ckpt_path: str) -> nn.Module:
+    """
+    Load a checkpoint produced by examples/find_perfect_lsbs_imagenet_ptq.py,
+    typically the activations-mode run chained from a weights-mode run via
+    that script's --init-from-ckpt so both roles are calibrated.
+
+    Uses strict=False and does NOT reset calibration buffers — search_done /
+    search_result_lsb / annealing_alpha are loaded as-is so the PTQ-found
+    LSBs are what QAT starts from. Missing/unexpected keys are reported but
+    not fatal: a checkpoint produced with a different --mode / model variant
+    than the one being constructed here will legitimately have mismatched
+    quantizer buffers for the role that wasn't searched.
+
+    If the checkpoint was produced with --fuse-bn, its model_state_dict has
+    BatchNorm folded into the preceding conv/linear (conv gained a bias,
+    BatchNorm became Identity) — loading that into a freshly built model
+    that still has separate, randomly-initialized BatchNorm layers would
+    leave BatchNorm untrained and silently produce garbage output. Detect
+    this via extra.fuse_bn and fuse this model's BatchNorm the same way
+    before loading, so the module structures match.
+    """
+    print(f"[init-from-ptq] Loading {ckpt_path} …")
+    payload = torch.load(ckpt_path, map_location="cpu")
+    if payload.get("extra", {}).get("fuse_bn"):
+        n_fused = fuse_bn_into_conv(model)
+        print(f"[init-from-ptq] Checkpoint was produced with --fuse-bn; fused "
+              f"{n_fused} BatchNorm layer(s) into preceding conv/linear weights "
+              f"to match its module structure.")
+    incompatible = model.load_state_dict(payload["model_state_dict"], strict=False)
+    if incompatible.missing_keys:
+        print(f"[init-from-ptq] Missing keys: {incompatible.missing_keys}")
+    if incompatible.unexpected_keys:
+        print(f"[init-from-ptq] Unexpected keys: {incompatible.unexpected_keys}")
+    metrics = payload.get("metrics", {})
+    if metrics:
+        print(f"[init-from-ptq] Checkpoint metrics: {metrics}")
+    return model
 
 
 # ---------------------------------------------------------------------------
@@ -420,6 +510,8 @@ def main() -> None:
     model = _build_model(args, weight_quant, act_quant, bias_quant)
     if args.pretrained:
         model = _load_pretrained(model, args)
+    if args.init_from_ptq:
+        model = _load_ptq_checkpoint(model, args.init_from_ptq)
 
     # Data
     train_loader, val_loader = _build_dataloaders(args)
@@ -478,6 +570,7 @@ def main() -> None:
             quantization_start_gap=args.qat_gap,
             freeze_bn_at_qat=True,
             track_scale_factors=True,
+            preserve_calibrated_quantizers=bool(args.init_from_ptq),
         ),
 
         checkpoint=CheckpointConfig(
