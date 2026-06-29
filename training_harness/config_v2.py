@@ -139,6 +139,22 @@ class TrainerConfigV2:
 
     early_stopping_min_delta: float = 1e-4
 
+    # ---- Reduce LR on plateau ----------------------------------------------
+    reduce_lr_on_plateau: bool = False
+    """Step a ReduceLROnPlateau scheduler each epoch using val_loss (or train_loss)."""
+
+    reduce_lr_patience: int = 5
+    """Epochs of no improvement before LR is reduced."""
+
+    reduce_lr_factor: float = 0.5
+    """Factor by which LR is multiplied when a plateau is detected."""
+
+    reduce_lr_min_lr: float = 1e-7
+    """Lower bound on the learning rate."""
+
+    reduce_lr_threshold: float = 1e-4
+    """Minimum change in monitored metric to count as improvement."""
+
     # ---- Helpers -----------------------------------------------------------
     def resolve_device(self) -> str:
         import torch

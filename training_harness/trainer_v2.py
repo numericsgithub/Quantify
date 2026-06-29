@@ -135,6 +135,17 @@ class QATTrainerV2:
                 mode=config.checkpoint.monitor_mode,
             )
 
+        self._plateau_lr_sched = None
+        if config.reduce_lr_on_plateau:
+            self._plateau_lr_sched = torch.optim.lr_scheduler.ReduceLROnPlateau(
+                optimizer,
+                mode="min",
+                patience=config.reduce_lr_patience,
+                factor=config.reduce_lr_factor,
+                min_lr=config.reduce_lr_min_lr,
+                threshold=config.reduce_lr_threshold,
+            )
+
         self._use_amp = config.mixed_precision and str(self.device).startswith("cuda")
         self._scaler = torch.cuda.amp.GradScaler(enabled=self._use_amp)
         self._global_step: int = 0
@@ -283,6 +294,12 @@ class QATTrainerV2:
             if self._qat_active:
                 fully, total = self._quant_progress()
                 all_metrics["quant_pct"] = fully / total if total > 0 else 0.0
+
+            if self._plateau_lr_sched is not None:
+                plateau_loss = all_metrics.get("val_loss", all_metrics.get("train_loss", 0.0))
+                self._plateau_lr_sched.step(plateau_loss)
+                all_metrics["lr"] = self.optimizer.param_groups[0]["lr"]
+
             self.logger.log_epoch(epoch, all_metrics)
 
             monitor_val = all_metrics.get(

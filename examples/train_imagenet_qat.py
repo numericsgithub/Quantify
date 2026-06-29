@@ -581,8 +581,11 @@ def main() -> None:
             save_last=True,
         ),
 
-        early_stopping_patience=20,
-        early_stopping_min_delta=1e-4,
+        early_stopping_patience=None,
+        reduce_lr_on_plateau=True,
+        reduce_lr_patience=5,
+        reduce_lr_factor=0.5,
+        reduce_lr_min_lr=1e-7,
     )
 
     trainer = QATTrainerV2(
