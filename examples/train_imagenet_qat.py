@@ -600,13 +600,10 @@ def main() -> None:
         )
         return
     # ─────────────────────────────────────────────────────────────────────────
-    total_steps = len(train_loader) * args.epochs
-    scheduler = WarmupCosineScheduler(
-        optimizer,
-        warmup_steps=total_steps // 10,
-        total_steps=total_steps,
-        eta_min=1e-6,
-    )
+    # ReduceLROnPlateau manages the LR epoch-by-epoch inside the harness.
+    # A per-step cosine scheduler would override every plateau-triggered
+    # reduction on the very next batch, so the two cannot coexist.
+    scheduler = None
 
     # V2 harness config
     config = TrainerConfigV2(
