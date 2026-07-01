@@ -355,29 +355,41 @@ def _restore_quant_attrs(model: nn.Module, attrs: Dict[str, dict]) -> None:
 def _suggest_lr(
     lrs: List[float],
     smooth_losses: List[float],
+    *,
+    window: int = 5,
 ) -> Tuple[float, float]:
     """
     Return (steep_lr, min_loss_lr).
 
-    steep_lr:     LR at the point of steepest negative gradient in the
-                  smoothed loss curve (d_loss / d_log10_lr most negative).
-    min_loss_lr:  LR at the minimum smoothed loss.
+    steep_lr:     LR at the start of the `window`-step span with the steepest
+                  negative gradient in the smoothed loss curve (d_loss /
+                  d_log10_lr most negative). Computed over a multi-step
+                  window rather than single-step deltas — a lone noisy dip
+                  between two adjacent steps can otherwise register a more
+                  negative slope than anywhere in the real, sustained descent
+                  region, since EMA smoothing reduces but doesn't eliminate
+                  per-step jitter and a 1-step derivative amplifies whatever
+                  jitter remains.
+    min_loss_lr:  LR at the minimum smoothed loss (a global argmin, not a
+                  local derivative — unaffected by the windowing above).
     """
-    if len(smooth_losses) < 2:
+    n = len(smooth_losses)
+    if n < 2:
         lr = lrs[0] if lrs else 1e-4
         return lr, lr
 
     log_lrs = [math.log10(lr) for lr in lrs]
+    w = max(1, min(window, n - 1))
 
-    # Gradient: d(smooth_loss) / d(log10_lr) between consecutive steps
+    # Gradient: d(smooth_loss) / d(log10_lr) over a `w`-step span
     grads = [
-        (smooth_losses[i + 1] - smooth_losses[i]) / max(log_lrs[i + 1] - log_lrs[i], 1e-12)
-        for i in range(len(smooth_losses) - 1)
+        (smooth_losses[i + w] - smooth_losses[i]) / max(log_lrs[i + w] - log_lrs[i], 1e-12)
+        for i in range(n - w)
     ]
     steep_idx = min(range(len(grads)), key=lambda i: grads[i])
     steep_lr  = lrs[steep_idx]
 
-    min_loss_idx = min(range(len(smooth_losses)), key=lambda i: smooth_losses[i])
+    min_loss_idx = min(range(n), key=lambda i: smooth_losses[i])
     min_loss_lr  = lrs[min_loss_idx]
 
     return steep_lr, min_loss_lr

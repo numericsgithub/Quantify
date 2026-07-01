@@ -148,7 +148,7 @@ class QuantResNet(nn.Module):
         fc_kw = {"bias_quant": bias_quant} if bias_quant is not None else {}
         self.fc = qnn.QuantLinear(
             512 * block.expansion, num_classes, bias=True,
-            weight_quant=weight_quant, **fc_kw,
+            weight_quant=weight_quant, output_quant=None, **fc_kw,
         )
 
     def _make_layer(self, block, planes, num_blocks, stride=1):

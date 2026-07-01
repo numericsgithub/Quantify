@@ -51,11 +51,40 @@ from training_harness.config import CheckpointConfig
 from training_harness.schedulers import WarmupCosineScheduler
 from training_harness.lr_finder import find_lr
 from utils.weight_mapping import load_pretrained_weights
+from utils.bn_fusion import fuse_bn_into_conv
+from utils.imagenetTFTransforms import preprocess_image_for_training
 
 
 # ---------------------------------------------------------------------------
 # Argument parsing
 # ---------------------------------------------------------------------------
+
+def _print_args(parser: argparse.ArgumentParser, args: argparse.Namespace) -> None:
+    """Print every parsed argument, grouped the same way --help groups them."""
+    print(f"\n{'='*70}")
+    print("  train_imagenet_qat.py — arguments")
+    print(f"{'='*70}")
+
+    seen: set = set()
+    for group in parser._action_groups:
+        rows = []
+        for action in group._group_actions:
+            # --flag/--no-flag pairs (e.g. --mixed-precision/--no-mixed-precision)
+            # share one dest and both land in the same group; only list it once.
+            if action.dest == "help" or action.dest in seen:
+                continue
+            seen.add(action.dest)
+            rows.append((action.dest, getattr(args, action.dest)))
+        if not rows:
+            continue
+
+        print(f"\n  [{group.title}]")
+        width = max(len(dest) for dest, _ in rows)
+        for dest, value in rows:
+            print(f"    {dest:<{width}} : {value}")
+
+    print(f"\n{'='*70}\n")
+
 
 def parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(
@@ -125,13 +154,22 @@ def parse_args() -> argparse.Namespace:
              "(mutually exclusive with --weight-bits)",
     )
     q.add_argument("--bias-bits", type=int, default=8, help="Bias bit width")
+    q.add_argument(
+        "--weight-lsb-subtract",
+        type=int,
+        default=0,
+        metavar="N",
+        help="After loading --init-from-ptq, subtract N from every weight quantizer's "
+             "LSB position (finer grid). Implicitly disables all activation quantizers. "
+             "A before/after table is printed as a sanity check.",
+    )
 
     # ---- Training ----------------------------------------------------------
     t = p.add_argument_group("training")
     t.add_argument("--epochs", type=int, default=150)
     t.add_argument("--batch-size", type=int, default=1024)
     t.add_argument("--lr", type=float, default=1e-4)
-    t.add_argument("--weight-decay", type=float, default=1e-5)
+    t.add_argument("--weight-decay", type=float, default=1e-4)
     t.add_argument(
         "--label-smoothing", type=float, default=0.1,
         help="Label smoothing for CrossEntropyLoss (0 = off)",
@@ -149,6 +187,32 @@ def parse_args() -> argparse.Namespace:
         type=int,
         default=3,
         help="DataLoader prefetch factor (batches queued per worker ahead of GPU)",
+    )
+    t.add_argument(
+        "--mixup-alpha",
+        type=float,
+        default=0.2,
+        help="MixUp Beta distribution alpha. Set 0 to disable.",
+    )
+    t.add_argument(
+        "--cutmix-alpha",
+        type=float,
+        default=1.0,
+        help="CutMix Beta distribution alpha. Set 0 to disable.",
+    )
+    t.add_argument(
+        "--ema-decay",
+        type=float,
+        default=0.9999,
+        help="EMA decay for shadow model (validation uses EMA weights). Set 0 to disable.",
+    )
+    t.add_argument(
+        "--repeat-aug",
+        type=int,
+        default=1,
+        metavar="N",
+        help="Repeated augmentation: each image appears N times per epoch with different "
+             "augmentations (HuggingFace dataloader only; N=1 = off).",
     )
 
     # ---- QAT schedule ------------------------------------------------------
@@ -229,7 +293,30 @@ def parse_args() -> argparse.Namespace:
         help="Calibration pre-pass steps in Phase 1 (default: 10)",
     )
 
-    return p.parse_args()
+    # ---- Init from a PTQ checkpoint -----------------------------------------
+    ptq = p.add_argument_group("ptq init")
+    ptq.add_argument(
+        "--init-from-ptq",
+        type=str,
+        default=None,
+        metavar="PATH",
+        help=(
+            "Path to a checkpoint produced by "
+            "examples/find_perfect_lsbs_imagenet_ptq.py — typically the "
+            "activations-mode run, chained from a weights-mode run via that "
+            "script's --init-from-ckpt so both roles are calibrated. Loaded "
+            "with strict=False after model construction (and after "
+            "--pretrained, if both are given — the checkpoint's weights win). "
+            "Automatically sets preserve_calibrated_quantizers=True so the "
+            "PTQ-found LSBs survive the float-warmup -> QAT transition instead "
+            "of being reset and re-derived from scratch. Consider pairing with "
+            "--float-warmup-epochs 0 since the model is already calibrated."
+        ),
+    )
+
+    args = p.parse_args()
+    _print_args(p, args)
+    return args
 
 
 # ---------------------------------------------------------------------------
@@ -304,6 +391,94 @@ def _load_pretrained(model: nn.Module, args) -> nn.Module:
     return load_pretrained_weights(model, float_model)
 
 
+def _load_ptq_checkpoint(model: nn.Module, ckpt_path: str) -> nn.Module:
+    """
+    Load a checkpoint produced by examples/find_perfect_lsbs_imagenet_ptq.py,
+    typically the activations-mode run chained from a weights-mode run via
+    that script's --init-from-ckpt so both roles are calibrated.
+
+    Uses strict=False and does NOT reset calibration buffers — search_done /
+    search_result_lsb / annealing_alpha are loaded as-is so the PTQ-found
+    LSBs are what QAT starts from. Missing/unexpected keys are reported but
+    not fatal: a checkpoint produced with a different --mode / model variant
+    than the one being constructed here will legitimately have mismatched
+    quantizer buffers for the role that wasn't searched.
+
+    If the checkpoint was produced with --fuse-bn, its model_state_dict has
+    BatchNorm folded into the preceding conv/linear (conv gained a bias,
+    BatchNorm became Identity) — loading that into a freshly built model
+    that still has separate, randomly-initialized BatchNorm layers would
+    leave BatchNorm untrained and silently produce garbage output. Detect
+    this via extra.fuse_bn and fuse this model's BatchNorm the same way
+    before loading, so the module structures match.
+    """
+    print(f"[init-from-ptq] Loading {ckpt_path} …")
+    payload = torch.load(ckpt_path, map_location="cpu")
+    if payload.get("extra", {}).get("fuse_bn"):
+        n_fused = fuse_bn_into_conv(model)
+        print(f"[init-from-ptq] Checkpoint was produced with --fuse-bn; fused "
+              f"{n_fused} BatchNorm layer(s) into preceding conv/linear weights "
+              f"to match its module structure.")
+    incompatible = model.load_state_dict(payload["model_state_dict"], strict=False)
+    if incompatible.missing_keys:
+        print(f"[init-from-ptq] Missing keys: {incompatible.missing_keys}")
+    if incompatible.unexpected_keys:
+        print(f"[init-from-ptq] Unexpected keys: {incompatible.unexpected_keys}")
+    metrics = payload.get("metrics", {})
+    if metrics:
+        print(f"[init-from-ptq] Checkpoint metrics: {metrics}")
+    return model
+
+
+def _disable_act_quant_proxies(model: nn.Module) -> None:
+    """Set disable_quant=True on all activation proxies (leaves weight/bias proxies alone)."""
+    from brevitas.proxy.parameter_quant import WeightQuantProxyFromInjector, BiasQuantProxyFromInjector
+    for m in model.modules():
+        if hasattr(m, "disable_quant") and not isinstance(
+            m, (WeightQuantProxyFromInjector, BiasQuantProxyFromInjector)
+        ):
+            m.disable_quant = True
+
+
+def _apply_weight_lsb_subtract(model: nn.Module, delta: int) -> None:
+    """
+    Subtract `delta` from every weight quantizer's search_result_lsb buffer,
+    then disable all activation quantizer proxies.
+
+    Prints a before/after table for each adjusted quantizer so the caller can
+    verify the shift is correct before training starts.
+    """
+    from quantizers.fixedpoint_per_tensor import FixedPointPerTensorQuantizer
+
+    col = 62
+    print(f"\n[weight-lsb-subtract] Subtracting {delta} from all weight quantizer LSBs")
+    print(f"  {'Module path':<{col}}  {'Before':>6}  {'After':>6}  Check")
+    print(f"  {'-'*col}  {'-'*6}  {'-'*6}  -----")
+
+    n = 0
+    for name, module in model.named_modules():
+        if not isinstance(module, FixedPointPerTensorQuantizer):
+            continue
+        if "weight_quant" not in name:
+            continue
+
+        before = int(module.search_result_lsb.item())
+        after  = before - delta
+        module.search_result_lsb.fill_(after)
+        readback = int(module.search_result_lsb.item())
+        ok = "OK" if readback == after else f"MISMATCH (got {readback})"
+        print(f"  {name:<{col}}  {before:>6}  {after:>6}  {ok}")
+        n += 1
+
+    if n == 0:
+        print("  WARNING: no weight quantizers found — load a PTQ checkpoint first.")
+    else:
+        print(f"\n  {n} quantizer(s) adjusted.")
+
+    _disable_act_quant_proxies(model)
+    print("  Activation quantizer proxies disabled for this run.\n")
+
+
 # ---------------------------------------------------------------------------
 # Data loading
 # ---------------------------------------------------------------------------
@@ -321,6 +496,34 @@ class HFDatasetWrapper(Dataset):
         item = self.hf_dataset[idx]
         img = self.preprocess(item["image"].convert("RGB"))
         return img, item["label"]
+
+
+class RepeatAugSampler(torch.utils.data.Sampler):
+    """
+    Repeated augmentation sampler: each unique image appears n_repeats times
+    in consecutive slots so that, with an appropriate batch_size, every batch
+    contains batch_size // n_repeats unique images each seen n_repeats times
+    with independent random augmentations.
+
+    Only meaningful when batch_size is a multiple of n_repeats.
+    """
+
+    def __init__(self, dataset: Dataset, n_repeats: int = 2, shuffle: bool = True) -> None:
+        self._n = len(dataset)
+        self.n_repeats = n_repeats
+        self.shuffle = shuffle
+
+    def __len__(self) -> int:
+        return self._n * self.n_repeats
+
+    def __iter__(self):
+        import random
+        indices = list(range(self._n))
+        if self.shuffle:
+            random.shuffle(indices)
+        for idx in indices:
+            for _ in range(self.n_repeats):
+                yield idx
 
 
 def _build_dataloaders(args):
@@ -345,13 +548,13 @@ def _build_dali_loaders(args):
 def _build_hf_loaders(args):
     normalize = T.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
 
-    # Standard torchvision recipe (matches IMAGENET1K_V1/V2 pretrained weights):
-    #   train: RandomResizedCrop(224) + RandomHorizontalFlip
+    # TF-exact recipe via utils.imagenetTFTransforms:
+    #   train: SampleDistortedBoundingBoxCrop + bilinear resize to 224
+    #          + random H-flip + brightness + saturation (all TF-faithful)
     #   val:   Resize(256) + CenterCrop(224)
     train_preprocess = T.Compose([
-        T.RandomResizedCrop(224),
-        T.RandomHorizontalFlip(),
         T.ToTensor(),
+        T.Lambda(preprocess_image_for_training),
         normalize,
     ])
     val_preprocess = T.Compose([
@@ -365,14 +568,29 @@ def _build_hf_loaders(args):
     hf_train = load_dataset(args.hf_dataset, split="train")
     hf_val   = load_dataset(args.hf_dataset, split="validation")
 
+    train_ds = HFDatasetWrapper(hf_train, train_preprocess)
     persistent = args.num_workers > 0
     prefetch   = args.prefetch_factor if args.num_workers > 0 else None
-    train_loader = DataLoader(
-        HFDatasetWrapper(hf_train, train_preprocess),
-        batch_size=args.batch_size, shuffle=True,
-        num_workers=args.num_workers, pin_memory=True,
-        persistent_workers=persistent, prefetch_factor=prefetch,
-    )
+
+    repeat_aug = getattr(args, "repeat_aug", 1)
+    if repeat_aug > 1:
+        train_sampler = RepeatAugSampler(train_ds, n_repeats=repeat_aug, shuffle=True)
+        train_loader = DataLoader(
+            train_ds,
+            batch_size=args.batch_size, sampler=train_sampler,
+            num_workers=args.num_workers, pin_memory=True,
+            persistent_workers=persistent, prefetch_factor=prefetch,
+        )
+        print(f"  RepeatAugSampler: {repeat_aug}× per image → "
+              f"{len(train_sampler):,} total samples/epoch")
+    else:
+        train_loader = DataLoader(
+            train_ds,
+            batch_size=args.batch_size, shuffle=True,
+            num_workers=args.num_workers, pin_memory=True,
+            persistent_workers=persistent, prefetch_factor=prefetch,
+        )
+
     val_loader = DataLoader(
         HFDatasetWrapper(hf_val, val_preprocess),
         batch_size=args.batch_size, shuffle=False,
@@ -420,6 +638,11 @@ def main() -> None:
     model = _build_model(args, weight_quant, act_quant, bias_quant)
     if args.pretrained:
         model = _load_pretrained(model, args)
+    if args.init_from_ptq:
+        model = _load_ptq_checkpoint(model, args.init_from_ptq)
+
+    if args.weight_lsb_subtract:
+        _apply_weight_lsb_subtract(model, args.weight_lsb_subtract)
 
     # Data
     train_loader, val_loader = _build_dataloaders(args)
@@ -446,13 +669,10 @@ def main() -> None:
         )
         return
     # ─────────────────────────────────────────────────────────────────────────
-    total_steps = len(train_loader) * args.epochs
-    scheduler = WarmupCosineScheduler(
-        optimizer,
-        warmup_steps=total_steps // 10,
-        total_steps=total_steps,
-        eta_min=1e-6,
-    )
+    # ReduceLROnPlateau manages the LR epoch-by-epoch inside the harness.
+    # A per-step cosine scheduler would override every plateau-triggered
+    # reduction on the very next batch, so the two cannot coexist.
+    scheduler = None
 
     # V2 harness config
     config = TrainerConfigV2(
@@ -478,6 +698,7 @@ def main() -> None:
             quantization_start_gap=args.qat_gap,
             freeze_bn_at_qat=True,
             track_scale_factors=True,
+            preserve_calibrated_quantizers=bool(args.init_from_ptq),
         ),
 
         checkpoint=CheckpointConfig(
@@ -487,8 +708,15 @@ def main() -> None:
             save_last=True,
         ),
 
-        early_stopping_patience=20,
-        early_stopping_min_delta=1e-4,
+        early_stopping_patience=None,
+        reduce_lr_on_plateau=True,
+        reduce_lr_patience=5,
+        reduce_lr_factor=0.5,
+        reduce_lr_min_lr=1e-8,
+
+        mixup_alpha=args.mixup_alpha,
+        cutmix_alpha=args.cutmix_alpha,
+        ema_decay=args.ema_decay,
     )
 
     trainer = QATTrainerV2(
@@ -507,7 +735,14 @@ def main() -> None:
     trainer.evaluate(train_loader, label="train")
     print()
 
-    tracker = trainer.fit()
+    # When --weight-lsb-subtract is active, re-disable activation proxies after
+    # every epoch so QAT activation (which re-enables all proxies) can't undo it.
+    epoch_hook = None
+    if args.weight_lsb_subtract:
+        def epoch_hook(trainer, epoch, snap):
+            _disable_act_quant_proxies(trainer.model)
+
+    tracker = trainer.fit(after_epoch_hook=epoch_hook)
 
     best_acc = tracker.best_value("val_acc", "max")
     print(f"\nDone. Best val_acc: {best_acc:.4f}")

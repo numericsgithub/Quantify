@@ -77,9 +77,16 @@ def quantize_fixed_point_with_integers(
         Quantized (dequantized) input tensor on the fixed-point grid as integers.
     """
     orig_dtype = inputs.dtype
-    inputs_f64 = inputs.to(torch.float64)
+    # float32 has 24 bits of exact integer mantissa -- comfortably enough for
+    # any bit_width used in this project (8-16b). Upcasting all the way to
+    # float64 here used to roughly double the wall-clock cost of every
+    # quantize call (extra memory traffic + cast kernels) for no precision
+    # benefit at these bit-widths; only stay at float64 if the caller's input
+    # tensor actually already is float64.
+    calc_dtype = torch.float32 if orig_dtype != torch.float64 else torch.float64
+    inputs_calc = inputs.to(calc_dtype)
 
-    step = torch.tensor(2.0, dtype=torch.float64) ** lsb
+    step = 2.0 ** lsb  # lsb is a plain Python int -- no tensor needed here
 
     if signed:
         integer_min = -(2 ** (bit_width - 1))
@@ -90,10 +97,10 @@ def quantize_fixed_point_with_integers(
         integer_min = 0
         integer_max = 2 ** bit_width - 1
 
-    # Quantize: map to integer, round, clamp, scale back (all in float64)
-    integers = inputs_f64 / step
-    integers = _round(integers, rounding_mode).to(torch.float64)
-    integers = torch.clamp(integers, integer_min, integer_max).to(torch.float64)
+    # Quantize: map to integer, round, clamp, scale back
+    integers = inputs_calc / step
+    integers = _round(integers, rounding_mode)
+    integers = torch.clamp(integers, integer_min, integer_max)
     quantized = integers * step
 
     # Cast back to the caller's dtype
@@ -161,6 +168,7 @@ def find_optimal_lsb(
         search_records is a list of (lsb, n_unique, sad) for every position tested,
         ordered high→low, used by the diagnostic plot.
     """
+    print("find_optimal_lsb was called!")
     w_min = inputs.min().item()
     w_max = inputs.max().item()
     abs_max = max(abs(w_min), abs(w_max))

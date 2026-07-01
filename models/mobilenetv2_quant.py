@@ -120,7 +120,8 @@ class QuantMobileNetV2(nn.Module):
         self.classifier = nn.Sequential(
             nn.Flatten(),
             qnn.QuantLinear(1280, num_classes, bias=True,
-                            weight_bit_width=weight_bit_width, weight_quant=weight_quant, **fc_kw)
+                            weight_bit_width=weight_bit_width, weight_quant=weight_quant,
+                            output_quant=None, **fc_kw)
         )
 
     def forward(self, x):

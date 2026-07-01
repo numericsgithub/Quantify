@@ -69,6 +69,19 @@ class QATScheduleConfigV2:
     track_scale_factors: bool = True
     """Log per-layer quantization scale factors at the end of each QAT epoch."""
 
+    preserve_calibrated_quantizers: bool = False
+    """
+    If True, quantizers that are already calibrated (search_done=True) when
+    QAT activates — e.g. because the model was initialized from a PTQ
+    checkpoint produced by examples/find_perfect_lsbs_imagenet_ptq.py — keep
+    their existing search_done/search_result_lsb and jump straight to
+    annealing_alpha=1.0 instead of being reset to search_done=False and
+    annealing_alpha=0.0 like a freshly-built, never-calibrated quantizer.
+    Quantizers that are NOT yet calibrated still go through the normal
+    reset + gradual annealing ramp. Default False preserves the original
+    behavior (every quantizer re-calibrates fresh against converged weights).
+    """
+
 
 @dataclass
 class TrainerConfigV2:
@@ -125,6 +138,36 @@ class TrainerConfigV2:
     """Only active after QAT has started. Set to None to disable."""
 
     early_stopping_min_delta: float = 1e-4
+
+    # ---- Reduce LR on plateau ----------------------------------------------
+    reduce_lr_on_plateau: bool = False
+    """Step a ReduceLROnPlateau scheduler each epoch using val_loss (or train_loss)."""
+
+    reduce_lr_patience: int = 5
+    """Epochs of no improvement before LR is reduced."""
+
+    reduce_lr_factor: float = 0.5
+    """Factor by which LR is multiplied when a plateau is detected."""
+
+    reduce_lr_min_lr: float = 1e-7
+    """Lower bound on the learning rate."""
+
+    reduce_lr_threshold: float = 1e-4
+    """Minimum change in monitored metric to count as improvement."""
+
+    # ---- MixUp / CutMix ---------------------------------------------------
+    mixup_alpha: float = 0.0
+    """Beta distribution alpha for MixUp. Set > 0 to enable (typical: 0.2).
+    When both mixup_alpha and cutmix_alpha are > 0, each batch randomly uses one."""
+
+    cutmix_alpha: float = 0.0
+    """Beta distribution alpha for CutMix. Set > 0 to enable (typical: 1.0)."""
+
+    # ---- EMA --------------------------------------------------------------
+    ema_decay: float = 0.0
+    """EMA decay for shadow model parameters. Set > 0 to enable (typical: 0.9999).
+    Validation uses EMA weights via a temporary parameter swap; the EMA state is
+    bundled into every checkpoint's 'extra' key for post-training recovery."""
 
     # ---- Helpers -----------------------------------------------------------
     def resolve_device(self) -> str:

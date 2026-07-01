@@ -36,13 +36,15 @@ def _train_pipeline(file_root: str, num_shards: int, shard_id: int, crop: int = 
         pad_last_batch=True,
         name="Reader",
     )
-    # Decode + random crop in one fused GPU op (nvJPEG)
+    # Decode + random crop in one fused GPU op (nvJPEG).
+    # Parameters match tf.image.sample_distorted_bounding_box:
+    #   area_range=(0.05, 1.0), aspect_ratio_range=(0.75, 1.33), max_attempts=100
     images = fn.decoders.image_random_crop(
         jpegs,
         device="mixed",
         output_type=types.RGB,
-        random_aspect_ratio=[3 / 4, 4 / 3],
-        random_area=[0.08, 1.0],
+        random_aspect_ratio=[0.75, 1.33],
+        random_area=[0.05, 1.0],
         num_attempts=100,
     )
     images = fn.resize(images, device="gpu", size=[crop, crop])
@@ -50,6 +52,23 @@ def _train_pipeline(file_root: str, num_shards: int, shard_id: int, crop: int = 
         images,
         device="gpu",
         horizontal=fn.random.coin_flip(probability=0.5),
+    )
+    # Additive brightness shift: uniform delta in [-32, 32] (uint8 scale = [-32/255, 32/255]).
+    images = fn.brightness_contrast(
+        images,
+        device="gpu",
+        brightness_shift=fn.random.uniform(range=(-32.0 / 255., 32.0 / 255.)),
+    )
+    # Saturation, contrast, and hue, matching TF distort_color:
+    #   saturation: tf.image.random_saturation(lower=0.5, upper=1.5)
+    #   contrast:   tf.image.random_contrast(lower=0.5, upper=1.5)
+    #   hue:        tf.image.random_hue(max_delta=0.2) → ±72 degrees in 360° space
+    images = fn.color_twist(
+        images,
+        device="gpu",
+        saturation=fn.random.uniform(range=(0.5, 1.5)),
+        contrast=fn.random.uniform(range=(0.5, 1.5)),
+        hue=fn.random.uniform(range=(-72.0, 72.0)),
     )
     images = fn.crop_mirror_normalize(
         images,

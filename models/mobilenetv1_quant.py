@@ -80,7 +80,8 @@ class QuantMobileNetV1(nn.Module):
 
         self.avgpool = nn.AdaptiveAvgPool2d(1)
         fc_kw = {"bias_quant": bias_quant} if bias_quant is not None else {}
-        self.fc = qnn.QuantLinear(1024, num_classes, bias=True, weight_quant=weight_quant, **fc_kw)
+        self.fc = qnn.QuantLinear(1024, num_classes, bias=True,
+                                   weight_quant=weight_quant, output_quant=None, **fc_kw)
 
     def forward(self, x):
         x = self.stem(x)
