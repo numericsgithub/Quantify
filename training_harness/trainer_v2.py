@@ -30,8 +30,10 @@ from torch.utils.data import DataLoader
 from .checkpointing import CheckpointManager
 from .config_v2 import TrainerConfigV2
 from .console import TrainingConsole
+from .ema import EMAModel
 from .logger import ExperimentLogger
 from .metrics import MetricsTracker
+from .mixup import apply_mixup_cutmix
 from .plotting import TrainingPlotter
 from .schedulers import collect_scale_factors, freeze_bn, _set_quant_enabled
 from .engine_utils import EarlyStopping, EpochTimer, LossPlateauDetector, log_hardware_info, set_seed
@@ -147,6 +149,10 @@ class QATTrainerV2:
                 threshold=config.reduce_lr_threshold,
             )
 
+        self._ema: Optional[EMAModel] = None
+        if config.ema_decay > 0:
+            self._ema = EMAModel(model, decay=config.ema_decay)
+
         self._use_amp = config.mixed_precision and str(self.device).startswith("cuda")
         self._scaler = torch.cuda.amp.GradScaler(enabled=self._use_amp)
         self._global_step: int = 0
@@ -224,6 +230,8 @@ class QATTrainerV2:
         """
         set_seed(self.config.seed, self.config.deterministic)
         self.model.to(self.device)
+        if self._ema is not None:
+            self._ema.to(self.device)
         if self._onnx_dummy_input is not None:
             self._onnx_dummy_input = self._onnx_dummy_input.to(self.device)
         log_hardware_info(self.logger)
@@ -292,7 +300,14 @@ class QATTrainerV2:
 
             val_metrics: Dict[str, float] = {}
             if self.val_loader is not None:
+                # Temporarily apply EMA parameters for validation so the
+                # checkpoint monitor metric reflects the averaged weights.
+                # Only parameters are swapped; buffers (BN stats, quant state)
+                # stay as-is so quantization inference remains correct.
+                _ema_stash = self._ema.apply_to(self.model) if self._ema is not None else None
                 val_metrics = self._run_epoch(epoch, "val")
+                if _ema_stash is not None:
+                    self._ema.restore(self.model, _ema_stash)
 
             all_metrics = {**train_metrics, **val_metrics}
             if self._qat_active:
@@ -337,6 +352,7 @@ class QATTrainerV2:
                 scheduler=self.scheduler,
                 metrics_dict=all_metrics,
                 config_dict=self.config.to_dict(),
+                extra={"ema_state_dict": self._ema.state_dict()} if self._ema else None,
                 dummy_input=self._onnx_dummy_input,
             )
 
@@ -463,10 +479,26 @@ class QATTrainerV2:
             inputs = inputs.to(self.device)
             targets = targets.to(self.device)
 
+            # MixUp / CutMix — training only
+            targets_a = targets_b = targets
+            lam = 1.0
+            if is_train and (self.config.mixup_alpha > 0 or self.config.cutmix_alpha > 0):
+                inputs, targets_a, targets_b, lam = apply_mixup_cutmix(
+                    inputs, targets,
+                    mixup_alpha=self.config.mixup_alpha,
+                    cutmix_alpha=self.config.cutmix_alpha,
+                )
+
             with torch.set_grad_enabled(is_train):
                 with torch.autocast(device_type=self.device.type, enabled=self._use_amp):
                     outputs = self.model(inputs)
-                    loss = self.loss_fn(outputs, targets)
+                    if lam < 1.0:
+                        loss = (
+                            lam * self.loss_fn(outputs, targets_a)
+                            + (1.0 - lam) * self.loss_fn(outputs, targets_b)
+                        )
+                    else:
+                        loss = self.loss_fn(outputs, targets)
 
             if is_train:
                 self.optimizer.zero_grad(set_to_none=True)
@@ -480,6 +512,9 @@ class QATTrainerV2:
 
                 self._scaler.step(self.optimizer)
                 self._scaler.update()
+
+                if self._ema is not None:
+                    self._ema.update(self.model)
 
                 if self.scheduler is not None:
                     self.scheduler.step()
@@ -527,7 +562,18 @@ class QATTrainerV2:
         if self.config.logging.save_plots:
             self.plotter.plot_all(self.tracker, lr_history=self._lr_history)
 
-        self.checkpoint_mgr.load_best(self.model, device=str(self.device))
+        payload = self.checkpoint_mgr.load_best(self.model, device=str(self.device))
+
+        # If EMA was active, the checkpoint metric was evaluated with EMA params.
+        # Restore those params into both the EMA shadow and the main model so the
+        # caller gets the same weights that produced the best validation score.
+        if self._ema is not None and payload is not None:
+            ema_sd = (payload.get("extra") or {}).get("ema_state_dict")
+            if ema_sd is not None:
+                self._ema.load_state_dict(ema_sd, strict=False)
+                for p, sp in zip(self.model.parameters(), self._ema._shadow.parameters()):
+                    p.data.copy_(sp.data)
+                print("[trainer_v2] EMA parameters applied to model from best checkpoint.")
 
         summary = self.tracker.summary()
         print("\n── Run Summary ──────────────────────────────────")

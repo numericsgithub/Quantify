@@ -155,6 +155,20 @@ class TrainerConfigV2:
     reduce_lr_threshold: float = 1e-4
     """Minimum change in monitored metric to count as improvement."""
 
+    # ---- MixUp / CutMix ---------------------------------------------------
+    mixup_alpha: float = 0.0
+    """Beta distribution alpha for MixUp. Set > 0 to enable (typical: 0.2).
+    When both mixup_alpha and cutmix_alpha are > 0, each batch randomly uses one."""
+
+    cutmix_alpha: float = 0.0
+    """Beta distribution alpha for CutMix. Set > 0 to enable (typical: 1.0)."""
+
+    # ---- EMA --------------------------------------------------------------
+    ema_decay: float = 0.0
+    """EMA decay for shadow model parameters. Set > 0 to enable (typical: 0.9999).
+    Validation uses EMA weights via a temporary parameter swap; the EMA state is
+    bundled into every checkpoint's 'extra' key for post-training recovery."""
+
     # ---- Helpers -----------------------------------------------------------
     def resolve_device(self) -> str:
         import torch

@@ -169,7 +169,7 @@ def parse_args() -> argparse.Namespace:
     t.add_argument("--epochs", type=int, default=150)
     t.add_argument("--batch-size", type=int, default=1024)
     t.add_argument("--lr", type=float, default=1e-4)
-    t.add_argument("--weight-decay", type=float, default=0.0)
+    t.add_argument("--weight-decay", type=float, default=1e-4)
     t.add_argument(
         "--label-smoothing", type=float, default=0.1,
         help="Label smoothing for CrossEntropyLoss (0 = off)",
@@ -187,6 +187,32 @@ def parse_args() -> argparse.Namespace:
         type=int,
         default=3,
         help="DataLoader prefetch factor (batches queued per worker ahead of GPU)",
+    )
+    t.add_argument(
+        "--mixup-alpha",
+        type=float,
+        default=0.2,
+        help="MixUp Beta distribution alpha. Set 0 to disable.",
+    )
+    t.add_argument(
+        "--cutmix-alpha",
+        type=float,
+        default=1.0,
+        help="CutMix Beta distribution alpha. Set 0 to disable.",
+    )
+    t.add_argument(
+        "--ema-decay",
+        type=float,
+        default=0.9999,
+        help="EMA decay for shadow model (validation uses EMA weights). Set 0 to disable.",
+    )
+    t.add_argument(
+        "--repeat-aug",
+        type=int,
+        default=1,
+        metavar="N",
+        help="Repeated augmentation: each image appears N times per epoch with different "
+             "augmentations (HuggingFace dataloader only; N=1 = off).",
     )
 
     # ---- QAT schedule ------------------------------------------------------
@@ -472,6 +498,34 @@ class HFDatasetWrapper(Dataset):
         return img, item["label"]
 
 
+class RepeatAugSampler(torch.utils.data.Sampler):
+    """
+    Repeated augmentation sampler: each unique image appears n_repeats times
+    in consecutive slots so that, with an appropriate batch_size, every batch
+    contains batch_size // n_repeats unique images each seen n_repeats times
+    with independent random augmentations.
+
+    Only meaningful when batch_size is a multiple of n_repeats.
+    """
+
+    def __init__(self, dataset: Dataset, n_repeats: int = 2, shuffle: bool = True) -> None:
+        self._n = len(dataset)
+        self.n_repeats = n_repeats
+        self.shuffle = shuffle
+
+    def __len__(self) -> int:
+        return self._n * self.n_repeats
+
+    def __iter__(self):
+        import random
+        indices = list(range(self._n))
+        if self.shuffle:
+            random.shuffle(indices)
+        for idx in indices:
+            for _ in range(self.n_repeats):
+                yield idx
+
+
 def _build_dataloaders(args):
     if args.data_dir:
         return _build_dali_loaders(args)
@@ -514,14 +568,29 @@ def _build_hf_loaders(args):
     hf_train = load_dataset(args.hf_dataset, split="train")
     hf_val   = load_dataset(args.hf_dataset, split="validation")
 
+    train_ds = HFDatasetWrapper(hf_train, train_preprocess)
     persistent = args.num_workers > 0
     prefetch   = args.prefetch_factor if args.num_workers > 0 else None
-    train_loader = DataLoader(
-        HFDatasetWrapper(hf_train, train_preprocess),
-        batch_size=args.batch_size, shuffle=True,
-        num_workers=args.num_workers, pin_memory=True,
-        persistent_workers=persistent, prefetch_factor=prefetch,
-    )
+
+    repeat_aug = getattr(args, "repeat_aug", 1)
+    if repeat_aug > 1:
+        train_sampler = RepeatAugSampler(train_ds, n_repeats=repeat_aug, shuffle=True)
+        train_loader = DataLoader(
+            train_ds,
+            batch_size=args.batch_size, sampler=train_sampler,
+            num_workers=args.num_workers, pin_memory=True,
+            persistent_workers=persistent, prefetch_factor=prefetch,
+        )
+        print(f"  RepeatAugSampler: {repeat_aug}× per image → "
+              f"{len(train_sampler):,} total samples/epoch")
+    else:
+        train_loader = DataLoader(
+            train_ds,
+            batch_size=args.batch_size, shuffle=True,
+            num_workers=args.num_workers, pin_memory=True,
+            persistent_workers=persistent, prefetch_factor=prefetch,
+        )
+
     val_loader = DataLoader(
         HFDatasetWrapper(hf_val, val_preprocess),
         batch_size=args.batch_size, shuffle=False,
@@ -644,6 +713,10 @@ def main() -> None:
         reduce_lr_patience=5,
         reduce_lr_factor=0.5,
         reduce_lr_min_lr=1e-8,
+
+        mixup_alpha=args.mixup_alpha,
+        cutmix_alpha=args.cutmix_alpha,
+        ema_decay=args.ema_decay,
     )
 
     trainer = QATTrainerV2(

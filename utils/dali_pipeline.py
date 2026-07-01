@@ -59,11 +59,16 @@ def _train_pipeline(file_root: str, num_shards: int, shard_id: int, crop: int = 
         device="gpu",
         brightness_shift=fn.random.uniform(range=(-32.0 / 255., 32.0 / 255.)),
     )
-    # Multiplicative saturation scaling in HSV space, matching tf.image.random_saturation.
+    # Saturation, contrast, and hue, matching TF distort_color:
+    #   saturation: tf.image.random_saturation(lower=0.5, upper=1.5)
+    #   contrast:   tf.image.random_contrast(lower=0.5, upper=1.5)
+    #   hue:        tf.image.random_hue(max_delta=0.2) → ±72 degrees in 360° space
     images = fn.color_twist(
         images,
         device="gpu",
         saturation=fn.random.uniform(range=(0.5, 1.5)),
+        contrast=fn.random.uniform(range=(0.5, 1.5)),
+        hue=fn.random.uniform(range=(-72.0, 72.0)),
     )
     images = fn.crop_mirror_normalize(
         images,
