@@ -28,8 +28,10 @@ report the actual gradient instead, see module docstring in the PR):
 """
 import pytest
 import torch
+import torch.nn as nn
+import brevitas.nn as qnn
 
-from quantizers.fixedpoint_per_tensor import FixedPointPerTensorQuantizer
+from quantizers.fixedpoint_per_tensor import FixedPointPerTensorQuantizer, FixedPointPerTensorWeightQuant
 from quantizers.manager import QuantizerManager
 
 EXPECTED_W_GRAD = -18.0
@@ -396,3 +398,92 @@ def test_two_layer_ste_annealing_alpha_half():
         f"ANNEALING two-layer: w_2.grad={w_2.grad.item()}, expected {TWO_LAYER_W2_GRAD}"
     )
     assert torch.isclose(b_2.grad, torch.tensor(TWO_LAYER_B2_GRAD), atol=TOL)
+
+
+# ---------------------------------------------------------------------------
+# NOTE: annealing blend path is NOT covered by any test above.
+#
+# base_quantizer.py line 111 (`result = quantized`) unconditionally overrides
+# the blend computed on line 105, so test_ste_off_annealing_alpha_zero and
+# test_ste_annealing_alpha_half both exercise the fully-quantized STE path.
+# They pass because STE local slope == pass-through slope == 1.
+#
+# Once line 111 is removed, two graph-structure checks become meaningful:
+#   • alpha=0  → graph must NOT contain FixedPointQuantFnTestingThingsBackward
+#   • alpha=0.5 → graph must contain AddBackward (the blend sum has two inputs)
+# ---------------------------------------------------------------------------
+
+
+# ---------------------------------------------------------------------------
+# Real-model gradient tests: Brevitas WeightQuantProxy path
+#
+# The scalar tests above call FixedPointPerTensorQuantizer.forward() directly.
+# In the training harness, Brevitas wraps the quantizer in a WeightQuantProxy.
+# If that proxy inserts a .detach() or returns a tensor with no grad_fn,
+# layer.weight.grad would be None even if the standalone quantizer tests pass.
+# ---------------------------------------------------------------------------
+
+def test_quant_linear_gradient_flow():
+    """Single QuantLinear layer: gradient flows through Brevitas WeightQuantProxy.
+
+    Code path:
+        QuantLinear.forward → WeightQuantProxy → FixedPointPerTensorQuantizer
+        → FixedPointQuantFnTestingThingsBackward → weight.grad
+
+    A broken proxy would leave weight.grad as None even though the standalone
+    quantizer tests pass.
+    """
+    layer = qnn.QuantLinear(4, 2, bias=False, weight_quant=FixedPointPerTensorWeightQuant)
+    layer.train()
+
+    x = torch.randn(2, 4)
+
+    with torch.no_grad():
+        _ = layer(x)  # calibration: sets search_done=True on the weight quantizer
+
+    QuantizerManager().enable_quantization()
+
+    loss = layer(x).sum()
+    loss.backward()
+
+    print("PRINT GRAPH (QuantLinear single layer, Brevitas proxy path)")
+    print_graph(loss.grad_fn)
+
+    assert layer.weight.grad is not None, (
+        "weight.grad is None — WeightQuantProxy broke the gradient chain"
+    )
+    assert layer.weight.grad.abs().sum() > 0, "weight.grad is all zeros"
+
+
+def test_quant_linear_two_layer_gradient_flow():
+    """Two stacked QuantLinear layers: gradient flows from loss through layer2's
+    proxy and quantizer all the way back to layer1.weight.
+
+    Real-model equivalent of test_two_layer_ste_on.  If layer2's Brevitas proxy
+    disconnects the graph, layer1.weight.grad will be None.
+    """
+    layer1 = qnn.QuantLinear(4, 4, bias=False, weight_quant=FixedPointPerTensorWeightQuant)
+    layer2 = qnn.QuantLinear(4, 2, bias=False, weight_quant=FixedPointPerTensorWeightQuant)
+    layer1.train()
+    layer2.train()
+
+    x = torch.randn(2, 4)
+
+    with torch.no_grad():
+        _ = layer2(layer1(x))  # calibrate both weight quantizers
+
+    QuantizerManager().enable_quantization()
+
+    h = layer1(x)
+    loss = layer2(h).sum()
+    loss.backward()
+
+    print("PRINT GRAPH (two QuantLinear layers, Brevitas proxy path)")
+    print_graph(loss.grad_fn)
+
+    assert layer1.weight.grad is not None, (
+        "layer1.weight.grad is None — layer2's proxy disconnected the graph"
+    )
+    assert layer1.weight.grad.abs().sum() > 0, "layer1.weight.grad is all zeros"
+    assert layer2.weight.grad is not None, "layer2.weight.grad is None"
+    assert layer2.weight.grad.abs().sum() > 0, "layer2.weight.grad is all zeros"
