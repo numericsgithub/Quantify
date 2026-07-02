@@ -158,6 +158,7 @@ def test_sanity_baseline_no_quantizer():
     # x_round = torch.round(x)
     # x_q = x + (x_round - x).detach()
 
+    print(f"w: {w.item()}  quantized_w: n/a (no quantizer)")
     print("PRINT GRAPH")
     print_graph(loss.grad_fn)
 
@@ -188,7 +189,7 @@ def test_ste_off_annealing_alpha_zero():
     loss = (y_hat - y) ** 2
     loss.backward()
 
-    print(f"quantized_w: {quantized_w}")
+    print(f"w: {w.item()}  quantized_w: {quantized_w.item()}")
     print("loss", loss)
     print("w.grad", w.grad)
 
@@ -232,7 +233,7 @@ def test_ste_on_annealing_alpha_one():
     loss = (y_hat - y) ** 2
     loss.backward()
 
-    print(f"quantized_w: {quantized_w}")
+    print(f"w: {w.item()}  quantized_w: {quantized_w.item()}")
     print("loss", loss)
     print("w.grad", w.grad)
 
@@ -277,7 +278,7 @@ def test_ste_annealing_alpha_half():
     loss = (y_hat - y) ** 2
     loss.backward()
 
-    print(f"quantized_w: {quantized_w}")
+    print(f"w: {w.item()}  quantized_w: {quantized_w.item()}")
     print("loss", loss)
     print("w.grad", w.grad)
 
@@ -327,6 +328,7 @@ def test_two_layer_no_quantizer():
     loss = (y_hat - y) ** 2
     loss.backward()
 
+    print(f"w_1: {w_1.item()}  w_2: {w_2.item()}  quantized_w: n/a (no quantizers)")
     print("PRINT GRAPH (two-layer baseline, no quantizer)")
     print_graph(loss.grad_fn)
 
@@ -363,6 +365,8 @@ def test_two_layer_ste_on():
     loss = (y_hat - y) ** 2
     loss.backward()
 
+    print(f"w_1: {w_1.item()}  qw_1: {qw_1.item()}")
+    print(f"w_2: {w_2.item()}  qw_2: {qw_2.item()}")
     print(f"w_1.grad={w_1.grad}  b_1.grad={b_1.grad}")
     print(f"w_2.grad={w_2.grad}  b_2.grad={b_2.grad}")
     print("PRINT GRAPH (two-layer, both quantizers ON)")
@@ -414,6 +418,8 @@ def test_two_layer_ste_annealing_alpha_half():
     loss = (y_hat - y) ** 2
     loss.backward()
 
+    print(f"w_1: {w_1.item()}  qw_1: {qw_1.item()}")
+    print(f"w_2: {w_2.item()}  qw_2: {qw_2.item()}")
     print(f"w_1.grad={w_1.grad}  b_1.grad={b_1.grad}")
     print(f"w_2.grad={w_2.grad}  b_2.grad={b_2.grad}")
     print("PRINT GRAPH (two-layer, alpha=0.5)")
@@ -476,6 +482,7 @@ def test_quant_linear_gradient_flow():
     loss = layer(x).sum()
     loss.backward()
 
+    print(f"layer.weight (unquantized):\n{layer.weight.data}")
     print("PRINT GRAPH (QuantLinear single layer, Brevitas proxy path)")
     print_graph(loss.grad_fn)
 
@@ -508,6 +515,8 @@ def test_quant_linear_two_layer_gradient_flow():
     loss = layer2(h).sum()
     loss.backward()
 
+    print(f"layer1.weight (unquantized):\n{layer1.weight.data}")
+    print(f"layer2.weight (unquantized):\n{layer2.weight.data}")
     print("PRINT GRAPH (two QuantLinear layers, Brevitas proxy path)")
     print_graph(loss.grad_fn)
 
@@ -546,6 +555,7 @@ def test_rounded_baseline_no_quantizer():
     loss = (y_hat - y) ** 2
     loss.backward()
 
+    print(f"w: {w.item()}  quantized_w: n/a (no quantizer)")
     print("PRINT GRAPH (rounded baseline, no quantizer)")
     print_graph(loss.grad_fn)
 
@@ -576,7 +586,7 @@ def test_rounded_ste_off_alpha_zero():
     loss = (y_hat - y) ** 2
     loss.backward()
 
-    print(f"quantized_w (result): {quantized_w.item()}")
+    print(f"w: {w.item()}  quantized_w (result): {quantized_w.item()}")
     print("PRINT GRAPH (rounded, alpha=0)")
     print_graph(loss.grad_fn)
 
@@ -611,7 +621,7 @@ def test_rounded_ste_on_alpha_one():
     loss = (y_hat - y) ** 2
     loss.backward()
 
-    print(f"quantized_w: {quantized_w.item()}")
+    print(f"w: {w.item()}  quantized_w: {quantized_w.item()}")
     print("PRINT GRAPH (rounded, alpha=1)")
     print_graph(loss.grad_fn)
 
@@ -644,7 +654,7 @@ def test_rounded_ste_annealing_alpha_half():
     loss = (y_hat - y) ** 2
     loss.backward()
 
-    print(f"quantized_w (blend result): {quantized_w.item()}")
+    print(f"w: {w.item()}  quantized_w (blend result): {quantized_w.item()}")
     print("PRINT GRAPH (rounded, alpha=0.5)")
     print_graph(loss.grad_fn)
 
