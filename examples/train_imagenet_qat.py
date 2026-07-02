@@ -48,7 +48,7 @@ from training_harness.config_v2 import TrainerConfigV2, QATScheduleConfigV2
 from training_harness.config import CheckpointConfig
 from training_harness.schedulers import WarmupCosineScheduler
 from training_harness.lr_finder import find_lr
-from utils.weight_mapping import load_pretrained_weights
+from utils.weight_mapping import load_timm_weights
 from utils.bn_fusion import fuse_bn_into_conv
 
 
@@ -388,28 +388,24 @@ def _build_model(args, weight_quant, act_quant, bias_quant) -> nn.Module:
     raise ValueError(f"Unknown model: {args.model}")
 
 
+_TIMM_NAMES = {
+    "resnet18":    "resnet18.a1_in1k",
+    "resnet50":    "resnet50.a1_in1k",
+    "mobilenetv1": "mobilenetv1_100.ra4_e3600_r224_in1k",
+    "mobilenetv2": "mobilenetv2_100.ra_in1k",
+}
+
+
 def _load_pretrained(model: nn.Module, args) -> nn.Module:
-    from torchvision.models import (
-        resnet18, ResNet18_Weights,
-        resnet50, ResNet50_Weights,
-        mobilenet_v2, MobileNet_V2_Weights,
-    )
-
-    if args.model == "resnet18":
-        print(f"[pretrained] Loading torchvision resnet18 (IMAGENET1K_V1) …")
-        float_model = resnet18(weights=ResNet18_Weights.DEFAULT)
-    elif args.model == "resnet50":
-        print(f"[pretrained] Loading torchvision resnet50 (IMAGENET1K_V2) …")
-        float_model = resnet50(weights=ResNet50_Weights.DEFAULT)
-    elif args.model == "mobilenetv2":
-        print(f"[pretrained] Loading torchvision mobilenet_v2 pretrained weights …")
-        float_model = mobilenet_v2(weights=MobileNet_V2_Weights.DEFAULT)
-    else:
-        print(f"[pretrained] No pretrained weights for {args.model}, skipping.")
+    import timm
+    timm_name = _TIMM_NAMES.get(args.model)
+    if timm_name is None:
+        print(f"[pretrained] No timm weights configured for {args.model}, skipping.")
         return model
-
-    print(f"[pretrained] Mapping weights to quantized model …")
-    return load_pretrained_weights(model, float_model)
+    print(f"[pretrained] Loading timm {timm_name} …")
+    float_model = timm.create_model(timm_name, pretrained=True)
+    float_model.eval()
+    return load_timm_weights(model, float_model, args.model)
 
 
 def _load_ptq_checkpoint(model: nn.Module, ckpt_path: str) -> nn.Module:
