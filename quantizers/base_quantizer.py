@@ -16,6 +16,26 @@ from typing import Tuple, Any, Optional
 from quantizers.manager import QuantizerManager
 
 
+class AnnealingBlendFn(torch.autograd.Function):
+    """Compute (1-alpha)*x + alpha*quantized in the forward pass, but present
+    a single straight-through node in the backward graph instead of the
+    Add/Mul chain that tensor arithmetic would produce.
+
+    alpha is passed as a plain Python float so it never appears as a graph
+    input.  Gradient goes entirely through the `x` input (slope = 1); `None`
+    is returned for `quantized` to avoid double-counting — both x and
+    quantized are derived from the same upstream leaf.
+    """
+
+    @staticmethod
+    def forward(ctx, x, quantized, alpha):
+        return (1.0 - alpha) * x + alpha * quantized
+
+    @staticmethod
+    def backward(ctx, grad_output):
+        return grad_output, None, None
+
+
 class BaseQuantizer(nn.Module, ABC):
     """
     Abstract base class for per-tensor quantizers.
@@ -101,7 +121,7 @@ class BaseQuantizer(nn.Module, ABC):
 
         alpha_before = self.annealing_alpha.item()
         if alpha_before < 1.0:
-            result = (1 - self.annealing_alpha) * x + self.annealing_alpha * quantized
+            result = AnnealingBlendFn.apply(x, quantized, alpha_before)
             if self.training:
                 new_alpha = min(alpha_before + self.annealing_alpha_step, 1.0)
                 self.annealing_alpha.data.fill_(new_alpha)
