@@ -39,8 +39,6 @@ warnings.filterwarnings("ignore", message="Mixed precision.*Brevitas", category=
 import torch
 import torch.nn as nn
 from torch.utils.data import DataLoader, Dataset
-import torchvision.transforms as T
-from datasets import load_dataset
 
 from models.resnet_quant import QuantResNet18, QuantResNet50
 from models.mobilenetv1_quant import QuantMobileNetV1
@@ -54,7 +52,6 @@ from training_harness.trainer_v2 import QATTrainerV2
 from training_harness.config_v2 import TrainerConfigV2, QATScheduleConfigV2
 from training_harness.config import CheckpointConfig
 from utils.weight_mapping import load_pretrained_weights
-from utils.imagenetTFTransforms import preprocess_image_for_training
 
 
 # ---------------------------------------------------------------------------
@@ -307,48 +304,7 @@ def _build_dali_loaders(args):
 
 
 def _build_hf_loaders(args):
-    normalize = T.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
-    train_preprocess = T.Compose([
-        T.ToTensor(),
-        T.Lambda(preprocess_image_for_training),
-        normalize,
-    ])
-    val_preprocess = T.Compose([
-        T.Resize(256),
-        T.CenterCrop(224),
-        T.ToTensor(),
-        normalize,
-    ])
-    print(f"Loading ImageNet from HuggingFace ({args.hf_dataset}) …")
-    hf_train = load_dataset(args.hf_dataset, split="train")
-    hf_val   = load_dataset(args.hf_dataset, split="validation")
-
-    train_ds = HFDatasetWrapper(hf_train, train_preprocess)
-    persistent = args.num_workers > 0
-    prefetch   = args.prefetch_factor if args.num_workers > 0 else None
-
-    if args.repeat_aug > 1:
-        sampler = RepeatAugSampler(train_ds, n_repeats=args.repeat_aug, shuffle=True)
-        train_loader = DataLoader(
-            train_ds, batch_size=args.batch_size, sampler=sampler,
-            num_workers=args.num_workers, pin_memory=True,
-            persistent_workers=persistent, prefetch_factor=prefetch,
-        )
-        print(f"  RepeatAugSampler: {args.repeat_aug}× → {len(sampler):,} samples/epoch")
-    else:
-        train_loader = DataLoader(
-            train_ds, batch_size=args.batch_size, shuffle=True,
-            num_workers=args.num_workers, pin_memory=True,
-            persistent_workers=persistent, prefetch_factor=prefetch,
-        )
-
-    val_loader = DataLoader(
-        HFDatasetWrapper(hf_val, val_preprocess),
-        batch_size=args.batch_size, shuffle=False,
-        num_workers=args.num_workers, pin_memory=True,
-        persistent_workers=persistent, prefetch_factor=prefetch,
-    )
-    return train_loader, val_loader
+    raise Exception("Deprecated. Use dali instead.")
 
 
 # ---------------------------------------------------------------------------

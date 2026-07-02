@@ -33,8 +33,6 @@ warnings.filterwarnings("ignore", message="Corrupt EXIF data", category=UserWarn
 import torch
 import torch.nn as nn
 from torch.utils.data import DataLoader, Dataset
-import torchvision.transforms as T
-from datasets import load_dataset
 
 from models.resnet_quant import QuantResNet18, QuantResNet50
 from models.mobilenetv1_quant import QuantMobileNetV1
@@ -52,7 +50,6 @@ from training_harness.schedulers import WarmupCosineScheduler
 from training_harness.lr_finder import find_lr
 from utils.weight_mapping import load_pretrained_weights
 from utils.bn_fusion import fuse_bn_into_conv
-from utils.imagenetTFTransforms import preprocess_image_for_training
 
 
 # ---------------------------------------------------------------------------
@@ -546,59 +543,7 @@ def _build_dali_loaders(args):
 
 
 def _build_hf_loaders(args):
-    normalize = T.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
-
-    # TF-exact recipe via utils.imagenetTFTransforms:
-    #   train: SampleDistortedBoundingBoxCrop + bilinear resize to 224
-    #          + random H-flip + brightness + saturation (all TF-faithful)
-    #   val:   Resize(256) + CenterCrop(224)
-    train_preprocess = T.Compose([
-        T.ToTensor(),
-        T.Lambda(preprocess_image_for_training),
-        normalize,
-    ])
-    val_preprocess = T.Compose([
-        T.Resize(256),
-        T.CenterCrop(224),
-        T.ToTensor(),
-        normalize,
-    ])
-
-    print(f"Loading ImageNet datasets from Hugging Face ({args.hf_dataset})...")
-    hf_train = load_dataset(args.hf_dataset, split="train")
-    hf_val   = load_dataset(args.hf_dataset, split="validation")
-
-    train_ds = HFDatasetWrapper(hf_train, train_preprocess)
-    persistent = args.num_workers > 0
-    prefetch   = args.prefetch_factor if args.num_workers > 0 else None
-
-    repeat_aug = getattr(args, "repeat_aug", 1)
-    if repeat_aug > 1:
-        train_sampler = RepeatAugSampler(train_ds, n_repeats=repeat_aug, shuffle=True)
-        train_loader = DataLoader(
-            train_ds,
-            batch_size=args.batch_size, sampler=train_sampler,
-            num_workers=args.num_workers, pin_memory=True,
-            persistent_workers=persistent, prefetch_factor=prefetch,
-        )
-        print(f"  RepeatAugSampler: {repeat_aug}× per image → "
-              f"{len(train_sampler):,} total samples/epoch")
-    else:
-        train_loader = DataLoader(
-            train_ds,
-            batch_size=args.batch_size, shuffle=True,
-            num_workers=args.num_workers, pin_memory=True,
-            persistent_workers=persistent, prefetch_factor=prefetch,
-        )
-
-    val_loader = DataLoader(
-        HFDatasetWrapper(hf_val, val_preprocess),
-        batch_size=args.batch_size, shuffle=False,
-        num_workers=args.num_workers, pin_memory=True,
-        persistent_workers=persistent, prefetch_factor=prefetch,
-    )
-    return train_loader, val_loader
-
+    raise Exception("Deprecated. Use dali instead.")
 
 # ---------------------------------------------------------------------------
 # Main
