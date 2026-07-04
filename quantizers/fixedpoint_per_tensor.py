@@ -132,6 +132,12 @@ def quantize_fixed_point(inputs: torch.Tensor, lsb: int, bit_width: int, signed:
     -------
     torch.Tensor
         Quantized (dequantized) input tensor on the fixed-point grid.
+
+    Note
+    ----
+    Backward is plain STE (slope 1 everywhere). Clipped STE is applied one level
+    up in BaseQuantizer.forward via ClippedSTEFn + _in_range_mask, so it is
+    shared by all quantizers rather than baked into this function.
     """
     quantized, _, _, _ = FixedPointQuantFnTestingThings.apply(inputs, lsb, bit_width, signed, rounding_mode, narrow_range)
     # quantized, _ =  quantize_fixed_point_with_integers(inputs, lsb, bit_width, signed, rounding_mode, narrow_range)
@@ -255,8 +261,9 @@ class FixedPointQuantFnTestingThings(Function):
 
     @staticmethod
     def backward(ctx, grad_quantized, grad_scale, grad_zero_point, grad_bw):
-        # Straight-Through Estimator: pass gradient through for the first input
-        return grad_quantized, None, None, None, None, None, None, None
+        # Plain Straight-Through Estimator (slope 1 everywhere). Clipped STE is
+        # applied in BaseQuantizer.forward (shared across quantizers), not here.
+        return grad_quantized, None, None, None, None, None, None
 
 
 class FixedPointQuantFn(Function):
@@ -337,6 +344,15 @@ class FixedPointPerTensorQuantizer(BaseQuantizer):
         ROUND_TO_NEAREST_EVEN (default) or FLOOR.
     narrow_range : bool
         Exclude most-negative code in signed mode (default False).
+    clipped_ste : bool
+        If True, use a clipped Straight-Through Estimator: gradient passes
+        through (slope 1) only for weights inside the representable range and is
+        zeroed for weights the forward clamp saturated. If False (default),
+        plain STE (slope 1 everywhere) is used. This is a toggle so plain vs
+        clipped STE can be ablated. The flag and the masking mechanism live in
+        BaseQuantizer; this class supplies the fixed-point range via
+        _in_range_mask(). Only affects the live training/inference path; the
+        ONNX-export path is unchanged.
     """
 
     def __init__(
@@ -346,13 +362,15 @@ class FixedPointPerTensorQuantizer(BaseQuantizer):
         rounding_mode: RoundingMode = RoundingMode.ROUND,
         narrow_range: bool = False,
         quantizer_role: str = "unknown",
+        clipped_ste: bool = False,
     ):
-        super().__init__(bit_width=bit_width)
+        # clipped_ste is stored by BaseQuantizer (shared by all quantizers).
+        super().__init__(bit_width=bit_width, clipped_ste=clipped_ste)
         self.signed = signed
         self.rounding_mode = rounding_mode
         self.narrow_range = narrow_range
         self.quantizer_role = quantizer_role
-        
+
         # Register search results as buffers to ensure they are serialized in state_dict
         self.register_buffer('search_result_is_signed', torch.tensor(signed, dtype=torch.bool))
         self.register_buffer('search_result_lsb', torch.tensor(0, dtype=torch.long))
@@ -418,6 +436,31 @@ class FixedPointPerTensorQuantizer(BaseQuantizer):
             self.rounding_mode,
             self.narrow_range
         )
+
+    def _in_range_mask(self, x: torch.Tensor, params: Any) -> torch.Tensor:
+        """Clipped-STE support: True where x lands inside the fixed-point grid's
+        representable range, False where the forward clamp saturated it.
+
+        The range limits in float units are integer_min*step and
+        integer_max*step (step = 2**lsb) — the exact bounds torch.clamp()
+        saturated against in quantize_fixed_point_with_integers. Boundary
+        convention is inclusive (>= lower AND <= upper): a weight sitting
+        exactly on the bottom or top code counts as in-range and keeps slope 1.
+        """
+        lsb = int(params['lsb'])
+        signed = params['signed']
+        step = 2.0 ** lsb
+        if signed:
+            integer_min = -(2 ** (self.bit_width - 1))
+            if self.narrow_range:
+                integer_min += 1  # exclude most-negative integer
+            integer_max = 2 ** (self.bit_width - 1) - 1
+        else:
+            integer_min = 0
+            integer_max = 2 ** self.bit_width - 1
+        lower = integer_min * step
+        upper = integer_max * step
+        return (x >= lower) & (x <= upper)
 
     def _get_metadata(self, params: Any, x: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         """Return scale, zero_point, and bit_width tensors matching x's dtype/device."""

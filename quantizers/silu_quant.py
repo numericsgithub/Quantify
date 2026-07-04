@@ -63,8 +63,10 @@ class SiLUTensorQuant(BaseQuantizer):
         bit_width: int = 8,
         signed: bool = False,
         rounding_mode: RoundingMode = RoundingMode.ROUND_TO_NEAREST_EVEN,
+        clipped_ste: bool = False,
     ):
-        super().__init__(bit_width=bit_width)
+        # clipped_ste is stored by BaseQuantizer (shared by all quantizers).
+        super().__init__(bit_width=bit_width, clipped_ste=clipped_ste)
         self.signed = signed
         self.rounding_mode = rounding_mode
         self.register_buffer('search_result_lsb', torch.tensor(0, dtype=torch.long))
@@ -107,6 +109,29 @@ class SiLUTensorQuant(BaseQuantizer):
         zero_point = torch.tensor(0.0, dtype=x.dtype, device=x.device)
         bit_width = torch.tensor(float(self.bit_width), dtype=x.dtype, device=x.device)
         return scale, zero_point, bit_width
+
+    def _in_range_mask(self, x: torch.Tensor, params: Any) -> torch.Tensor:
+        """Clipped-STE support. Unlike the plain fixed-point quantizer, this one
+        quantizes silu(x), so the forward clamp saturates the SiLU OUTPUT, not x
+        directly. The mask is therefore computed on silu(x) against the
+        fixed-point grid bounds integer_min*step / integer_max*step
+        (step = 2**lsb), inclusive at both ends.
+
+        Note the gradient still flows through SiLU's own (real) derivative; this
+        mask only zeroes it where the grid clamp saturated, i.e. clipped STE is
+        applied to the quantization step, not to the SiLU nonlinearity.
+        """
+        x_silu = torch.nn.functional.silu(x)
+        step = 2.0 ** int(params['lsb'])
+        if self.signed:
+            integer_min = -(2 ** (self.bit_width - 1))
+            integer_max = 2 ** (self.bit_width - 1) - 1
+        else:
+            integer_min = 0
+            integer_max = 2 ** self.bit_width - 1
+        lower = integer_min * step
+        upper = integer_max * step
+        return (x_silu >= lower) & (x_silu <= upper)
 
 
 class QuantSiLUActivationQuant(BaseActivationQuant):

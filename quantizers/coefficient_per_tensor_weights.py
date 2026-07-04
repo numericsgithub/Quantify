@@ -92,8 +92,9 @@ class CoefficientPerTensorWeightQuantizer(BaseQuantizer):
     Inherits infrastructure from BaseQuantizer (gating, calibration state, ONNX guards).
     """
 
-    def __init__(self, filepath: str, bit_width: int = 8):
-        super().__init__(bit_width=bit_width)
+    def __init__(self, filepath: str, bit_width: int = 8, clipped_ste: bool = False):
+        # clipped_ste is stored by BaseQuantizer (shared by all quantizers).
+        super().__init__(bit_width=bit_width, clipped_ste=clipped_ste)
         self.filepath = filepath
         
         # Read coefficient sets from the text file during initialization
@@ -149,19 +150,19 @@ class CoefficientPerTensorWeightQuantizer(BaseQuantizer):
         chosen_coeffs = self.coefficient_sets[params['set_idx']].to(x.device)
         bit_shift_scale = params['bit_shift_scale']
 
-        if torch.onnx.is_in_onnx_export():
-            quantized, _, _, _ = CoefficientQuantFn.apply(
-                x,
-                chosen_coeffs,
-                bit_shift_scale,
-                len(self.coefficient_sets[params['set_idx']]),
-            )
-            return quantized
-
-        quantized, _, _ = apply_non_uniform_quantization(x, chosen_coeffs, bit_shift_scale)
-        return quantized
-
-        quantized, _, _ = apply_non_uniform_quantization(x, chosen_coeffs, bit_shift_scale)
+        # Route through CoefficientQuantFn in ALL paths, not just ONNX export.
+        # apply_non_uniform_quantization() alone returns scaled_coeffs[indices],
+        # a tensor derived from the (constant) coefficient set and detached from
+        # x -> no gradient reaches the weights during training. CoefficientQuantFn
+        # supplies the straight-through-estimator backward (and handles the
+        # ONNX-export integer capture internally when exporting). Clipped STE, if
+        # enabled, is layered on top in BaseQuantizer.forward via _in_range_mask.
+        quantized, _, _, _ = CoefficientQuantFn.apply(
+            x,
+            chosen_coeffs,
+            bit_shift_scale,
+            len(self.coefficient_sets[params['set_idx']]),
+        )
         return quantized
 
     def _get_metadata(self, params: Any, x: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
@@ -171,6 +172,22 @@ class CoefficientPerTensorWeightQuantizer(BaseQuantizer):
         # Bit width corresponds to the number of coefficients in the chosen set
         bit_width = torch.tensor(float(len(self.coefficient_sets[params['set_idx']])), dtype=x.dtype, device=x.device)
         return scale, zero_point, bit_width
+
+    def _in_range_mask(self, x: torch.Tensor, params: Any) -> torch.Tensor:
+        """Clipped-STE support: True where x lands inside the representable
+        span of the chosen (scaled) coefficient set, False where it saturated.
+
+        Nearest-coefficient quantization maps any input beyond the outermost
+        scaled coefficients onto that extreme coefficient — the analog of a
+        clamp. So the in-range span is [min(scaled_coeffs), max(scaled_coeffs)],
+        inclusive at both ends (a weight sitting exactly on the outer
+        coefficient still receives gradient). Inputs strictly outside are
+        zeroed.
+        """
+        scaled = self.coefficient_sets[params['set_idx']].to(x.device) * (2.0 ** params['bit_shift_scale'])
+        lower = scaled.min()
+        upper = scaled.max()
+        return (x >= lower) & (x <= upper)
 
 
 class CoefficientPerTensorWeightQuant(BaseWeightQuant):

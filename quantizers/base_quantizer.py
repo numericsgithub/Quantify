@@ -36,6 +36,35 @@ class AnnealingBlendFn(torch.autograd.Function):
         return grad_output, None, None
 
 
+class ClippedSTEFn(torch.autograd.Function):
+    """Clipped Straight-Through Estimator, shared by all quantizers.
+
+    Forward is a value-preserving identity on `quantized` (so the numeric
+    output of the quantizer is completely unchanged). Backward multiplies the
+    incoming gradient by a precomputed in-range mask, so the local slope is 1
+    for inputs that landed INSIDE the quantizer's representable range and 0 for
+    inputs the forward clamp saturated. This is the state-of-the-art refinement
+    over plain STE, which uses slope 1 everywhere.
+
+    The mask is a 0/1 tensor (in the quantized tensor's dtype) computed once in
+    BaseQuantizer.forward from the ORIGINAL float input and the quantizer's
+    range bounds; `None` is returned for it in backward since it is not a
+    differentiable input.
+    """
+
+    @staticmethod
+    def forward(ctx, quantized, in_range_mask):
+        ctx.save_for_backward(in_range_mask)
+        # Return a fresh tensor (not the input alias) so autograd treats this as
+        # a distinct node; the value is identical to `quantized`.
+        return quantized.clone()
+
+    @staticmethod
+    def backward(ctx, grad_output):
+        (in_range_mask,) = ctx.saved_tensors
+        return grad_output * in_range_mask, None
+
+
 class BaseQuantizer(nn.Module, ABC):
     """
     Abstract base class for per-tensor quantizers.
@@ -49,10 +78,16 @@ class BaseQuantizer(nn.Module, ABC):
         self,
         bit_width: int = 8,
         quantizer_manager: Optional[QuantizerManager] = None,
+        clipped_ste: bool = False,
         **kwargs
     ):
         super().__init__()
         self.bit_width = bit_width
+        # Clipped-STE toggle lives here (shared by every quantizer) so any
+        # subclass can honor it just by overriding _in_range_mask(). Plain STE
+        # (slope 1 everywhere) remains the default. See ClippedSTEFn and
+        # _in_range_mask below.
+        self.clipped_ste = clipped_ste
         self.inference_counter = 0
         self.inference_sequence_id = -1
         self.annealing_alpha_step = 0.1
@@ -119,6 +154,18 @@ class BaseQuantizer(nn.Module, ABC):
         quantized = self._quantize(x, params)
         scale, zero_point, bit_width = self._get_metadata(params, x)
 
+        # 3b. Clipped STE (optional, shared by all quantizers): zero the
+        # gradient for inputs the forward clamp saturated. The mask is derived
+        # from the ORIGINAL float input `x` and the quantizer's range bounds.
+        # A subclass that does not define its range returns None here, in which
+        # case clipped_ste is a no-op (plain STE). Value is unchanged; only the
+        # backward slope is masked. Skipped during ONNX export to keep that
+        # path's graph unchanged.
+        if self.clipped_ste and not is_exporting:
+            in_range_mask = self._in_range_mask(x, params)
+            if in_range_mask is not None:
+                quantized = ClippedSTEFn.apply(quantized, in_range_mask.to(dtype=x.dtype))
+
         alpha_before = self.annealing_alpha.item()
         if alpha_before < 1.0:
             result = AnnealingBlendFn.apply(x, quantized, alpha_before)
@@ -164,6 +211,21 @@ class BaseQuantizer(nn.Module, ABC):
     def _get_metadata(self, params: Any, x: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         """Return scale, zero_point, and bit_width tensors matching x's dtype/device."""
         raise NotImplementedError
+
+    def _in_range_mask(self, x: torch.Tensor, params: Any) -> Optional[torch.Tensor]:
+        """
+        Return a boolean/0-1 tensor (same shape as x) that is True where the
+        float input x lies INSIDE the quantizer's representable range and False
+        where the forward clamp saturated it. Used only when clipped_ste=True.
+
+        Boundary convention is left to the subclass but should be inclusive
+        (the exact min/max grid values count as in-range).
+
+        The base implementation returns None, meaning "this quantizer does not
+        define a range" -> clipped STE degrades to plain STE (no masking).
+        Subclasses with a well-defined grid (e.g. fixed-point) override this.
+        """
+        return None
 
     def _get_diagnostics_params(self, params: Any) -> Optional[dict]:
         """
