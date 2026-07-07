@@ -67,6 +67,12 @@ class ExperimentLogger:
         self._csv_writer = None
         self._csv_fieldnames: Optional[list] = None
 
+        # Optional listeners (e.g. the live monitoring API collector).
+        # Each listener may implement on_step(step, metrics, phase) and/or
+        # on_epoch(epoch, metrics). Failures are swallowed so a listener can
+        # never take down a training run.
+        self._listeners: list = []
+
         if use_tensorboard:
             self._init_tensorboard()
 
@@ -111,6 +117,20 @@ class ExperimentLogger:
     # ------------------------------------------------------------------
     # Public API
     # ------------------------------------------------------------------
+
+    def add_listener(self, listener: Any) -> None:
+        """Register a metrics listener (see _listeners above)."""
+        self._listeners.append(listener)
+
+    def _notify(self, method: str, *args) -> None:
+        for listener in self._listeners:
+            fn = getattr(listener, method, None)
+            if fn is None:
+                continue
+            try:
+                fn(*args)
+            except Exception as e:
+                print(f"[logger] WARNING: listener {method} failed: {e}")
 
     def log_hparams(self, hparams: Dict[str, Any]) -> None:
         """
@@ -158,6 +178,8 @@ class ExperimentLogger:
         if self._wandb is not None:
             self._wandb.log({f"{phase}/{k}": v for k, v in metrics.items()}, step=step)
 
+        self._notify("on_step", step, metrics, phase)
+
     def log_epoch(
         self,
         epoch: int,
@@ -182,6 +204,8 @@ class ExperimentLogger:
         # W&B
         if self._wandb is not None:
             self._wandb.log({"epoch": epoch, **metrics})
+
+        self._notify("on_epoch", epoch, metrics)
 
     def log_scale_factors(
         self,
@@ -215,9 +239,10 @@ class ExperimentLogger:
 
     def log_text(self, tag: str, text: str) -> None:
         """Log a block of text (e.g. hardware info, config dump)."""
-        # Always write to a file
+        # Always write to a file (utf-8: text may contain box-drawing chars,
+        # which crash on Windows' default cp1252 locale encoding)
         path = os.path.join(self.run_dir, f"{tag}.txt")
-        with open(path, "w") as f:
+        with open(path, "w", encoding="utf-8") as f:
             f.write(text)
 
         if self._tb_writer is not None:

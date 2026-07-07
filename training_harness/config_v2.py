@@ -128,6 +128,17 @@ class TrainerConfigV2:
     dry_run: bool = False
     dry_run_batches: int = 2
 
+    # ---- Live monitoring API ------------------------------------------------
+    api_port: Optional[int] = None
+    """
+    If set, expose a read-only HTTP monitoring API on this port while the
+    run is in progress (see training_harness/api/). Use 0 to let the OS pick
+    a free port. None (default) disables the API entirely.
+    """
+
+    api_host: str = "127.0.0.1"
+    """Host interface for the monitoring API ("0.0.0.0" for remote access)."""
+
     # ---- Sub-configs -------------------------------------------------------
     qat: QATScheduleConfigV2 = field(default_factory=QATScheduleConfigV2)
     checkpoint: CheckpointConfig = field(default_factory=CheckpointConfig)
