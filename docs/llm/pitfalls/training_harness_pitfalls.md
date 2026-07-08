@@ -11,3 +11,8 @@
 - Configure it with a `TrainerConfig` that specifies `float_warmup_epochs` and `calibration_batches`.
 - Pass your model, optimizer, and data loaders directly to `Trainer(config=..., model=..., optimizer=..., train_loader=..., val_loader=...)`.
 - Let the harness handle logging, checkpointing, and metric tracking. Only override `Trainer` methods if you have highly specific requirements.
+
+## 2. UnicodeEncodeError on Windows (cp1252) from Box-Drawing Characters
+**When this happens:** Running the harness on Windows, especially with stdout redirected to a file (e.g. background runs, CI). Crashes with `UnicodeEncodeError: 'charmap' codec can't encode characters` the moment `log_hardware_info()` or an epoch banner prints.
+**The Problem:** The harness prints banners with box-drawing characters (`─`, `═`). Windows defaults to the cp1252 locale encoding for redirected stdout and for `open()` without an explicit `encoding=`, and cp1252 cannot represent those characters. `ExperimentLogger.log_text` writes with `encoding="utf-8"` explicitly, but `print()` output still goes through the console encoding.
+**How to Prevent It:** Run Python in UTF-8 mode on Windows: set `PYTHONUTF8=1` (or pass `-X utf8`). When adding new file writes to the harness, always pass `encoding="utf-8"` to `open()`.

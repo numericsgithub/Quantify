@@ -199,6 +199,18 @@ class QATTrainerV2:
         self._qat_active: bool = False
         self._onnx_dummy_input = onnx_dummy_input
 
+        # Optional read-only monitoring API (opt-in via config.api_port)
+        self.api_server = None
+        self._api_collector = None
+        if config.api_port is not None:
+            from .api import DashboardAPIServer, RunStateCollector
+            self._api_collector = RunStateCollector(self)
+            self.logger.add_listener(self._api_collector)
+            self.api_server = DashboardAPIServer(
+                self._api_collector, host=config.api_host, port=config.api_port
+            )
+            self.api_server.start()
+
     # ------------------------------------------------------------------
     # Pre-training / standalone evaluation
     # ------------------------------------------------------------------
@@ -603,6 +615,9 @@ class QATTrainerV2:
 
     def _post_training(self) -> None:
         print("\n[trainer_v2] Training complete. Finalising …")
+
+        if self._api_collector is not None:
+            self._api_collector.mark_finished()
 
         if self.config.logging.save_plots:
             self.plotter.plot_all(self.tracker, lr_history=self._lr_history)

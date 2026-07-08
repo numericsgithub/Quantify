@@ -1,0 +1,689 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Quantify Training Dashboard</title>
+<style>
+  /* Dark-only theme (per project requirement). Palette roles from the
+     validated reference palette; series colors checked with the dataviz
+     validator against surface #1a1a19 (all PASS). */
+  :root {
+    --page:           #0d0d0d;
+    --surface:        #1a1a19;
+    --text-primary:   #ffffff;
+    --text-secondary: #c3c2b7;
+    --text-muted:     #898781;
+    --grid:           #2c2c2a;
+    --baseline:       #383835;
+    --border:         rgba(255,255,255,0.10);
+    --series-loss:    #3987e5;  /* blue  — train loss    */
+    --series-acc:     #199e70;  /* aqua  — val accuracy  */
+    --series-lr:      #c98500;  /* yellow — learning rate */
+    --good:           #0ca30c;
+    --critical:       #d03b3b;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    background: var(--page);
+    color: var(--text-primary);
+    font-family: system-ui, -apple-system, "Segoe UI", sans-serif;
+    font-size: 14px;
+    padding: 16px 20px 40px;
+  }
+  h1 { font-size: 17px; font-weight: 600; }
+  .topbar {
+    display: flex; align-items: center; gap: 12px; flex-wrap: wrap;
+    margin-bottom: 14px;
+  }
+  .topbar .spacer { flex: 1; }
+  .conn-pill {
+    display: inline-flex; align-items: center; gap: 7px;
+    padding: 4px 12px; border-radius: 99px; font-size: 12px; font-weight: 600;
+    border: 1px solid var(--border); color: var(--text-secondary);
+  }
+  .conn-pill .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--text-muted); }
+  .conn-pill.live .dot { background: var(--good); }
+  .conn-pill.finished .dot { background: var(--series-loss); }
+  .conn-pill.disconnected { color: var(--critical); border-color: var(--critical); }
+  .conn-pill.disconnected .dot { background: var(--critical); }
+
+  input[type="text"], input[type="number"], select {
+    background: var(--surface); color: var(--text-primary);
+    border: 1px solid var(--border); border-radius: 6px;
+    padding: 6px 10px; font: inherit; font-size: 13px;
+  }
+  input[type="text"]#apiBase { width: 300px; }
+  button {
+    background: var(--surface); color: var(--text-primary);
+    border: 1px solid var(--border); border-radius: 6px;
+    padding: 6px 14px; font: inherit; font-size: 13px; cursor: pointer;
+  }
+  button:hover { border-color: var(--text-muted); }
+
+  .cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 10px; margin-bottom: 14px; }
+  .card {
+    background: var(--surface); border: 1px solid var(--border);
+    border-radius: 10px; padding: 12px 14px; min-width: 0;
+  }
+  .card .label { font-size: 11.5px; color: var(--text-muted); margin-bottom: 5px; }
+  .card .value { font-size: 21px; font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .card .sub   { font-size: 12px; color: var(--text-secondary); margin-top: 3px;
+                 overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .meter { height: 6px; border-radius: 3px; background: var(--baseline); margin-top: 8px; overflow: hidden; }
+  .meter > div { height: 100%; border-radius: 3px; background: var(--series-loss); width: 0%; transition: width .4s; }
+  .meter.quant > div { background: var(--series-acc); }
+
+  .charts { display: grid; grid-template-columns: repeat(auto-fit, minmax(420px, 1fr)); gap: 12px; }
+  .chart-card { background: var(--surface); border: 1px solid var(--border); border-radius: 10px; padding: 12px 14px; }
+  .chart-head { display: flex; align-items: baseline; gap: 10px; flex-wrap: wrap; margin-bottom: 6px; }
+  .chart-head h2 { font-size: 13.5px; font-weight: 600; }
+  .chart-head .hint { font-size: 11.5px; color: var(--text-muted); }
+  .chart-head .controls { margin-left: auto; display: flex; align-items: center; gap: 10px; font-size: 12px; color: var(--text-secondary); }
+  .chart-head .controls label { display: inline-flex; align-items: center; gap: 5px; cursor: pointer; }
+  .chart-head input[type="number"] { width: 64px; padding: 3px 7px; }
+  .chart-wrap { position: relative; }
+  canvas { display: block; width: 100%; height: 240px; }
+  .tooltip {
+    position: absolute; pointer-events: none; display: none; z-index: 5;
+    background: var(--page); border: 1px solid var(--border); border-radius: 7px;
+    padding: 7px 10px; font-size: 12px; color: var(--text-secondary);
+    white-space: nowrap; box-shadow: 0 4px 14px rgba(0,0,0,.5);
+  }
+  .tooltip .tt-value { color: var(--text-primary); font-weight: 600; font-size: 13px; }
+  .tooltip .key { display: inline-block; width: 12px; height: 0; border-top: 2px solid; margin-right: 6px; vertical-align: middle; }
+
+  details.config { margin: 14px 0; }
+  details.config summary { cursor: pointer; color: var(--text-secondary); font-size: 13px; }
+  details.config pre {
+    margin-top: 8px; padding: 12px; background: var(--surface);
+    border: 1px solid var(--border); border-radius: 10px;
+    font-size: 12px; color: var(--text-secondary); overflow-x: auto;
+  }
+  .section-title { font-size: 13.5px; font-weight: 600; margin: 18px 0 8px; }
+  table { width: 100%; border-collapse: collapse; background: var(--surface); border: 1px solid var(--border); border-radius: 10px; overflow: hidden; }
+  th, td { text-align: left; padding: 8px 12px; font-size: 12.5px; border-bottom: 1px solid var(--grid); }
+  th { color: var(--text-muted); font-weight: 500; font-size: 11.5px; }
+  td { color: var(--text-secondary); }
+  td.num { font-variant-numeric: tabular-nums; }
+  tr:last-child td { border-bottom: none; }
+  .footnote { font-size: 11.5px; color: var(--text-muted); margin-top: 14px; }
+</style>
+</head>
+<body>
+
+<div class="topbar">
+  <h1>Quantify Training Dashboard</h1>
+  <span class="conn-pill" id="connPill"><span class="dot"></span><span id="connText">connecting…</span></span>
+  <div class="spacer"></div>
+  <input type="text" id="apiBase" list="apiBaseList" placeholder="http://127.0.0.1:8765" spellcheck="false">
+  <datalist id="apiBaseList"></datalist>
+  <button id="connectBtn">Connect</button>
+</div>
+
+<div class="cards">
+  <div class="card">
+    <div class="label">Experiment</div>
+    <div class="value" id="expName">—</div>
+    <div class="sub" id="expSub">—</div>
+  </div>
+  <div class="card">
+    <div class="label">Phase</div>
+    <div class="value" id="phaseName">—</div>
+    <div class="sub" id="quantSub">—</div>
+    <div class="meter quant"><div id="quantMeter"></div></div>
+  </div>
+  <div class="card">
+    <div class="label">Epoch</div>
+    <div class="value" id="epochVal">—</div>
+    <div class="sub" id="etaSub">—</div>
+    <div class="meter"><div id="epochMeter"></div></div>
+  </div>
+  <div class="card">
+    <div class="label">Learning rate</div>
+    <div class="value" id="lrVal">—</div>
+    <div class="sub" id="stepSub">—</div>
+  </div>
+  <div class="card">
+    <div class="label" id="bestLabel">Best metric</div>
+    <div class="value" id="bestVal">—</div>
+    <div class="sub" id="bestSub">—</div>
+  </div>
+</div>
+
+<div class="charts">
+  <div class="chart-card">
+    <div class="chart-head">
+      <h2>Train loss</h2><span class="hint">per step</span>
+      <div class="controls">
+        <label><input type="checkbox" id="smoothToggle" checked> smooth</label>
+      </div>
+    </div>
+    <div class="chart-wrap">
+      <canvas id="lossChart"></canvas>
+      <div class="tooltip" id="lossTip"></div>
+    </div>
+  </div>
+
+  <div class="chart-card">
+    <div class="chart-head">
+      <h2>Validation accuracy</h2><span class="hint">per epoch</span>
+      <div class="controls">
+        <label>target % <input type="number" id="targetAcc" value="72" min="0" max="100" step="0.5"></label>
+      </div>
+    </div>
+    <div class="chart-wrap">
+      <canvas id="accChart"></canvas>
+      <div class="tooltip" id="accTip"></div>
+    </div>
+  </div>
+
+  <div class="chart-card">
+    <div class="chart-head">
+      <h2>Learning rate</h2><span class="hint">per logged step</span>
+      <div class="controls">
+        <label><input type="checkbox" id="lrLogToggle" checked> log scale</label>
+      </div>
+    </div>
+    <div class="chart-wrap">
+      <canvas id="lrChart"></canvas>
+      <div class="tooltip" id="lrTip"></div>
+    </div>
+  </div>
+</div>
+
+<div class="section-title">Checkpoints (top-K)</div>
+<table id="ckptTable">
+  <thead><tr><th>#</th><th id="ckptMetricHead">metric</th><th>epoch</th><th>saved</th><th>path</th></tr></thead>
+  <tbody><tr><td colspan="5">—</td></tr></tbody>
+</table>
+
+<details class="config">
+  <summary>Run configuration</summary>
+  <pre id="configDump">—</pre>
+</details>
+
+<p class="footnote">
+  Train accuracy is reported by the API but flagged unreliable (nonstandard computation;
+  approximate under mixup) — it is deliberately not plotted. Train loss and validation
+  accuracy are the meaningful signals.
+</p>
+
+<script>
+"use strict";
+
+/* ────────────────────────── state ────────────────────────── */
+
+const state = {
+  apiBase: null,
+  steps: [],        // {step, t, loss, lr}
+  epochs: [],       // {epoch, t, duration_s, train_loss, val_loss, val_acc, ...}
+  sinceStep: -1,
+  sinceEpoch: -1,
+  status: null,
+  failures: 0,
+  connected: false,
+  timer: null,
+};
+
+const $ = (id) => document.getElementById(id);
+
+const css = (name) =>
+  getComputedStyle(document.documentElement).getPropertyValue(name).trim();
+const COLORS = {
+  loss: css("--series-loss"), acc: css("--series-acc"), lr: css("--series-lr"),
+  grid: css("--grid"), baseline: css("--baseline"),
+  muted: css("--text-muted"), secondary: css("--text-secondary"),
+  surface: css("--surface"),
+};
+
+/* ────────────────────── API base handling ────────────────────── */
+
+function savedBases() {
+  try { return JSON.parse(localStorage.getItem("quantify_api_bases") || "[]"); }
+  catch { return []; }
+}
+function rememberBase(base) {
+  const bases = savedBases().filter((b) => b !== base);
+  bases.unshift(base);
+  localStorage.setItem("quantify_api_bases", JSON.stringify(bases.slice(0, 8)));
+  renderBaseList();
+}
+function renderBaseList() {
+  const dl = $("apiBaseList");
+  dl.replaceChildren(...savedBases().map((b) => {
+    const opt = document.createElement("option");
+    opt.value = b;
+    return opt;
+  }));
+}
+
+function connect(base) {
+  base = base.replace(/\/+$/, "");
+  state.apiBase = base;
+  state.steps = []; state.epochs = [];
+  state.sinceStep = -1; state.sinceEpoch = -1;
+  state.status = null; state.failures = 0; state.connected = false;
+  $("configDump").textContent = "—";
+  rememberBase(base);
+  setPill("connecting…", "");
+  if (state.timer) clearInterval(state.timer);
+  fetchConfig();
+  poll();
+  state.timer = setInterval(poll, 2000);
+}
+
+/* ────────────────────────── polling ────────────────────────── */
+
+async function getJSON(path) {
+  const resp = await fetch(state.apiBase + path, { signal: AbortSignal.timeout(4000) });
+  if (!resp.ok) throw new Error("HTTP " + resp.status);
+  return resp.json();
+}
+
+async function poll() {
+  try {
+    const [status, metrics] = await Promise.all([
+      getJSON("/api/v1/status"),
+      getJSON(`/api/v1/metrics?since_step=${state.sinceStep}&since_epoch=${state.sinceEpoch}`),
+    ]);
+    state.status = status;
+    for (const s of metrics.steps) { state.steps.push(s); state.sinceStep = s.step; }
+    for (const e of metrics.epochs) { state.epochs.push(e); state.sinceEpoch = e.epoch; }
+    state.failures = 0;
+    state.connected = true;
+    setPill(status.status === "finished" ? "finished" : "live",
+            status.status === "finished" ? "finished" : "live");
+    renderStatus(); renderCharts();
+    if (state.steps.length === metrics.steps.length || metrics.epochs.length) fetchCheckpoints();
+  } catch (err) {
+    state.failures += 1;
+    if (state.failures >= 2) {
+      state.connected = false;
+      const suffix = state.status && state.status.status === "finished"
+        ? "disconnected (run finished)" : "disconnected — showing last known state";
+      setPill(suffix, "disconnected");
+    }
+  }
+}
+
+async function fetchConfig() {
+  try {
+    const cfg = await getJSON("/api/v1/config");
+    $("configDump").textContent = JSON.stringify(cfg, null, 2);
+  } catch { /* retried implicitly on next connect */ }
+}
+
+async function fetchCheckpoints() {
+  try {
+    const data = await getJSON("/api/v1/checkpoints");
+    renderCheckpoints(data);
+  } catch { /* keep last table */ }
+}
+
+function setPill(text, cls) {
+  $("connText").textContent = text;
+  $("connPill").className = "conn-pill " + cls;
+}
+
+/* ────────────────────── status panel ────────────────────── */
+
+function fmtDuration(s) {
+  if (s == null) return "—";
+  s = Math.round(s);
+  if (s < 60) return s + "s";
+  const m = Math.floor(s / 60), sec = s % 60;
+  if (m < 60) return `${m}m ${String(sec).padStart(2, "0")}s`;
+  return `${Math.floor(m / 60)}h ${String(m % 60).padStart(2, "0")}m`;
+}
+const fmtSci = (v) => v == null ? "—" :
+  (Math.abs(v) >= 0.01 ? +v.toPrecision(4) + "" : v.toExponential(2));
+
+function renderStatus() {
+  const st = state.status;
+  if (!st) return;
+
+  $("expName").textContent = st.experiment_name || "—";
+  $("expName").title = st.experiment_name || "";
+  $("expSub").textContent =
+    `${st.model_class || "?"} · ${st.trainer_version || "?"} · ${st.device || "?"} · pid ${st.pid}`;
+
+  const phase = st.phase || {};
+  $("phaseName").textContent = phase.name === "qat" ? "QAT" : "Float warmup";
+  const q = phase.quantizers || {};
+  if (phase.name !== "qat") {
+    // Quantization is gated off during float warmup; alpha counts from the
+    // manager are not meaningful yet (V1 custom quantizers default alpha=1).
+    $("quantSub").textContent = q.total
+      ? `quantization gated off · ${q.total} quantizers`
+      : "quantization gated off";
+    $("quantMeter").style.width = "0%";
+  } else if (q.total) {
+    $("quantSub").textContent =
+      `${q.fully_quantized}/${q.total} fully quantized · ${q.calibrated} calibrated`;
+    $("quantMeter").style.width = (100 * q.fully_quantized / q.total) + "%";
+  } else {
+    $("quantSub").textContent = "quantizing";
+    $("quantMeter").style.width = "100%";
+  }
+
+  $("epochVal").textContent =
+    st.total_epochs != null ? `${st.epoch} / ${st.total_epochs}` : String(st.epoch ?? "—");
+  const eta = st.status === "finished" ? "run finished" : `ETA ${fmtDuration(st.eta_s)}`;
+  $("etaSub").textContent = `${eta} · up ${fmtDuration(st.uptime_s)}`;
+  const inEpoch = st.epoch_progress != null ? st.epoch_progress : 0;
+  const overall = st.total_epochs
+    ? ((st.epochs_completed + (st.status === "finished" ? 0 : inEpoch)) / st.total_epochs)
+    : 0;
+  $("epochMeter").style.width = Math.min(100, 100 * overall) + "%";
+
+  $("lrVal").textContent = fmtSci(st.current_lr);
+  $("stepSub").textContent = st.global_step != null ? `step ${st.global_step.toLocaleString()}` : "—";
+
+  const best = st.best_metric;
+  if (best) {
+    $("bestLabel").textContent = `Best ${best.name}`;
+    $("bestVal").textContent = fmtSci(best.value);
+    $("bestSub").textContent = `epoch ${best.epoch} (${best.mode})`;
+  }
+}
+
+/* ────────────────────── checkpoints table ────────────────────── */
+
+function renderCheckpoints(data) {
+  $("ckptMetricHead").textContent = data.monitor_metric || "metric";
+  const rows = (data.checkpoints || []).map((c) => {
+    const tr = document.createElement("tr");
+    const cells = [
+      String(c.rank + 1),
+      fmtSci(c.metric_value),
+      String(c.epoch),
+      c.mtime ? new Date(c.mtime * 1000).toLocaleTimeString() : "—",
+      c.path,
+    ];
+    cells.forEach((text, i) => {
+      const td = document.createElement("td");
+      td.textContent = i === 4 ? text.split(/[\\/]/).pop() : text;
+      if (i === 4) td.title = text;
+      if (i === 1 || i === 2) td.className = "num";
+      tr.appendChild(td);
+    });
+    return tr;
+  });
+  const body = $("ckptTable").tBodies[0];
+  if (rows.length) body.replaceChildren(...rows);
+}
+
+/* ────────────────────── charting (canvas) ────────────────────── */
+
+function niceTicks(lo, hi, n = 5) {
+  if (!(hi > lo)) hi = lo + 1;
+  const span = hi - lo;
+  const step0 = Math.pow(10, Math.floor(Math.log10(span / n)));
+  const step = [1, 2, 5, 10].map((m) => m * step0).find((s) => span / s <= n) || step0 * 10;
+  const ticks = [];
+  for (let v = Math.ceil(lo / step) * step; v <= hi + 1e-12; v += step) ticks.push(v);
+  return ticks;
+}
+
+function fmtTick(v) {
+  if (v === 0) return "0";
+  const a = Math.abs(v);
+  if (a >= 1e5 || a < 1e-3) return v.toExponential(0);
+  if (a >= 1000) return (v / 1000) + "k";
+  return +v.toPrecision(3) + "";
+}
+
+/** Minimal single-series line chart with crosshair tooltip. */
+class LineChart {
+  constructor(canvasId, tipId, color, opts = {}) {
+    this.canvas = $(canvasId);
+    this.tip = $(tipId);
+    this.color = color;
+    this.opts = opts;              // {log, target, xLabel, valueName, fmt}
+    this.data = [];                // [{x, y}]
+    this.aux = null;               // optional raw (unsmoothed) series
+    this.hoverX = null;
+    this.canvas.addEventListener("pointermove", (e) => this.onMove(e));
+    this.canvas.addEventListener("pointerleave", () => { this.hoverX = null; this.tip.style.display = "none"; this.draw(); });
+    new ResizeObserver(() => this.draw()).observe(this.canvas);
+  }
+
+  setData(data, aux = null) { this.data = data; this.aux = aux; this.draw(); }
+
+  layout() {
+    const dpr = window.devicePixelRatio || 1;
+    const w = this.canvas.clientWidth, h = this.canvas.clientHeight;
+    if (this.canvas.width !== w * dpr) { this.canvas.width = w * dpr; this.canvas.height = h * dpr; }
+    return { w, h, dpr, m: { l: 46, r: 12, t: 8, b: 22 } };
+  }
+
+  scales(w, h, m) {
+    const pts = this.data;
+    const xs = pts.map((p) => p.x);
+    let ys = pts.map((p) => p.y);
+    if (this.aux) ys = ys.concat(this.aux.map((p) => p.y));
+    const log = this.opts.log && this.opts.log();
+    if (log) ys = ys.filter((y) => y > 0);
+    const target = this.opts.target ? this.opts.target() : null;
+    if (target != null && !log) ys = ys.concat([target]);
+    let xLo = Math.min(...xs), xHi = Math.max(...xs);
+    let yLo = Math.min(...ys), yHi = Math.max(...ys);
+    if (xLo === xHi) { xLo -= 0.5; xHi += 0.5; }
+    if (log) { yLo = Math.log10(yLo); yHi = Math.log10(yHi); }
+    if (yLo === yHi) { yLo -= Math.abs(yLo) * 0.1 || 0.5; yHi += Math.abs(yHi) * 0.1 || 0.5; }
+    const pad = (yHi - yLo) * 0.06;
+    yLo -= pad; yHi += pad;
+    const X = (x) => m.l + ((x - xLo) / (xHi - xLo)) * (w - m.l - m.r);
+    const Y = (y) => {
+      const v = log ? Math.log10(Math.max(y, 1e-300)) : y;
+      return h - m.b - ((v - yLo) / (yHi - yLo)) * (h - m.t - m.b);
+    };
+    return { X, Y, xLo, xHi, yLo, yHi, log };
+  }
+
+  draw() {
+    const { w, h, dpr, m } = this.layout();
+    const ctx = this.canvas.getContext("2d");
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    ctx.clearRect(0, 0, w, h);
+    if (this.data.length < 1) {
+      ctx.fillStyle = COLORS.muted; ctx.font = "12px system-ui";
+      ctx.fillText("waiting for data…", m.l, h / 2);
+      return;
+    }
+    const sc = this.scales(w, h, m);
+    ctx.font = "11px system-ui";
+
+    // gridlines + y ticks (hairline, recessive)
+    const yTicks = sc.log
+      ? this.logTicks(sc.yLo, sc.yHi)
+      : niceTicks(sc.yLo, sc.yHi, 5).map((v) => [v, fmtTick(v)]);
+    ctx.strokeStyle = COLORS.grid; ctx.lineWidth = 1; ctx.fillStyle = COLORS.muted;
+    ctx.textAlign = "right"; ctx.textBaseline = "middle";
+    for (const [v, label] of yTicks) {
+      const y = h - m.b - ((v - sc.yLo) / (sc.yHi - sc.yLo)) * (h - m.t - m.b);
+      if (y < m.t - 1 || y > h - m.b + 1) continue;
+      ctx.beginPath(); ctx.moveTo(m.l, y); ctx.lineTo(w - m.r, y); ctx.stroke();
+      ctx.fillText(label, m.l - 6, y);
+    }
+    // x ticks
+    ctx.textAlign = "center"; ctx.textBaseline = "top";
+    for (const v of niceTicks(sc.xLo, sc.xHi, 7)) {
+      if (v < sc.xLo || v > sc.xHi) continue;
+      ctx.fillText(fmtTick(v), sc.X(v), h - m.b + 6);
+    }
+    // baseline
+    ctx.strokeStyle = COLORS.baseline;
+    ctx.beginPath(); ctx.moveTo(m.l, h - m.b); ctx.lineTo(w - m.r, h - m.b); ctx.stroke();
+
+    // target reference line (dashed, ink — not a series)
+    const target = this.opts.target ? this.opts.target() : null;
+    if (target != null && !sc.log) {
+      const y = sc.Y(target);
+      if (y >= m.t && y <= h - m.b) {
+        ctx.save();
+        ctx.strokeStyle = COLORS.secondary; ctx.setLineDash([5, 4]); ctx.lineWidth = 1;
+        ctx.beginPath(); ctx.moveTo(m.l, y); ctx.lineTo(w - m.r, y); ctx.stroke();
+        ctx.restore();
+        ctx.fillStyle = COLORS.secondary; ctx.textAlign = "left"; ctx.textBaseline = "bottom";
+        ctx.fillText("target " + target, m.l + 4, y - 2);
+      }
+    }
+
+    // aux (raw) series — de-emphasized wash under the main line
+    if (this.aux && this.aux.length > 1) this.strokePath(ctx, this.aux, sc, w, 0.35, 1.5);
+    // main series — 2px round
+    this.strokePath(ctx, this.data, sc, w, 1, 2);
+
+    // end marker: >=8px dot with 2px surface ring
+    const last = this.data[this.data.length - 1];
+    ctx.beginPath(); ctx.arc(sc.X(last.x), sc.Y(last.y), 6, 0, 7);
+    ctx.fillStyle = COLORS.surface; ctx.fill();
+    ctx.beginPath(); ctx.arc(sc.X(last.x), sc.Y(last.y), 4, 0, 7);
+    ctx.fillStyle = this.color; ctx.fill();
+
+    // crosshair
+    if (this.hoverX != null) {
+      const p = this.nearest(this.hoverX, sc);
+      if (p) {
+        ctx.strokeStyle = COLORS.baseline; ctx.lineWidth = 1;
+        ctx.beginPath(); ctx.moveTo(sc.X(p.x), m.t); ctx.lineTo(sc.X(p.x), h - m.b); ctx.stroke();
+        ctx.beginPath(); ctx.arc(sc.X(p.x), sc.Y(p.y), 5.5, 0, 7);
+        ctx.fillStyle = COLORS.surface; ctx.fill();
+        ctx.beginPath(); ctx.arc(sc.X(p.x), sc.Y(p.y), 3.5, 0, 7);
+        ctx.fillStyle = this.color; ctx.fill();
+      }
+    }
+  }
+
+  logTicks(lo, hi) {
+    const ticks = [];
+    for (let e = Math.ceil(lo); e <= Math.floor(hi); e++) ticks.push([e, "1e" + e]);
+    if (ticks.length < 2) ticks.push([lo, fmtTick(Math.pow(10, lo))], [hi, fmtTick(Math.pow(10, hi))]);
+    return ticks;
+  }
+
+  strokePath(ctx, pts, sc, w, alpha, width) {
+    // Downsample to ~2 points per pixel column (min/max) for large histories
+    const plotW = Math.max(w - 60, 50);
+    let drawPts = pts;
+    if (pts.length > plotW * 2) {
+      drawPts = [];
+      const bucket = pts.length / plotW;
+      for (let b = 0; b < plotW; b++) {
+        const s = Math.floor(b * bucket), e = Math.min(Math.floor((b + 1) * bucket), pts.length);
+        if (s >= e) continue;
+        let mn = pts[s], mx = pts[s];
+        for (let i = s + 1; i < e; i++) {
+          if (pts[i].y < mn.y) mn = pts[i];
+          if (pts[i].y > mx.y) mx = pts[i];
+        }
+        drawPts.push(mn.x <= mx.x ? mn : mx, mn.x <= mx.x ? mx : mn);
+      }
+    }
+    ctx.save();
+    ctx.globalAlpha = alpha;
+    ctx.strokeStyle = this.color; ctx.lineWidth = width;
+    ctx.lineJoin = "round"; ctx.lineCap = "round";
+    ctx.beginPath();
+    drawPts.forEach((p, i) => {
+      const x = sc.X(p.x), y = sc.Y(p.y);
+      i === 0 ? ctx.moveTo(x, y) : ctx.lineTo(x, y);
+    });
+    ctx.stroke();
+    ctx.restore();
+  }
+
+  nearest(pixelX, sc) {
+    // binary search on x (data is sorted by x)
+    const pts = this.data;
+    if (!pts.length) return null;
+    let lo = 0, hi = pts.length - 1;
+    while (hi - lo > 1) {
+      const mid = (lo + hi) >> 1;
+      (sc.X(pts[mid].x) < pixelX) ? (lo = mid) : (hi = mid);
+    }
+    return (Math.abs(sc.X(pts[lo].x) - pixelX) <= Math.abs(sc.X(pts[hi].x) - pixelX)) ? pts[lo] : pts[hi];
+  }
+
+  onMove(e) {
+    if (!this.data.length) return;
+    const rect = this.canvas.getBoundingClientRect();
+    this.hoverX = e.clientX - rect.left;
+    const { w, h, m } = this.layout();
+    const sc = this.scales(w, h, m);
+    const p = this.nearest(this.hoverX, sc);
+    this.draw();
+    if (!p) return;
+    const fmt = this.opts.fmt || fmtSci;
+    this.tip.replaceChildren();
+    const line1 = document.createElement("div");
+    const key = document.createElement("span");
+    key.className = "key"; key.style.borderTopColor = this.color;
+    const val = document.createElement("span");
+    val.className = "tt-value"; val.textContent = fmt(p.y);
+    line1.append(key, val, ` ${this.opts.valueName || "value"}`);
+    const line2 = document.createElement("div");
+    line2.textContent = `${this.opts.xLabel || "x"} ${p.x.toLocaleString()}`;
+    this.tip.append(line1, line2);
+    this.tip.style.display = "block";
+    const tipW = this.tip.offsetWidth;
+    const px = sc.X(p.x);
+    this.tip.style.left = (px + 12 + tipW > w ? px - tipW - 12 : px + 12) + "px";
+    this.tip.style.top = Math.max(sc.Y(p.y) - 40, 4) + "px";
+  }
+}
+
+const lossChart = new LineChart("lossChart", "lossTip", COLORS.loss,
+  { xLabel: "step", valueName: "loss", fmt: (v) => v.toFixed(4) });
+const accChart = new LineChart("accChart", "accTip", COLORS.acc,
+  { xLabel: "epoch", valueName: "val acc", target: () => {
+      const v = parseFloat($("targetAcc").value);
+      return Number.isFinite(v) ? v / 100 : null;
+    }, fmt: (v) => (100 * v).toFixed(2) + "%" });
+const lrChart = new LineChart("lrChart", "lrTip", COLORS.lr,
+  { xLabel: "step", valueName: "lr", log: () => $("lrLogToggle").checked });
+
+function ema(points, alpha) {
+  let m = null;
+  return points.map((p) => {
+    m = m === null ? p.y : alpha * m + (1 - alpha) * p.y;
+    return { x: p.x, y: m };
+  });
+}
+
+function renderCharts() {
+  const lossPts = state.steps.filter((s) => s.loss != null).map((s) => ({ x: s.step, y: s.loss }));
+  if ($("smoothToggle").checked && lossPts.length > 5) {
+    // smoothing window scales gently with history length
+    const alpha = Math.min(0.98, 1 - 1 / Math.max(5, lossPts.length / 50));
+    lossChart.setData(ema(lossPts, alpha), lossPts);
+  } else {
+    lossChart.setData(lossPts, null);
+  }
+
+  accChart.setData(
+    state.epochs.filter((e) => e.val_acc != null).map((e) => ({ x: e.epoch, y: e.val_acc })));
+
+  let lrPts = state.steps.filter((s) => s.lr != null).map((s) => ({ x: s.step, y: s.lr }));
+  if (!lrPts.length)  // fall back to per-epoch LR when no scheduler logs steps
+    lrPts = state.epochs.filter((e) => e.lr != null).map((e) => ({ x: e.epoch, y: e.lr }));
+  lrChart.setData(lrPts);
+}
+
+["smoothToggle", "lrLogToggle", "targetAcc"].forEach((id) =>
+  $(id).addEventListener("input", renderCharts));
+
+/* ────────────────────────── boot ────────────────────────── */
+
+renderBaseList();
+const urlApi = new URLSearchParams(location.search).get("api");
+const initial = urlApi || savedBases()[0] || "http://127.0.0.1:8765";
+$("apiBase").value = initial;
+$("connectBtn").addEventListener("click", () => connect($("apiBase").value.trim()));
+$("apiBase").addEventListener("keydown", (e) => { if (e.key === "Enter") connect($("apiBase").value.trim()); });
+connect(initial);
+</script>
+</body>
+</html>

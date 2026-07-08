@@ -169,6 +169,18 @@ class Trainer:
         # LR history (for plotting)
         self._lr_history: List[float] = []
 
+        # Optional read-only monitoring API (opt-in via config.api_port)
+        self.api_server = None
+        self._api_collector = None
+        if config.api_port is not None:
+            from .api import DashboardAPIServer, RunStateCollector
+            self._api_collector = RunStateCollector(self)
+            self.logger.add_listener(self._api_collector)
+            self.api_server = DashboardAPIServer(
+                self._api_collector, host=config.api_host, port=config.api_port
+            )
+            self.api_server.start()
+
     # ------------------------------------------------------------------
     # Primary entry point
     # ------------------------------------------------------------------
@@ -390,6 +402,9 @@ class Trainer:
     def _post_training(self) -> None:
         """Save final plots, load best weights, close logger."""
         print("\n[trainer] Training complete. Finalising …")
+
+        if self._api_collector is not None:
+            self._api_collector.mark_finished()
 
         if self.config.logging.save_plots:
             self.plotter.plot_all(self.tracker, lr_history=self._lr_history)

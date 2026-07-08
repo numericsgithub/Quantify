@@ -74,6 +74,63 @@ trainer = Trainer(
 tracker = trainer.fit()
 ```
 
+## 📊 Live Training Dashboard (read-only)
+
+Every training run can expose a **read-only HTTP monitoring API** from inside the
+training process, and a separate lightweight web UI visualizes it live. Works with
+both `Trainer` (V1) and `QATTrainerV2`. The API is versioned under `/api/v1/` so
+control endpoints can be added later without redesign.
+
+### 1. Enable the API on a run
+
+Set `api_port` on the config — that's the only change; leaving it unset (default)
+keeps training behavior exactly as before:
+
+```python
+config = TrainerConfig(            # or TrainerConfigV2
+    experiment_name="my_qat_run",
+    api_port=8765,                 # 0 = let the OS pick a free port
+    # api_host="0.0.0.0",          # allow remote access (default: localhost only)
+)
+```
+
+The server runs in a daemon thread and only reads state — it never blocks or
+mutates the training loop. Step/epoch metrics are also appended to
+`<log_dir>/<experiment>/<run_id>/api_metrics.jsonl` so history survives crashes.
+
+### 2. Start the web UI (separate process)
+
+```bash
+python dashboard/serve.py --port 8080 --api http://127.0.0.1:8765
+```
+
+Open `http://127.0.0.1:8080/`. The UI polls the API incrementally (`?since_step=`),
+shows train loss (with smoothing), validation accuracy vs. a configurable target,
+LR over time, the current QAT phase with quantizer progress, ETA, and the top-K
+checkpoint list. If the API becomes unreachable (run finished or crashed), the UI
+keeps the last known state and shows a *disconnected* indicator. The API base URL
+can be switched in the page header to watch multiple concurrent runs.
+
+For a remote GPU box, either set `api_host="0.0.0.0"` or tunnel the port:
+`ssh -L 8765:localhost:8765 user@gpu-box`.
+
+### 3. API endpoints
+
+```bash
+curl http://127.0.0.1:8765/api/v1/health           # {"ok": true}
+curl http://127.0.0.1:8765/api/v1/status           # run state, phase (float_warmup/qat),
+                                                   # epoch, step, ETA, LR, best metric, pid
+curl http://127.0.0.1:8765/api/v1/config           # effective TrainerConfig as JSON
+curl http://127.0.0.1:8765/api/v1/metrics          # full step + epoch history
+curl "http://127.0.0.1:8765/api/v1/metrics?since_step=500&since_epoch=10"   # increments only
+curl http://127.0.0.1:8765/api/v1/metrics/latest   # newest values, cheap to poll
+curl http://127.0.0.1:8765/api/v1/checkpoints      # top-K checkpoints (epoch, metric, path)
+```
+
+> **Note:** `train_acc` in the metrics responses is flagged unreliable (nonstandard
+> computation; approximate under mixup). Use `train_loss` and `val_acc` as the
+> meaningful signals — the bundled UI deliberately does not plot train accuracy.
+
 ## 🔢 Custom Quantizers & ONNX Export
 
 This framework includes custom quantizers (`FixedPointPerTensorQuantizer`, `CoefficientPerTensorWeightQuant`, etc.) that export to ONNX as custom nodes (`Quantify::FixedPointQuant`).

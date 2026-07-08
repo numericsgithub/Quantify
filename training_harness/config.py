@@ -217,6 +217,22 @@ class TrainerConfig:
     dry_run_batches: int = 2
     """Number of batches to run when dry_run=True."""
 
+    # ---- Live monitoring API -------------------------------------------------
+    api_port: Optional[int] = None
+    """
+    If set, expose a read-only HTTP monitoring API on this port while the
+    run is in progress (see training_harness/api/). Use 0 to let the OS pick
+    a free port. None (default) disables the API entirely — training behaves
+    exactly as before.
+    """
+
+    api_host: str = "127.0.0.1"
+    """
+    Host interface for the monitoring API. Default binds to localhost only;
+    use "0.0.0.0" to allow other machines (e.g. your laptop watching a
+    remote GPU box) to connect.
+    """
+
     # ---- Sub-configs -------------------------------------------------------
     checkpoint: CheckpointConfig = field(default_factory=CheckpointConfig)
     logging: LoggingConfig = field(default_factory=LoggingConfig)
