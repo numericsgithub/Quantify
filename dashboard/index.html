@@ -108,6 +108,54 @@
   td.num { font-variant-numeric: tabular-nums; }
   tr:last-child td { border-bottom: none; }
   .footnote { font-size: 11.5px; color: var(--text-muted); margin-top: 14px; }
+
+  /* ── Controls (write) — deliberately distinct from read-only display ── */
+  .controls-panel {
+    margin-top: 20px; border: 1px solid var(--critical); border-radius: 10px;
+    background: rgba(208,59,59,0.05); overflow: hidden;
+  }
+  .controls-panel > .head {
+    display: flex; align-items: center; gap: 8px;
+    padding: 10px 14px; border-bottom: 1px solid var(--border);
+    font-size: 13px; font-weight: 600; color: var(--text-primary);
+  }
+  .controls-panel > .head .warn { color: var(--critical); font-size: 12px; font-weight: 500; }
+  .controls-panel[data-enabled="false"] { opacity: .55; }
+  .controls-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); gap: 14px; padding: 14px; }
+  .control-box { background: var(--surface); border: 1px solid var(--border); border-radius: 8px; padding: 12px; }
+  .control-box h3 { font-size: 12.5px; font-weight: 600; margin-bottom: 8px; }
+  .control-box .row { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+  .control-box .hint { font-size: 11px; color: var(--text-muted); margin-top: 7px; line-height: 1.4; }
+  .control-box input[type="number"] { width: 110px; }
+  .control-box button.act { background: #223; border-color: #3a5; }
+  .control-box button.danger { border-color: var(--critical); color: #ff9c9c; }
+  .control-box label.confirm { display: inline-flex; align-items: center; gap: 5px; font-size: 11.5px; color: #ff9c9c; }
+
+  .cb-list { display: flex; flex-direction: column; gap: 6px; }
+  .cb-item { display: flex; align-items: center; gap: 8px; font-size: 12px; padding: 5px 8px; border: 1px solid var(--grid); border-radius: 6px; }
+  .cb-item .cb-name { font-weight: 600; color: var(--text-primary); }
+  .cb-item .cb-meta { color: var(--text-muted); font-size: 11px; }
+  .cb-item .cb-spacer { flex: 1; }
+  .cb-toggle { font-size: 11px; padding: 3px 10px; }
+  .badge { font-size: 10.5px; padding: 1px 7px; border-radius: 99px; border: 1px solid var(--border); }
+  .badge.on  { color: var(--good); border-color: var(--good); }
+  .badge.off { color: var(--text-muted); }
+  .badge.core { color: var(--text-muted); border-style: dashed; }
+  .badge.suspended { color: var(--series-lr); border-color: var(--series-lr); }
+
+  .cmd-row, .evt-row { display: flex; gap: 10px; align-items: baseline; font-size: 12px; padding: 5px 10px; border-bottom: 1px solid var(--grid); }
+  .cmd-row:last-child, .evt-row:last-child { border-bottom: none; }
+  .cmd-status { font-size: 10.5px; padding: 1px 8px; border-radius: 99px; border: 1px solid var(--border); flex-shrink: 0; }
+  .cmd-status.pending { color: var(--series-lr); border-color: var(--series-lr); }
+  .cmd-status.applied { color: var(--good); border-color: var(--good); }
+  .cmd-status.failed  { color: var(--critical); border-color: var(--critical); }
+  .cmd-type { font-weight: 600; color: var(--text-primary); flex-shrink: 0; }
+  .cmd-result, .evt-msg { color: var(--text-secondary); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .evt-time, .cmd-time { color: var(--text-muted); font-variant-numeric: tabular-nums; flex-shrink: 0; font-size: 11px; }
+  .evt-kind { color: var(--text-muted); flex-shrink: 0; font-size: 11px; min-width: 118px; }
+  .log-box { background: var(--surface); border: 1px solid var(--border); border-radius: 10px; max-height: 240px; overflow-y: auto; }
+  .two-col { display: grid; grid-template-columns: repeat(auto-fit, minmax(340px, 1fr)); gap: 12px; }
+  .toast { color: var(--critical); font-size: 12px; margin-left: auto; }
 </style>
 </head>
 <body>
@@ -140,7 +188,7 @@
     <div class="meter"><div id="epochMeter"></div></div>
   </div>
   <div class="card">
-    <div class="label">Learning rate</div>
+    <div class="label">Learning rate <span class="badge suspended" id="schedBadge" style="display:none">scheduler suspended</span></div>
     <div class="value" id="lrVal">—</div>
     <div class="sub" id="stepSub">—</div>
   </div>
@@ -198,6 +246,67 @@
   <tbody><tr><td colspan="5">—</td></tr></tbody>
 </table>
 
+<!-- ── Controls (write) ─────────────────────────────────────────────── -->
+<div class="controls-panel" id="controlsPanel" data-enabled="false">
+  <div class="head">
+    ⚙ Controls
+    <span class="warn">— these mutate the live run. Changes apply at the next safe boundary (step/epoch), not instantly.</span>
+    <span class="toast" id="controlsToast"></span>
+  </div>
+  <div class="controls-grid">
+
+    <div class="control-box">
+      <h3>Learning rate / weight decay</h3>
+      <div class="row">
+        <input type="number" id="lrInput" placeholder="new LR" step="0.0001" min="0">
+        <button class="act" id="lrApply">Set LR</button>
+      </div>
+      <div class="row" style="margin-top:8px">
+        <input type="number" id="wdInput" placeholder="weight decay" step="0.0001" min="0">
+        <button class="act" id="wdApply">Set WD</button>
+      </div>
+      <div class="hint" id="schedHint">Applied at the next step boundary.</div>
+      <div class="row" style="margin-top:6px">
+        <button id="resumeSched" style="display:none">Resume scheduler</button>
+      </div>
+    </div>
+
+    <div class="control-box">
+      <h3>Extend run</h3>
+      <div class="row">
+        <input type="number" id="addEpochsInput" placeholder="+ epochs" min="1" step="1">
+        <button class="act" id="addEpochsApply">Add epochs</button>
+      </div>
+      <div class="hint">Raises the total epoch budget live; ETA and progress update. Applied at epoch end.</div>
+    </div>
+
+    <div class="control-box">
+      <h3>Reload best checkpoint</h3>
+      <div class="hint" style="margin-top:0">Destructive: replaces current model weights with the top-1 checkpoint (weights only; optimizer state not restored). Applied at epoch end.</div>
+      <div class="row" style="margin-top:8px">
+        <label class="confirm"><input type="checkbox" id="reloadConfirm"> I understand</label>
+        <button class="danger" id="reloadApply">Reload best</button>
+      </div>
+    </div>
+
+  </div>
+</div>
+
+<!-- ── Callbacks + command/event log ────────────────────────────────── -->
+<div class="two-col" style="margin-top:12px">
+  <div>
+    <div class="section-title">Callbacks</div>
+    <div class="log-box"><div class="cb-list" id="cbList" style="padding:8px"><div class="evt-row">—</div></div></div>
+  </div>
+  <div>
+    <div class="section-title">Recent commands</div>
+    <div class="log-box" id="cmdLog"><div class="cmd-row">— no commands issued —</div></div>
+  </div>
+</div>
+
+<div class="section-title">Event / audit log</div>
+<div class="log-box" id="eventLog"><div class="evt-row">—</div></div>
+
 <details class="config">
   <summary>Run configuration</summary>
   <pre id="configDump">—</pre>
@@ -220,6 +329,10 @@ const state = {
   epochs: [],       // {epoch, t, duration_s, train_loss, val_loss, val_acc, ...}
   sinceStep: -1,
   sinceEpoch: -1,
+  events: [],       // audit log
+  sinceEventId: -1,
+  commands: [],     // control command history
+  controlEnabled: false,
   status: null,
   failures: 0,
   connected: false,
@@ -263,6 +376,8 @@ function connect(base) {
   state.apiBase = base;
   state.steps = []; state.epochs = [];
   state.sinceStep = -1; state.sinceEpoch = -1;
+  state.events = []; state.sinceEventId = -1; state.commands = [];
+  state.controlEnabled = false;
   state.status = null; state.failures = 0; state.connected = false;
   $("configDump").textContent = "—";
   rememberBase(base);
@@ -296,6 +411,7 @@ async function poll() {
             status.status === "finished" ? "finished" : "live");
     renderStatus(); renderCharts();
     if (state.steps.length === metrics.steps.length || metrics.epochs.length) fetchCheckpoints();
+    fetchControlState();
   } catch (err) {
     state.failures += 1;
     if (state.failures >= 2) {
@@ -319,6 +435,23 @@ async function fetchCheckpoints() {
     const data = await getJSON("/api/v1/checkpoints");
     renderCheckpoints(data);
   } catch { /* keep last table */ }
+}
+
+async function fetchControlState() {
+  try {
+    const [callbacks, commands, events] = await Promise.all([
+      getJSON("/api/v1/callbacks"),
+      getJSON("/api/v1/commands"),
+      getJSON(`/api/v1/events?since_id=${state.sinceEventId}`),
+    ]);
+    state.controlEnabled = (callbacks.callbacks || []).length > 0;
+    for (const e of events.events) { state.events.push(e); state.sinceEventId = e.id; }
+    state.commands = commands.commands || [];
+    renderCallbacks(callbacks.callbacks || []);
+    renderCommands(state.commands);
+    renderEvents(state.events);
+    $("controlsPanel").dataset.enabled = state.controlEnabled ? "true" : "false";
+  } catch { /* keep last render */ }
 }
 
 function setPill(text, cls) {
@@ -379,6 +512,13 @@ function renderStatus() {
 
   $("lrVal").textContent = fmtSci(st.current_lr);
   $("stepSub").textContent = st.global_step != null ? `step ${st.global_step.toLocaleString()}` : "—";
+  const suspended = st.scheduler_suspended === true;
+  $("schedBadge").style.display = suspended ? "" : "none";
+  $("resumeSched").style.display = (state.controlEnabled && st.scheduler_active && suspended) ? "" : "none";
+  $("schedHint").textContent = st.scheduler_active
+    ? (suspended ? "Scheduler is suspended — the manual LR holds until you resume it."
+                 : "A scheduler is active; setting LR suspends it so it isn't overwritten.")
+    : "Applied at the next step boundary (no scheduler on this run).";
 
   const best = st.best_metric;
   if (best) {
@@ -413,6 +553,131 @@ function renderCheckpoints(data) {
   const body = $("ckptTable").tBodies[0];
   if (rows.length) body.replaceChildren(...rows);
 }
+
+/* ────────────────────── controls: render ────────────────────── */
+
+function el(tag, cls, text) {
+  const e = document.createElement(tag);
+  if (cls) e.className = cls;
+  if (text != null) e.textContent = text;
+  return e;
+}
+
+function renderCallbacks(callbacks) {
+  const list = $("cbList");
+  if (!callbacks.length) {
+    list.replaceChildren(el("div", "cb-meta", "control API not enabled for this run"));
+    return;
+  }
+  list.replaceChildren(...callbacks.map((cb) => {
+    const row = el("div", "cb-item");
+    row.append(el("span", "cb-name", cb.name));
+    row.append(el("span", "cb-meta", cb.event));
+    row.append(el("div", "cb-spacer"));
+    if (!cb.toggleable) {
+      row.append(el("span", "badge core", "core"));
+    } else {
+      row.append(el("span", `badge ${cb.enabled ? "on" : "off"}`, cb.enabled ? "on" : "off"));
+      const btn = el("button", "cb-toggle", cb.enabled ? "disable" : "enable");
+      btn.title = cb.description || "";
+      btn.onclick = () => toggleCallback(cb.name, !cb.enabled);
+      row.append(btn);
+    }
+    return row;
+  }));
+}
+
+function renderCommands(commands) {
+  const box = $("cmdLog");
+  if (!commands.length) {
+    box.replaceChildren(el("div", "cmd-row", "— no commands issued —"));
+    return;
+  }
+  const rows = commands.slice().reverse().map((c) => {
+    const row = el("div", "cmd-row");
+    row.append(el("span", `cmd-status ${c.status}`, c.status));
+    row.append(el("span", "cmd-type", c.type));
+    row.append(el("span", "cmd-result", c.result || JSON.stringify(c.params)));
+    const when = c.applied_at || c.created_at;
+    row.append(el("span", "cmd-time", when ? new Date(when * 1000).toLocaleTimeString() : ""));
+    return row;
+  });
+  box.replaceChildren(...rows);
+}
+
+function renderEvents(events) {
+  const box = $("eventLog");
+  if (!events.length) { box.replaceChildren(el("div", "evt-row", "—")); return; }
+  const rows = events.slice(-200).reverse().map((e) => {
+    const row = el("div", "evt-row");
+    row.append(el("span", "evt-time", new Date(e.t * 1000).toLocaleTimeString()));
+    row.append(el("span", "evt-kind", e.kind));
+    row.append(el("span", "evt-msg", e.message));
+    return row;
+  });
+  box.replaceChildren(...rows);
+}
+
+/* ────────────────────── controls: actions ────────────────────── */
+
+function toast(msg, isError) {
+  const t = $("controlsToast");
+  t.textContent = msg;
+  t.style.color = isError ? "var(--critical)" : "var(--good)";
+  setTimeout(() => { if (t.textContent === msg) t.textContent = ""; }, 5000);
+}
+
+async function postControl(path, body) {
+  if (!state.controlEnabled) { toast("control API not enabled for this run", true); return; }
+  try {
+    const resp = await fetch(state.apiBase + path, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body || {}),
+      signal: AbortSignal.timeout(5000),
+    });
+    const data = await resp.json().catch(() => ({}));
+    if (resp.status === 202) {
+      toast(`queued ${data.type} (${data.id.slice(0, 6)}…) — ${data.apply_at} boundary`, false);
+      fetchControlState();  // reflect pending immediately
+    } else {
+      toast(data.error || `HTTP ${resp.status}`, true);
+    }
+  } catch (e) {
+    toast("request failed: " + e.message, true);
+  }
+}
+
+function setLR() {
+  const v = parseFloat($("lrInput").value);
+  if (!Number.isFinite(v)) return toast("enter a learning rate", true);
+  postControl("/api/v1/control/hyperparams", { lr: v });
+}
+function setWD() {
+  const v = parseFloat($("wdInput").value);
+  if (!Number.isFinite(v)) return toast("enter a weight decay", true);
+  postControl("/api/v1/control/hyperparams", { weight_decay: v });
+}
+function addEpochs() {
+  const v = parseInt($("addEpochsInput").value, 10);
+  if (!Number.isInteger(v) || v <= 0) return toast("enter a positive epoch count", true);
+  postControl("/api/v1/control/add-epochs", { count: v });
+}
+function reloadBest() {
+  if (!$("reloadConfirm").checked) return toast("tick the confirm box first", true);
+  postControl("/api/v1/control/reload-best", { confirm: true });
+  $("reloadConfirm").checked = false;
+}
+function toggleCallback(name, enabled) {
+  postControl(`/api/v1/control/callbacks/${encodeURIComponent(name)}`, { enabled });
+}
+
+$("lrApply").onclick = setLR;
+$("wdApply").onclick = setWD;
+$("addEpochsApply").onclick = addEpochs;
+$("reloadApply").onclick = reloadBest;
+$("resumeSched").onclick = () =>
+  postControl("/api/v1/control/hyperparams", { suspend_scheduler: false });
 
 /* ────────────────────── charting (canvas) ────────────────────── */
 

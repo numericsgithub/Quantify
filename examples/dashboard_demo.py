@@ -25,7 +25,14 @@ Note: MNIST here only exercises the dashboard plumbing — it says nothing
 about real training quality, so don't read anything into the accuracy.
 """
 
+import os
+import sys
 import time
+
+# Make the repo root importable so `examples.*` resolves regardless of how
+# this script is launched (`python examples/dashboard_demo.py` puts only the
+# examples/ folder on sys.path, which hides the top-level `examples` package).
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import torch
 import torch.nn as nn

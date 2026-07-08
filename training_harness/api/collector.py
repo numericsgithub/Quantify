@@ -23,6 +23,7 @@ from __future__ import annotations
 import bisect
 import json
 import os
+import threading
 import time
 from typing import Any, Dict, List, Optional
 
@@ -59,7 +60,16 @@ class RunStateCollector:
         self._last_epoch_end_time: float = self._start_time
         self._global_step_at_epoch_start: int = 0
 
+        # Append-only audit/event log (phase changes, checkpoint saves,
+        # submitted/applied control commands). Written from both the training
+        # thread and the API thread, so it takes a lock — it is human-frequency,
+        # never in the training hot path.
+        self._events: List[Dict[str, Any]] = []
+        self._event_seq: int = 0
+        self._events_lock = threading.Lock()
+
         self._jsonl_file = None
+        self._jsonl_lock = threading.Lock()
         if jsonl_path == "auto":
             run_dir = getattr(getattr(trainer, "logger", None), "run_dir", None)
             jsonl_path = os.path.join(run_dir, "api_metrics.jsonl") if run_dir else None
@@ -103,15 +113,42 @@ class RunStateCollector:
         self._epoch_keys.append(epoch)
         self._write_jsonl("epoch", record)
 
+    def record_event(self, kind: str, message: str, detail: Optional[dict] = None) -> None:
+        """
+        Append an audit-log event. Safe to call from any thread.
+
+        kind: short slug ("phase", "checkpoint", "command_submitted",
+              "command_applied", "command_failed", ...).
+        """
+        with self._events_lock:
+            event = {
+                "id": self._event_seq,
+                "t": time.time(),
+                "kind": kind,
+                "message": message,
+                "detail": detail,
+            }
+            self._event_seq += 1
+            self._events.append(event)
+        self._write_jsonl("event", event)
+
+    def events_snapshot(self, since_id: int = -1) -> Dict[str, Any]:
+        """Return audit events with id strictly greater than since_id."""
+        with self._events_lock:
+            events = [e for e in self._events if e["id"] > since_id]
+        return {"events": events}
+
     def mark_finished(self) -> None:
         """Called by the trainer once fit() completes normally."""
         self._status = "finished"
-        if self._jsonl_file is not None:
-            try:
-                self._jsonl_file.close()
-            except OSError:
-                pass
-            self._jsonl_file = None
+        self.record_event("run", "training finished")
+        with self._jsonl_lock:
+            if self._jsonl_file is not None:
+                try:
+                    self._jsonl_file.close()
+                except OSError:
+                    pass
+                self._jsonl_file = None
 
     # ------------------------------------------------------------------
     # Snapshots for the HTTP layer (called from server threads)
@@ -147,6 +184,8 @@ class RunStateCollector:
             "epoch_progress": self._epoch_progress(global_step),
             "eta_s": self._eta_seconds(last_epoch, total_epochs),
             "current_lr": self._current_lr(),
+            "scheduler_active": getattr(t, "scheduler", None) is not None,
+            "scheduler_suspended": bool(getattr(t, "_scheduler_suspended", False)),
             "best_metric": self._best_metric(),
             "last_update": self._last_update(),
         }
@@ -336,11 +375,14 @@ class RunStateCollector:
             return None
 
     def _write_jsonl(self, kind: str, record: Dict[str, Any]) -> None:
-        if self._jsonl_file is None:
-            return
-        try:
-            self._jsonl_file.write(json.dumps({"type": kind, **record}, default=str) + "\n")
-            self._jsonl_file.flush()
-        except (OSError, ValueError) as e:
-            print(f"[api] WARNING: JSONL write failed, disabling: {e}")
-            self._jsonl_file = None
+        # Serialised because both the training thread (steps/epochs) and the
+        # API thread (submitted-command events) can write.
+        with self._jsonl_lock:
+            if self._jsonl_file is None:
+                return
+            try:
+                self._jsonl_file.write(json.dumps({"type": kind, **record}, default=str) + "\n")
+                self._jsonl_file.flush()
+            except (OSError, ValueError) as e:
+                print(f"[api] WARNING: JSONL write failed, disabling: {e}")
+                self._jsonl_file = None

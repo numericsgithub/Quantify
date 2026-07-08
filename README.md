@@ -106,30 +106,78 @@ python dashboard/serve.py --port 8080 --api http://127.0.0.1:8765
 
 Open `http://127.0.0.1:8080/`. The UI polls the API incrementally (`?since_step=`),
 shows train loss (with smoothing), validation accuracy vs. a configurable target,
-LR over time, the current QAT phase with quantizer progress, ETA, and the top-K
-checkpoint list. If the API becomes unreachable (run finished or crashed), the UI
-keeps the last known state and shows a *disconnected* indicator. The API base URL
-can be switched in the page header to watch multiple concurrent runs.
+LR over time, the current QAT phase with quantizer progress, ETA, the top-K
+checkpoint list, a **Controls panel**, the callback list, and an audit log. If the
+API becomes unreachable (run finished or crashed), the UI keeps the last known
+state and shows a *disconnected* indicator. The API base URL can be switched in the
+page header to watch multiple concurrent runs.
 
 For a remote GPU box, either set `api_host="0.0.0.0"` or tunnel the port:
 `ssh -L 8765:localhost:8765 user@gpu-box`.
 
-### 3. API endpoints
+### 3. Read endpoints
 
 ```bash
 curl http://127.0.0.1:8765/api/v1/health           # {"ok": true}
 curl http://127.0.0.1:8765/api/v1/status           # run state, phase (float_warmup/qat),
-                                                   # epoch, step, ETA, LR, best metric, pid
+                                                   # epoch, step, ETA, LR, best metric, pid,
+                                                   # scheduler_active / scheduler_suspended
 curl http://127.0.0.1:8765/api/v1/config           # effective TrainerConfig as JSON
 curl http://127.0.0.1:8765/api/v1/metrics          # full step + epoch history
 curl "http://127.0.0.1:8765/api/v1/metrics?since_step=500&since_epoch=10"   # increments only
 curl http://127.0.0.1:8765/api/v1/metrics/latest   # newest values, cheap to poll
 curl http://127.0.0.1:8765/api/v1/checkpoints      # top-K checkpoints (epoch, metric, path)
+curl http://127.0.0.1:8765/api/v1/callbacks        # registered loop callbacks + enabled state
+curl http://127.0.0.1:8765/api/v1/events           # audit log (phase, checkpoint, commands)
+curl http://127.0.0.1:8765/api/v1/commands         # control command history + statuses
+curl http://127.0.0.1:8765/api/v1/commands/<id>    # one command's lifecycle
 ```
 
 > **Note:** `train_acc` in the metrics responses is flagged unreliable (nonstandard
 > computation; approximate under mixup). Use `train_loss` and `val_acc` as the
 > meaningful signals — the bundled UI deliberately does not plot train accuracy.
+
+### 4. Control endpoints (mutate a live run) ⚠️
+
+> **⚠️ These endpoints change a running experiment.** A bad mid-run LR can waste
+> hours of compute. They are opt-in (only active when `api_port` is set) and every
+> action is recorded in `/events`.
+
+Control is a **command queue**, never a direct mutation. A POST **validates** the
+command (bad input → `400`), enqueues it, and returns **`202 Accepted`** with a
+command id and `status: "pending"`. The training loop applies it at the next **safe
+boundary** — *step end* for LR/hyperparameters, *epoch end* for structural changes —
+then marks it `applied` or `failed`. Poll `/commands/<id>` to see it take effect;
+never assume instant success.
+
+```bash
+# Change learning rate (applied at the next step). If an LR scheduler is active it
+# is suspended so it doesn't overwrite the override; resume with suspend_scheduler=false.
+curl -X POST http://127.0.0.1:8765/api/v1/control/hyperparams \
+     -H 'Content-Type: application/json' -d '{"lr": 1e-4}'
+curl -X POST http://127.0.0.1:8765/api/v1/control/hyperparams \
+     -H 'Content-Type: application/json' -d '{"weight_decay": 5e-5}'
+curl -X POST http://127.0.0.1:8765/api/v1/control/hyperparams \
+     -H 'Content-Type: application/json' -d '{"suspend_scheduler": false}'   # resume scheduler
+
+# Enable/disable a registered callback (core ones like optimizer_step are rejected)
+curl -X POST http://127.0.0.1:8765/api/v1/control/callbacks/scale_factor_tracking \
+     -H 'Content-Type: application/json' -d '{"enabled": false}'
+
+# Extend the epoch budget live (status/ETA/progress update to the new total)
+curl -X POST http://127.0.0.1:8765/api/v1/control/add-epochs \
+     -H 'Content-Type: application/json' -d '{"count": 10}'
+
+# Reload the top-1 checkpoint's weights (destructive; weights only, no optimizer
+# state; requires explicit confirm). Applied at the epoch boundary.
+curl -X POST http://127.0.0.1:8765/api/v1/control/reload-best \
+     -H 'Content-Type: application/json' -d '{"confirm": true}'
+```
+
+Control is currently wired into the V1 `Trainer`. The command-queue design (and the
+gotchas it handles — scheduler suspension, the `add-epochs` loop change, allowlisted
+callback toggles) is documented in
+[docs/llm/skills/dashboard-control-command-queue.md](docs/llm/skills/dashboard-control-command-queue.md).
 
 ## 🔢 Custom Quantizers & ONNX Export
 

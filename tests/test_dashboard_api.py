@@ -204,11 +204,14 @@ def test_v1_trainer_live_server(dummy_loader):
         assert len(ckpts["checkpoints"]) >= 1
         assert {"epoch", "metric_value", "path", "mtime"} <= set(ckpts["checkpoints"][0])
 
-        # JSONL persistence next to the CSV log
+        # JSONL persistence next to the CSV log. Step/epoch records are
+        # always present; audit `event` records (checkpoint saves, phase
+        # changes, finish) are also written once the control layer exists.
         jsonl = f"{trainer.logger.run_dir}/api_metrics.jsonl"
         with open(jsonl) as f:
             lines = [json.loads(l) for l in f]
-        assert {l["type"] for l in lines} == {"step", "epoch"}
+        types = {l["type"] for l in lines}
+        assert {"step", "epoch"} <= types
 
         trainer.api_server.shutdown()
 

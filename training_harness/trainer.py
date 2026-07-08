@@ -169,17 +169,62 @@ class Trainer:
         # LR history (for plotting)
         self._lr_history: List[float] = []
 
-        # Optional read-only monitoring API (opt-in via config.api_port)
+        # Set True by a manual-LR control command so the LR scheduler stops
+        # overwriting the override on its next step (see fit()/_run_epoch).
+        self._scheduler_suspended: bool = False
+
+        # EpochTimer handle, exposed so the add-epochs control can extend it.
+        self._timer = None
+
+        # Names the loop's toggleable behaviors for the dashboard. Always
+        # built (default all-enabled = identical behavior); only mutated by
+        # control commands when the API is enabled.
+        self.callbacks = self._build_callback_registry()
+
+        # Optional monitoring + control API (opt-in via config.api_port)
         self.api_server = None
         self._api_collector = None
+        self._control = None
         if config.api_port is not None:
             from .api import DashboardAPIServer, RunStateCollector
+            from .api.control import ControlManager
             self._api_collector = RunStateCollector(self)
             self.logger.add_listener(self._api_collector)
+            self._control = ControlManager(self, self._api_collector, self.callbacks)
             self.api_server = DashboardAPIServer(
-                self._api_collector, host=config.api_host, port=config.api_port
+                self._api_collector,
+                control=self._control,
+                host=config.api_host,
+                port=config.api_port,
             )
             self.api_server.start()
+
+    def _build_callback_registry(self):
+        """Register the loop behaviors the dashboard can list / toggle."""
+        from .api.control import CallbackRegistry
+        reg = CallbackRegistry()
+        reg.register("checkpointing", "epoch_end",
+                     "Save top-K / last / periodic checkpoints", toggleable=True)
+        reg.register("scale_factor_tracking", "epoch_end",
+                     "Collect per-layer quantization scale factors (QAT only)",
+                     toggleable=True)
+        reg.register("plateau_qat_activation", "epoch_end",
+                     "Auto-activate QAT when training loss plateaus", toggleable=True)
+        if self.early_stopper is not None:
+            reg.register("early_stopping", "epoch_end",
+                         "Stop early once QAT has started and the metric stalls",
+                         toggleable=True)
+        reg.register("user_after_step", "step_end",
+                     "User-provided after_step_hook (if passed to fit)", toggleable=True)
+        reg.register("user_after_epoch", "epoch_end",
+                     "User-provided after_epoch_hook (if passed to fit)", toggleable=True)
+        # Core behaviors — listed for transparency, but never toggleable.
+        reg.register("optimizer_step", "step",
+                     "The optimizer update; disabling would break training",
+                     toggleable=False)
+        reg.register("metrics_logging", "step_end",
+                     "Metric logging the dashboard depends on", toggleable=False)
+        return reg
 
     # ------------------------------------------------------------------
     # Primary entry point
@@ -231,13 +276,22 @@ class Trainer:
             )
 
         timer = EpochTimer(total_epochs=self.config.epochs)
+        self._timer = timer
 
         # ── Main loop ────────────────────────────────────────────────
-        for epoch in range(start_epoch, self.config.epochs):
+        # While-loop (not range) so the add-epochs control command can extend
+        # self.config.epochs mid-run and have the new budget take effect.
+        prev_qat = self.qat_scheduler.in_qat
+        epoch = start_epoch
+        while epoch < self.config.epochs:
             timer.start()
 
             # Update QAT state (float → quant transition, BN freeze)
             self.qat_scheduler.step(epoch)
+            if self._api_collector is not None and self.qat_scheduler.in_qat != prev_qat:
+                self._api_collector.record_event(
+                    "phase", f"QAT activated at epoch {epoch}")
+                prev_qat = self.qat_scheduler.in_qat
 
             # Training phase
             train_metrics = self._run_epoch(
@@ -251,7 +305,9 @@ class Trainer:
 
             # Collect scale factors
             scales: Dict[str, float] = {}
-            if self.config.quant_schedule.track_scale_factors and self.qat_scheduler.in_qat:
+            if (self.callbacks.is_enabled("scale_factor_tracking")
+                    and self.config.quant_schedule.track_scale_factors
+                    and self.qat_scheduler.in_qat):
                 scales = collect_scale_factors(self.model)
                 self.tracker.record_scale_factors(epoch, scales)
                 self.logger.log_scale_factors(epoch, scales)
@@ -265,18 +321,27 @@ class Trainer:
                 self.config.checkpoint.monitor_metric,
                 train_metrics.get("train_loss", 0.0),
             )
-            self.checkpoint_mgr.save(
-                epoch        = epoch,
-                metric_value = monitor_val,
-                model        = self.model,
-                optimizer    = self.optimizer,
-                scheduler    = self.scheduler,
-                metrics_dict = all_metrics,
-                config_dict  = self.config.to_dict(),
-            )
+            if self.callbacks.is_enabled("checkpointing"):
+                saved_path = self.checkpoint_mgr.save(
+                    epoch        = epoch,
+                    metric_value = monitor_val,
+                    model        = self.model,
+                    optimizer    = self.optimizer,
+                    scheduler    = self.scheduler,
+                    metrics_dict = all_metrics,
+                    config_dict  = self.config.to_dict(),
+                )
+                if saved_path and self._api_collector is not None:
+                    self._api_collector.record_event(
+                        "checkpoint",
+                        f"saved epoch {epoch} "
+                        f"({self.config.checkpoint.monitor_metric}={monitor_val:.4f})",
+                        {"path": saved_path},
+                    )
 
             # Plateau detection & QAT activation
-            if QuantizerManager().is_not_quantizing_at_all:
+            if (self.callbacks.is_enabled("plateau_qat_activation")
+                    and QuantizerManager().is_not_quantizing_at_all):
                 is_plateau = self.loss_plateau_detector.step(monitor_val)
                 if is_plateau:
                     print(f"[trainer] Training loss plateaued. Activating QAT...")
@@ -286,7 +351,9 @@ class Trainer:
 
             # Early stopping: only trigger when QAT has actually started
             stop = False
-            if self.early_stopper is not None and not QuantizerManager().is_not_quantizing_at_all:
+            if (self.early_stopper is not None
+                    and self.callbacks.is_enabled("early_stopping")
+                    and not QuantizerManager().is_not_quantizing_at_all):
                 stop = self.early_stopper.step(monitor_val, model=self.model, epoch=epoch)
 
             # Progress line
@@ -294,9 +361,14 @@ class Trainer:
             self._print_epoch_summary(epoch, elapsed, eta, all_metrics)
 
             # User hook
-            if after_epoch_hook is not None:
+            if after_epoch_hook is not None and self.callbacks.is_enabled("user_after_epoch"):
                 snap = self.tracker.history[-1] if self.tracker.history else None
                 after_epoch_hook(self, epoch, snap)
+
+            # Apply queued control commands at the epoch boundary (reload-best,
+            # add-epochs, callback toggles). Cheap no-op when nothing queued.
+            if self._control is not None:
+                self._control.drain("epoch")
 
             if stop:
                 print(f"\n[trainer] Early stopping at epoch {epoch}. "
@@ -305,6 +377,8 @@ class Trainer:
                 if self.early_stopper is not None:
                     self.early_stopper.restore(self.model)
                 break
+
+            epoch += 1
 
         # ── Post-training_harness ─────────────────────────────────────────────
         self._post_training()
@@ -365,13 +439,21 @@ class Trainer:
                 self._scaler.step(self.optimizer)
                 self._scaler.update()
 
-                # Step-level LR scheduling
-                if self.scheduler is not None:
+                # Step-level LR scheduling. Skipped while suspended by a manual
+                # LR override (a control command), so the override isn't
+                # immediately clobbered by the scheduler.
+                if self.scheduler is not None and not self._scheduler_suspended:
                     self.scheduler.step()
                     current_lr = self.scheduler.get_last_lr()[0]
                     self._lr_history.append(current_lr)
 
                 self._global_step += 1
+
+                # Apply queued step-boundary control commands (LR / hyperparams)
+                # so they take effect within a step, not a whole epoch. Cheap
+                # no-op when the queue is empty.
+                if self._control is not None:
+                    self._control.drain("step")
 
                 # Step-level logging
                 if self._global_step % self.config.logging.log_every_n_steps == 0:
@@ -382,7 +464,7 @@ class Trainer:
                     )
 
                 # User hook
-                if after_step_hook is not None:
+                if after_step_hook is not None and self.callbacks.is_enabled("user_after_step"):
                     after_step_hook(self, loss.item(), outputs.detach(), targets)
 
             # Accumulate metrics
