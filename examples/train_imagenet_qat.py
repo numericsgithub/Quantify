@@ -267,12 +267,16 @@ def parse_args() -> argparse.Namespace:
     )
 
     # ---- Output ------------------------------------------------------------
-    p.add_argument("--output-dir", type=str, default="output/imagenet_qat")
+    p.add_argument(
+        "--output-dir", type=str, default=None,
+        help="Output directory. Defaults to output/imagenet_qat_<model> "
+             "(e.g. output/imagenet_qat_resnet18).",
+    )
     p.add_argument(
         "--new-run-dir",
         action="store_true",
         help="Auto-increment the output directory if it already exists "
-             "(output/imagenet_qat → output/imagenet_qat_1 → output/imagenet_qat_2 …). "
+             "(output/imagenet_qat_<model> → output/imagenet_qat_<model>_1 → …). "
              "Useful for keeping each run's checkpoints separate.",
     )
     p.add_argument(
@@ -325,6 +329,24 @@ def parse_args() -> argparse.Namespace:
 
     # ---- Reduce LR on plateau -----------------------------------------------
     rlr = p.add_argument_group("reduce lr on plateau")
+    rlr.add_argument(
+        "--cosine-lr",
+        action="store_true",
+        default=False,
+        help="Use a per-step linear-warmup + cosine-annealing LR schedule "
+             "instead of ReduceLROnPlateau. Mutually exclusive with the "
+             "--reduce-lr-* options: cosine steps every batch and would "
+             "overwrite any plateau-triggered reduction, so ReduceLROnPlateau "
+             "is disabled when this is set.",
+    )
+    rlr.add_argument(
+        "--cosine-warmup-frac", type=float, default=0.1,
+        help="Fraction of total steps spent in linear warmup (--cosine-lr only)",
+    )
+    rlr.add_argument(
+        "--cosine-eta-min", type=float, default=1e-6,
+        help="Final LR at the end of cosine annealing (--cosine-lr only)",
+    )
     rlr.add_argument("--reduce-lr-patience", type=int, default=20,
                      help="Epochs of no improvement before reducing LR (default: 5)")
     rlr.add_argument("--reduce-lr-factor", type=float, default=0.5,
@@ -358,6 +380,8 @@ def parse_args() -> argparse.Namespace:
     )
 
     args = p.parse_args()
+    if args.output_dir is None:
+        args.output_dir = f"output/imagenet_qat_{args.model}"
     _print_args(p, args)
     return args
 
@@ -578,14 +602,18 @@ def _build_dataloaders(args):
 
 
 def _build_dali_loaders(args):
-    from utils.dali_pipeline import build_dali_loaders
+    from utils.dali_pipeline import build_dali_loaders, norm_for_model
+    mean, std = norm_for_model(args.model)
     print(f"Building DALI loaders from {args.data_dir} …")
+    print(f"  normalization for {args.model}: mean={mean} std={std}")
     train_loader, val_loader = build_dali_loaders(
         data_dir=args.data_dir,
         batch_size=args.batch_size,
         num_threads=args.dali_threads,
         randaugment_n=args.randaugment_n,
         randaugment_m=args.randaugment_m,
+        mean=mean,
+        std=std,
     )
     print(f"  train: {len(train_loader):,} batches   val: {len(val_loader):,} batches")
     return train_loader, val_loader
@@ -671,10 +699,22 @@ def main() -> None:
         )
         return
     # ─────────────────────────────────────────────────────────────────────────
-    # ReduceLROnPlateau manages the LR epoch-by-epoch inside the harness.
-    # A per-step cosine scheduler would override every plateau-triggered
-    # reduction on the very next batch, so the two cannot coexist.
+    # By default ReduceLROnPlateau manages the LR epoch-by-epoch inside the
+    # harness. A per-step cosine scheduler would override every plateau-triggered
+    # reduction on the very next batch, so the two cannot coexist; --cosine-lr
+    # swaps to cosine and disables the plateau scheduler below.
     scheduler = None
+    if args.cosine_lr:
+        total_steps = len(train_loader) * args.epochs
+        scheduler = WarmupCosineScheduler(
+            optimizer,
+            warmup_steps=int(total_steps * args.cosine_warmup_frac),
+            total_steps=total_steps,
+            eta_min=args.cosine_eta_min,
+        )
+        print(f"[lr-schedule] Cosine: total_steps={total_steps:,} "
+              f"warmup={int(total_steps * args.cosine_warmup_frac):,} "
+              f"eta_min={args.cosine_eta_min} (ReduceLROnPlateau disabled)")
 
     # V2 harness config
     config = TrainerConfigV2(
@@ -711,7 +751,7 @@ def main() -> None:
         ),
 
         early_stopping_patience=None,
-        reduce_lr_on_plateau=True,
+        reduce_lr_on_plateau=not args.cosine_lr,
         reduce_lr_patience=args.reduce_lr_patience,
         reduce_lr_factor=args.reduce_lr_factor,
         reduce_lr_min_lr=args.reduce_lr_min_lr,
