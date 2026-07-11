@@ -386,24 +386,18 @@ def parse_args() -> argparse.Namespace:
         "--pretrained-qat",
         action="store_true",
         help=(
-            "Load pretrained float weights, run the full PTQ LSB search "
-            "(weights -> bias -> activations, the same greedy per-quantizer "
-            "search as examples/find_perfect_lsbs_imagenet_ptq.py) in-process, "
-            "then start QAT from the calibrated model. The searched model is "
-            "cached to --pretrained-qat-cache so the (slow) search runs only "
-            "once; later runs with the same model/bits/fuse-bn/radius reuse it. "
-            "Mutually exclusive with --init-from-ptq. Consider pairing with "
-            "--float-warmup-epochs 0 since the model is already calibrated."
+            "Load pretrained float weights, fold BatchNorm into the preceding "
+            "conv/linear weights, run the full PTQ LSB search (weights -> bias "
+            "-> activations, the same greedy per-quantizer search as "
+            "examples/find_perfect_lsbs_imagenet_ptq.py) in-process, then start "
+            "QAT from the calibrated model. BatchNorm is always fused (QAT "
+            "trains the BN-folded deployment graph), so no separate flag is "
+            "needed. The searched model is cached to --pretrained-qat-cache so "
+            "the (slow) search runs only once; later runs with the same "
+            "model/bits/radius reuse it. Mutually exclusive with "
+            "--init-from-ptq. Consider pairing with --float-warmup-epochs 0 "
+            "since the model is already calibrated."
         ),
-    )
-    pq.add_argument(
-        "--fuse-bn",
-        action="store_true",
-        help="Fuse BatchNorm into the preceding conv/linear weights before the "
-             "LSB search (--pretrained-qat only). Calibrates against the same "
-             "weight distribution a BN-folded deployment graph will use. The "
-             "fuse-bn state is recorded in the cache and propagated into QAT "
-             "checkpoints.",
     )
     pq.add_argument(
         "--ptq-search-radius",
@@ -426,7 +420,7 @@ def parse_args() -> argparse.Namespace:
         metavar="PATH",
         help="Where the --pretrained-qat LSB-searched checkpoint is cached. "
              "Defaults to output/pretrained_qat_cache/<model>_W<w>_A<a>_B<b>"
-             "[_fusebn]_r<radius>.pt.",
+             "_r<radius>.pt.",
     )
     pq.add_argument(
         "--force-lsb-search",
@@ -567,12 +561,11 @@ def _default_pretrained_qat_cache(args) -> str:
     """Deterministic cache path for the --pretrained-qat LSB-searched model.
 
     Keyed on everything that changes the search result (model, per-role bit
-    widths, BN fusion, search radius) so different configs never collide and a
-    matching config reuses the same file across runs.
+    widths, search radius) so different configs never collide and a matching
+    config reuses the same file across runs. BatchNorm is always fused, so it
+    isn't part of the key.
     """
     tag = f"{args.model}_W{args.weight_bits}_A{args.act_bits}_B{args.bias_bits}"
-    if args.fuse_bn:
-        tag += "_fusebn"
     tag += f"_r{args.ptq_search_radius}"
     return os.path.join("output", "pretrained_qat_cache", f"{tag}.pt")
 
@@ -660,7 +653,7 @@ def _prepare_pretrained_qat(args, model: nn.Module, device, train_loader, val_lo
     """Load-or-run the --pretrained-qat LSB search. Returns (model, bn_fused).
 
     On a cache hit, the freshly built `model` is populated from the cached
-    checkpoint (BN fused first if the cache was produced with --fuse-bn) via
+    checkpoint (BatchNorm re-fused first to match its BN-folded structure) via
     the same _load_ptq_checkpoint path used by --init-from-ptq, so the search
     is skipped entirely. Otherwise the search runs and its result is cached.
     """
@@ -677,11 +670,12 @@ def _prepare_pretrained_qat(args, model: nn.Module, device, train_loader, val_lo
         print(f"[pretrained-qat] No cache at {cache_path}; running LSB search …")
 
     model = _load_pretrained(model, args)
-    bn_fused = False
-    if args.fuse_bn:
-        n_fused = fuse_bn_into_conv(model)
-        bn_fused = True
-        print(f"[pretrained-qat] Fused {n_fused} BatchNorm layer(s) into preceding conv/linear weights.")
+    # QAT trains the BN-folded deployment graph, so always fuse BatchNorm into
+    # the preceding conv/linear weights before the search calibrates against
+    # that same weight distribution.
+    n_fused = fuse_bn_into_conv(model)
+    bn_fused = True
+    print(f"[pretrained-qat] Fused {n_fused} BatchNorm layer(s) into preceding conv/linear weights.")
 
     model = model.to(device)
     _run_pretrained_qat_search(args, model, device, train_loader, val_loader)
