@@ -16,6 +16,7 @@ UI is served from a different port than the API.
 from __future__ import annotations
 
 import logging
+import os
 import threading
 from typing import Optional
 
@@ -60,6 +61,23 @@ def create_app(collector: RunStateCollector,
     @app.get("/api/v1/health")
     def health():
         return jsonify({"ok": True})
+
+    # ── TEMPORARY diagnostic ──────────────────────────────────────────
+    # Shared-state / fork check. Compare these three values against what
+    # the training loop prints at startup. Same PID + same id()s => the API
+    # thread and the training loop touch the SAME objects (writes land).
+    # Different PID => the API is running in a forked process and control
+    # commands mutate a dead copy. Remove once diagnosis is done.
+    @app.get("/api/v1/debug/identity")
+    def debug_identity():
+        from quantizers.manager import QuantizerManager
+        trainer = getattr(collector, "trainer", None)
+        optimizer = getattr(trainer, "optimizer", None) if trainer else None
+        return jsonify({
+            "pid": os.getpid(),
+            "id_optimizer": id(optimizer) if optimizer is not None else None,
+            "id_quantization_manager": id(QuantizerManager()),
+        })
 
     @app.get("/api/v1/status")
     def status():

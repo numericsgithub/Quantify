@@ -269,6 +269,16 @@ class Trainer:
         print(f"  Dry run    : {self.config.dry_run}")
         print(f"{'═'*60}\n")
 
+        # TEMPORARY diagnostic — shared-state / fork check. Compare these
+        # against GET /api/v1/debug/identity. Same PID + same id()s => the
+        # API thread mutates the SAME objects this loop reads. A different
+        # PID from the endpoint means the API is forked and control commands
+        # evaporate into a dead copy. Remove once diagnosis is done.
+        import os as _os
+        print(f"[identity] training loop: pid={_os.getpid()} "
+              f"id(optimizer)={id(self.optimizer)} "
+              f"id(quantization_manager)={id(QuantizerManager())}")
+
         start_epoch = 0
         if resume:
             start_epoch = self.checkpoint_mgr.resume(
