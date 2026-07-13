@@ -175,7 +175,6 @@ def find_optimal_lsb(
         search_records is a list of (lsb, n_unique, sad) for every position tested,
         ordered high→low, used by the diagnostic plot.
     """
-    print("find_optimal_lsb was called!")
     w_min = inputs.min().item()
     w_max = inputs.max().item()
     abs_max = max(abs(w_min), abs(w_max))
@@ -316,7 +315,6 @@ class FixedPointQuantFn(Function):
 
     @staticmethod
     def backward(ctx, grad_quantized, grad_scale, grad_zero_point, grad_bw):
-        print("grad_quantizedgrad_quantized", grad_quantized)
         # Straight-Through Estimator: pass gradient through for the first input
         return grad_quantized, None, None, None, None, None, None, None
 

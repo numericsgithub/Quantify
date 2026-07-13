@@ -134,7 +134,10 @@ class TestFixedPointManager(unittest.TestCase):
         self.manager.quantization_start_gap = 100
 
         self.manager.skip_gating_for_calibrated_quantizers()
-        self.assertEqual(q.inference_counter, 5 * 100)
+        # New mechanism: gating is bypassed via a per-quantizer flag (works even
+        # before the first forward, unlike the old inference_counter = seq_id*gap
+        # approach which was a no-op while inference_sequence_id was still -1).
+        self.assertFalse(q.gating_enabled)
 
         q.train()
         _, scale, _, _ = q(torch.randn(10))

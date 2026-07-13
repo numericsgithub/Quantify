@@ -90,6 +90,14 @@ class BaseQuantizer(nn.Module, ABC):
         self.clipped_ste = clipped_ste
         self.inference_counter = 0
         self.inference_sequence_id = -1
+        # When False, the staggered-activation gate (inference_counter vs
+        # inference_sequence_id * quantization_start_gap) is bypassed and this
+        # quantizer quantizes on every forward. Set False for already-calibrated
+        # quantizers (e.g. loaded from a PTQ/QAT checkpoint) so they are active
+        # immediately instead of waiting out the cascade — see
+        # QuantizerManager.skip_gating_for_calibrated_quantizers(). Default True
+        # preserves the staggered cascade for freshly-calibrated QAT quantizers.
+        self.gating_enabled = True
         self.annealing_alpha_step = 0.1
 
         # Register annealing state buffers for checkpoint persistence
@@ -114,9 +122,11 @@ class BaseQuantizer(nn.Module, ABC):
         if self.inference_sequence_id == -1:
             self.inference_sequence_id = self.quantizer_manager.get_inference_sequence_id()
 
-        # 1. Inference gating
+        # 1. Inference gating (skipped entirely when gating_enabled is False, e.g.
+        #    for already-calibrated quantizers that should be active immediately)
         perform_quantization = True
-        if self.inference_counter < self.inference_sequence_id * self.quantizer_manager.quantization_start_gap:
+        if self.gating_enabled and \
+                self.inference_counter < self.inference_sequence_id * self.quantizer_manager.quantization_start_gap:
             if self.training:
                 self.inference_counter += 1
             perform_quantization = False
@@ -182,7 +192,6 @@ class BaseQuantizer(nn.Module, ABC):
         return result, scale, zero_point, bit_width
 
     def backward(ctx, grad_quantized, grad_scale, grad_zero_point, grad_bw):
-        print("grad_quantizedgrad_quantized", grad_quantized)
         # Straight-Through Estimator: pass gradient through for the first input
         return grad_quantized, None, None, None, None, None, None, None
 

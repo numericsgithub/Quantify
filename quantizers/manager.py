@@ -82,10 +82,9 @@ class QuantizerManager:
 
     def skip_gating_for_calibrated_quantizers(self) -> None:
         """
-        For quantizers already calibrated (search_done=True), set
-        inference_counter so the staggered quantization_start_gap gate in
-        BaseQuantizer.forward() is immediately satisfied — they become active
-        on their very next forward pass instead of individually waiting
+        For quantizers already calibrated (search_done=True), disable the
+        staggered quantization_start_gap gate in BaseQuantizer.forward() so they
+        quantize on their very next forward pass instead of waiting out
         inference_sequence_id * quantization_start_gap forward calls.
 
         Gating and annealing are independent: set_annealing_for_n_inferences(
@@ -96,14 +95,18 @@ class QuantizerManager:
         sequence_id * quantization_start_gap calls despite alpha already
         being 1.0.
 
-        Quantizers still at inference_sequence_id == -1 (never reached by a
-        forward pass yet) are left untouched — they'll get a real sequence_id
-        and the normal gating treatment on their first forward call, same as
-        before.
+        This sets a per-quantizer flag (gating_enabled=False) rather than
+        pre-loading inference_counter, so it works even when called BEFORE the
+        first forward pass — at that point every inference_sequence_id is still
+        -1, and the earlier counter-based implementation was a silent no-op
+        (the gap gate then re-engaged once the real sequence_id was assigned on
+        the first forward, quantizing the model only gradually over ~sequence_id
+        * gap steps instead of immediately). Freshly-calibrated QAT quantizers
+        (search_done=False here) keep gating_enabled=True and still cascade.
         """
         for q in self.quantizers.values():
-            if q.search_done.item() and q.inference_sequence_id != -1:
-                q.inference_counter = q.inference_sequence_id * self.quantization_start_gap
+            if q.search_done.item():
+                q.gating_enabled = False
 
     def disable_quantization(self):
         """Disable quantization by setting annealing_alpha and annealing_alpha_step to zero for all registered quantizers."""

@@ -112,7 +112,9 @@ class TestPreserveCalibratedQuantizersGating:
             q for q in QuantizerManager().quantizers.values()
             if q.inference_sequence_id == 1
         )
-        assert q1.inference_counter == 1 * trainer.config.qat.quantization_start_gap
+        # New mechanism: gating is bypassed via a per-quantizer flag rather than
+        # by pre-loading inference_counter to seq_id*gap.
+        assert q1.gating_enabled is False
 
         trainer.model.train()
         _, scale, _, _ = q1(torch.randn(4, 4, 6, 6))
