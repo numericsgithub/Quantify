@@ -185,7 +185,6 @@ class CheckpointManager:
                 epoch, model, optimizer, scheduler, metrics_dict or {}, config_dict, extra
             )
             torch.save(payload, periodic_path)
-            self._export_onnx(model, periodic_path.replace('.pt', '.onnx'), dummy_input)
 
         # Top-K logic
         if self._should_save(metric_value):
@@ -195,7 +194,6 @@ class CheckpointManager:
                 epoch, model, optimizer, scheduler, metrics_dict or {}, config_dict, extra
             )
             torch.save(payload, path)
-            self._export_onnx(model, path.replace('.pt', '.onnx'), dummy_input)
 
             record = CheckpointRecord(epoch=epoch, metric_value=metric_value, path=path)
             self._add_record(record)

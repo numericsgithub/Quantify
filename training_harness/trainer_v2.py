@@ -35,7 +35,7 @@ from .logger import ExperimentLogger
 from .metrics import MetricsTracker
 from .plotting import TrainingPlotter
 from .schedulers import collect_scale_factors, freeze_bn, _set_quant_enabled
-from .engine_utils import EarlyStopping, EpochTimer, LossPlateauDetector, log_hardware_info, set_seed
+from .engine_utils import BreakdownDetector, EarlyStopping, EpochTimer, LossPlateauDetector, log_hardware_info, set_seed
 from quantizers.manager import QuantizerManager
 
 
@@ -78,6 +78,7 @@ class QATTrainerV2:
         scheduler=None,
         accuracy_fn: Optional[Callable] = None,
         onnx_dummy_input: Optional[torch.Tensor] = None,
+        extra_checkpoint_fields: Optional[Dict] = None,
     ):
         self.config = config
         self.model = model
@@ -178,10 +179,12 @@ class QATTrainerV2:
             )
 
         self._plateau_lr_sched = None
+        self._plateau_lr_metric = config.reduce_lr_metric
         if config.reduce_lr_on_plateau:
+            mode = "max" if config.reduce_lr_metric in ("val_acc", "train_acc") else "min"
             self._plateau_lr_sched = torch.optim.lr_scheduler.ReduceLROnPlateau(
                 optimizer,
-                mode="min",
+                mode=mode,
                 patience=config.reduce_lr_patience,
                 factor=config.reduce_lr_factor,
                 min_lr=config.reduce_lr_min_lr,
@@ -198,6 +201,7 @@ class QATTrainerV2:
         self._lr_history: List[float] = []
         self._qat_active: bool = False
         self._onnx_dummy_input = onnx_dummy_input
+        self._extra_checkpoint_fields: Dict = extra_checkpoint_fields or {}
 
         # Optional read-only monitoring API (opt-in via config.api_port)
         self.api_server = None
@@ -308,6 +312,8 @@ class QATTrainerV2:
             print(f"               train_acc is approximate (pre-mixup hard labels)")
         if self._erasing_fn is not None:
             print(f"  RandErase  : prob={self.config.reprob}  mode=pixel")
+        if self.config.freeze_bn:
+            print(f"  Freeze BN  : True  (running stats locked from checkpoint)")
         print(f"  ── Output paths ──────────────────────────────────────")
         print(f"  Logs       : {abs_logs}")
         print(f"  Checkpoints: {abs_ckpt}")
@@ -340,6 +346,16 @@ class QATTrainerV2:
             min_delta=self.config.qat.plateau_min_delta,
         )
 
+        breakdown_detector = (
+            BreakdownDetector(
+                num_classes=self.config.num_classes,
+                relative_drop=self.config.breakdown_relative_drop,
+                peak_min_factor=self.config.breakdown_peak_min_factor,
+            )
+            if self.config.breakdown_detection
+            else None
+        )
+
         console = TrainingConsole(self)
         console.start()
 
@@ -349,102 +365,156 @@ class QATTrainerV2:
                 self.model, self.optimizer, self.scheduler, device=str(self.device)
             )
 
-        timer = EpochTimer(total_epochs=self.config.epochs)
+        end_epoch = start_epoch + self.config.epochs
+        recovery_count = 0
+        all_metrics: Dict[str, float] = {}
 
-        for epoch in range(start_epoch, self.config.epochs):
-            timer.start()
+        while True:
+            timer = EpochTimer(total_epochs=end_epoch - start_epoch)
+            breakdown_occurred = False
 
-            train_metrics = self._run_epoch(epoch, "train", after_step_hook=after_step_hook)
+            for epoch in range(start_epoch, end_epoch):
+                timer.start()
 
-            val_metrics: Dict[str, float] = {}
-            if self.val_loader is not None:
-                # Temporarily apply EMA parameters for validation so the
-                # checkpoint monitor metric reflects the averaged weights.
-                # Only parameters are swapped; buffers (BN stats, quant state)
-                # stay as-is so quantization inference remains correct.
-                _ema_stash = self._ema.apply_to(self.model) if self._ema is not None else None
-                val_metrics = self._run_epoch(epoch, "val")
-                if _ema_stash is not None:
-                    self._ema.restore(self.model, _ema_stash)
+                train_metrics = self._run_epoch(epoch, "train", after_step_hook=after_step_hook)
 
-            all_metrics = {**train_metrics, **val_metrics}
-            if self._qat_active:
-                fully, total = self._quant_progress()
-                all_metrics["quant_pct"] = fully / total if total > 0 else 0.0
+                val_metrics: Dict[str, float] = {}
+                if self.val_loader is not None:
+                    # Temporarily apply EMA parameters for validation so the
+                    # checkpoint monitor metric reflects the averaged weights.
+                    # Only parameters are swapped; buffers (BN stats, quant state)
+                    # stay as-is so quantization inference remains correct.
+                    _ema_stash = self._ema.apply_to(self.model) if self._ema is not None else None
+                    val_metrics = self._run_epoch(epoch, "val")
+                    if _ema_stash is not None:
+                        self._ema.restore(self.model, _ema_stash)
 
-            if self._plateau_lr_sched is not None:
-                plateau_loss = all_metrics.get("val_loss", all_metrics.get("train_loss", 0.0))
-                self._plateau_lr_sched.step(plateau_loss)
-                all_metrics["lr"] = self.optimizer.param_groups[0]["lr"]
+                all_metrics = {**train_metrics, **val_metrics}
+                if self._qat_active:
+                    fully, total = self._quant_progress()
+                    all_metrics["quant_pct"] = fully / total if total > 0 else 0.0
 
-            self.logger.log_epoch(epoch, all_metrics)
+                if self._plateau_lr_sched is not None:
+                    plateau_val = all_metrics.get(
+                        self._plateau_lr_metric,
+                        all_metrics.get("val_loss", all_metrics.get("train_loss", 0.0)),
+                    )
+                    self._plateau_lr_sched.step(plateau_val)
+                    all_metrics["lr"] = self.optimizer.param_groups[0]["lr"]
 
-            monitor_val = all_metrics.get(
-                self.config.checkpoint.monitor_metric,
-                train_metrics.get("train_loss", 0.0),
-            )
+                self.logger.log_epoch(epoch, all_metrics)
 
-            # Plateau detection: only during float warmup.
-            # Uses a dedicated loss metric (plateau_metric) — the detector
-            # assumes a decreasing signal; accuracy would fire immediately.
-            if not self._qat_active:
-                plateau_val = all_metrics.get(
-                    self.config.qat.plateau_metric,
+                monitor_val = all_metrics.get(
+                    self.config.checkpoint.monitor_metric,
                     train_metrics.get("train_loss", 0.0),
                 )
-                past_warmup = epoch >= self.config.qat.float_warmup_epochs
-                if plateau_detector.step(plateau_val) or past_warmup:
-                    self._activate_qat()
 
-            # Scale factor tracking (only once QAT is live)
-            if self._qat_active and self.config.qat.track_scale_factors:
-                scales = collect_scale_factors(self.model)
-                self.tracker.record_scale_factors(epoch, scales)
-                self.logger.log_scale_factors(epoch, scales)
+                # Plateau detection: only during float warmup.
+                # Uses a dedicated loss metric (plateau_metric) — the detector
+                # assumes a decreasing signal; accuracy would fire immediately.
+                if not self._qat_active:
+                    plateau_val = all_metrics.get(
+                        self.config.qat.plateau_metric,
+                        train_metrics.get("train_loss", 0.0),
+                    )
+                    past_warmup = epoch >= self.config.qat.float_warmup_epochs
+                    if plateau_detector.step(plateau_val) or past_warmup:
+                        self._activate_qat()
 
-            self.checkpoint_mgr.save(
-                epoch=epoch,
-                metric_value=monitor_val,
-                model=self.model,
-                optimizer=self.optimizer,
-                scheduler=self.scheduler,
-                metrics_dict=all_metrics,
-                config_dict=self.config.to_dict(),
-                extra={"ema_state_dict": self._ema.state_dict()} if self._ema else None,
-                dummy_input=self._onnx_dummy_input,
+                # Scale factor tracking (only once QAT is live)
+                if self._qat_active and self.config.qat.track_scale_factors:
+                    scales = collect_scale_factors(self.model)
+                    self.tracker.record_scale_factors(epoch, scales)
+                    self.logger.log_scale_factors(epoch, scales)
+
+                _ckpt_extra = {
+                    **({"ema_state_dict": self._ema.state_dict()} if self._ema else {}),
+                    **self._extra_checkpoint_fields,
+                }
+                self.checkpoint_mgr.save(
+                    epoch=epoch,
+                    metric_value=monitor_val,
+                    model=self.model,
+                    optimizer=self.optimizer,
+                    scheduler=self.scheduler,
+                    metrics_dict=all_metrics,
+                    config_dict=self.config.to_dict(),
+                    extra=_ckpt_extra or None,
+                    dummy_input=self._onnx_dummy_input,
+                )
+
+                # Breakdown detection: check for catastrophic accuracy collapse
+                if breakdown_detector is not None and "val_acc" in all_metrics:
+                    if breakdown_detector.step(all_metrics["val_acc"]):
+                        breakdown_occurred = True
+
+                # Early stopping: only after QAT is active AND every quantizer has
+                # finished annealing (alpha=1.0). Stopping during the cascade would
+                # cut training before the model has adapted to full quantization.
+                stop = False
+                if (
+                    self.early_stopper is not None
+                    and self._qat_active
+                    and QuantizerManager().is_quantizing_everything_fully
+                ):
+                    stop = self.early_stopper.step(monitor_val, model=self.model, epoch=epoch)
+
+                elapsed, eta = timer.stop(epoch)
+                self._print_epoch_summary(epoch, elapsed, eta, all_metrics)
+
+                if after_epoch_hook is not None:
+                    snap = self.tracker.history[-1] if self.tracker.history else None
+                    after_epoch_hook(self, epoch, snap)
+
+                console.drain(epoch)
+
+                if breakdown_occurred:
+                    break
+
+                if stop:
+                    print(f"\n[trainer_v2] Early stopping at epoch {epoch}. "
+                          f"Best {self.config.checkpoint.monitor_metric}: "
+                          f"{self.early_stopper.best:.4f}")
+                    if self.early_stopper is not None:
+                        self.early_stopper.restore(self.model)
+                    break
+
+                if console.stop_requested:
+                    print(f"\n[console] Stopped at epoch {epoch}.")
+                    break
+
+            # ── Outer recovery loop ────────────────────────────────────────
+            if not breakdown_occurred:
+                break  # training completed (or early-stopped / console-stopped) normally
+
+            if recovery_count >= self.config.breakdown_max_recoveries:
+                tqdm.write(
+                    f"\n[breakdown] Max recoveries ({self.config.breakdown_max_recoveries}) "
+                    f"reached — stopping."
+                )
+                break
+
+            recovery_count += 1
+            best_epoch = self._do_breakdown_recovery(
+                breakdown_epoch=epoch,
+                recovery_count=recovery_count,
+                current_val_acc=all_metrics.get("val_acc", 0.0),
+                peak_val_acc=breakdown_detector.peak_acc,
             )
-
-            # Early stopping: only after QAT is active AND every quantizer has
-            # finished annealing (alpha=1.0). Stopping during the cascade would
-            # cut training before the model has adapted to full quantization.
-            stop = False
-            if (
-                self.early_stopper is not None
-                and self._qat_active
-                and QuantizerManager().is_quantizing_everything_fully
-            ):
-                stop = self.early_stopper.step(monitor_val, model=self.model, epoch=epoch)
-
-            elapsed, eta = timer.stop(epoch)
-            self._print_epoch_summary(epoch, elapsed, eta, all_metrics)
-
-            if after_epoch_hook is not None:
-                snap = self.tracker.history[-1] if self.tracker.history else None
-                after_epoch_hook(self, epoch, snap)
-
-            console.drain(epoch)
-
-            if stop:
-                print(f"\n[trainer_v2] Early stopping at epoch {epoch}. "
-                      f"Best {self.config.checkpoint.monitor_metric}: "
-                      f"{self.early_stopper.best:.4f}")
-                if self.early_stopper is not None:
-                    self.early_stopper.restore(self.model)
+            if best_epoch is None:
                 break
 
-            if console.stop_requested:
-                print(f"\n[console] Stopped at epoch {epoch}.")
-                break
+            # Fresh epoch range: full budget from the restored checkpoint
+            start_epoch = best_epoch + 1
+            end_epoch = start_epoch + self.config.epochs
+
+            # Fresh plateau detector (stale state would re-trigger QAT immediately
+            # or never fire if it had already saturated)
+            plateau_detector = LossPlateauDetector(
+                patience=self.config.qat.plateau_patience,
+                min_delta=self.config.qat.plateau_min_delta,
+            )
+            breakdown_detector.reset()
 
         console.stop()
         self._post_training()
@@ -503,6 +573,114 @@ class QATTrainerV2:
         )
 
     # ------------------------------------------------------------------
+    # Breakdown recovery
+    # ------------------------------------------------------------------
+
+    def _do_breakdown_recovery(
+        self,
+        breakdown_epoch: int,
+        recovery_count: int,
+        current_val_acc: float,
+        peak_val_acc: float,
+    ) -> Optional[int]:
+        """
+        Respond to a detected training breakdown.
+
+        Steps:
+          1. Log the event.
+          2. Load the best checkpoint saved so far.
+          3. Run a validation pass to confirm the loaded weights are healthy.
+          4. Reduce the learning rate by breakdown_lr_factor.
+          5. Reinitialize ReduceLROnPlateau (stale state would reduce LR again immediately).
+          6. Restore QAT-active state from the checkpoint's metrics.
+
+        Returns:
+            The epoch number of the loaded checkpoint (caller sets start_epoch = best + 1),
+            or None if recovery is not possible (no best checkpoint, or validation still bad).
+        """
+        tqdm.write(
+            f"\n{'!' * 60}\n"
+            f"  [breakdown] TRAINING BREAKDOWN at epoch {breakdown_epoch}\n"
+            f"  Peak val_acc: {peak_val_acc:.4f}  →  collapsed to {current_val_acc:.4f}\n"
+            f"  Recovery attempt {recovery_count}/{self.config.breakdown_max_recoveries}\n"
+            f"{'!' * 60}\n"
+        )
+
+        payload = self.checkpoint_mgr.load_best(self.model, device=str(self.device))
+        if payload is None:
+            tqdm.write("[breakdown] No best checkpoint found — cannot recover.")
+            return None
+
+        best_epoch = payload.get("epoch", 0)
+        best_metrics = payload.get("metrics", {})
+        tqdm.write(
+            f"[breakdown] Loaded best checkpoint from epoch {best_epoch}  "
+            f"val_acc={best_metrics.get('val_acc', float('nan')):.4f}"
+        )
+
+        # Re-register quantizers with fresh runtime counters; alpha → 1.0 for all.
+        # This is intentional: we want full quantization (if QAT was active) or
+        # full disabling (if it wasn't), rather than replaying the annealing ramp.
+        _reset_and_register(self.model)
+        was_qat_active = best_metrics.get("quant_pct", 0.0) > 0.0
+        if was_qat_active:
+            _set_quant_enabled(self.model, enabled=True)
+            mgr = QuantizerManager()
+            mgr.diagnostics_dir = self.config.diagnostics_dir
+            mgr.quantization_start_gap = self.config.qat.quantization_start_gap
+            mgr.skip_gating_for_calibrated_quantizers()
+            if self.config.qat.freeze_bn_at_qat:
+                freeze_bn(self.model)
+        else:
+            _fully_disable_quantization(self.model)
+        self._qat_active = was_qat_active
+
+        # Validate the loaded checkpoint before committing to recovery
+        tqdm.write("[breakdown] Validating loaded checkpoint …")
+        _ema_stash = self._ema.apply_to(self.model) if self._ema is not None else None
+        val_result = self._run_epoch(best_epoch, "val")
+        if _ema_stash is not None:
+            self._ema.restore(self.model, _ema_stash)
+        recovered_acc = val_result.get("val_acc", 0.0)
+
+        min_acceptable = self.config.breakdown_peak_min_factor / self.config.num_classes
+        if recovered_acc < min_acceptable:
+            tqdm.write(
+                f"[breakdown] Best checkpoint acc={recovered_acc:.4f} is still below the "
+                f"minimum threshold ({min_acceptable:.4f}) — recovery not possible."
+            )
+            return None
+
+        tqdm.write(f"[breakdown] Checkpoint validated: val_acc={recovered_acc:.4f} ✓")
+
+        # Reduce learning rate
+        old_lr = self.optimizer.param_groups[0]["lr"]
+        new_lr = old_lr * self.config.breakdown_lr_factor
+        for pg in self.optimizer.param_groups:
+            pg["lr"] = new_lr
+        tqdm.write(f"[breakdown] LR: {old_lr:.2e} → {new_lr:.2e}")
+
+        # Reinitialize ReduceLROnPlateau so its stale internal patience counter
+        # does not immediately reduce LR again on the first post-recovery epoch.
+        if self._plateau_lr_sched is not None:
+            mode = "max" if self._plateau_lr_metric in ("val_acc", "train_acc") else "min"
+            self._plateau_lr_sched = torch.optim.lr_scheduler.ReduceLROnPlateau(
+                self.optimizer,
+                mode=mode,
+                patience=self.config.reduce_lr_patience,
+                factor=self.config.reduce_lr_factor,
+                min_lr=self.config.reduce_lr_min_lr,
+                threshold=self.config.reduce_lr_threshold,
+            )
+
+        tqdm.write(
+            f"[breakdown] Recovery complete. "
+            f"Restarting from epoch {best_epoch + 1} "
+            f"with a fresh {self.config.epochs}-epoch budget.\n"
+        )
+        return best_epoch
+
+    # ------------------------------------------------------------------
     # Epoch runner
     # ------------------------------------------------------------------
 
@@ -516,6 +694,11 @@ class QATTrainerV2:
         loader = self.train_loader if is_train else self.val_loader
 
         self.model.train(is_train)
+        # model.train() is recursive and would re-enable BN stats accumulation.
+        # Re-apply freeze after the call so BN uses checkpoint running stats.
+        if is_train and (self.config.freeze_bn or
+                         (self._qat_active and self.config.qat.freeze_bn_at_qat)):
+            freeze_bn(self.model)
         max_batches = self.config.dry_run_batches if self.config.dry_run else len(loader)
 
         running_loss = 0.0

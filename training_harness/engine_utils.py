@@ -228,6 +228,58 @@ class LossPlateauDetector:
             self.counter = 0
         return False
 
+    def reset(self) -> None:
+        """Reset to initial state so the detector can be reused after recovery."""
+        self.counter = 0
+        self.best_value = None
+        self.plateau_triggered = False
+
+
+# ---------------------------------------------------------------------------
+# Breakdown detection
+# ---------------------------------------------------------------------------
+
+class BreakdownDetector:
+    """
+    Detects catastrophic training breakdown: val_acc drops dramatically from its peak.
+
+    Breakdown condition (both must hold):
+      - The peak val_acc has exceeded peak_min_factor / num_classes, meaning the
+        model was genuinely learning before the drop.
+      - The current val_acc has fallen below peak * (1 - relative_drop).
+
+    Example (ImageNet, defaults):
+      num_classes=1000  → guessing_acc=0.001
+      peak_min_factor=10 → peak must exceed 0.01 before detection is armed
+      relative_drop=0.7  → breakdown fires when acc < peak * 0.3
+      Peak=0.67, current=0.003: 0.003 < 0.67 * 0.3 = 0.20 → breakdown detected ✓
+    """
+
+    def __init__(
+        self,
+        num_classes: int = 1000,
+        relative_drop: float = 0.7,
+        peak_min_factor: float = 10.0,
+    ):
+        self._peak_threshold = peak_min_factor / num_classes
+        self._keep_fraction = 1.0 - relative_drop
+        self._peak_acc: float = 0.0
+
+    def step(self, val_acc: float) -> bool:
+        """Update peak tracking and return True if breakdown is detected."""
+        self._peak_acc = max(self._peak_acc, val_acc)
+        if self._peak_acc < self._peak_threshold:
+            return False  # model hasn't trained enough — detection not yet armed
+        return val_acc < self._peak_acc * self._keep_fraction
+
+    def reset(self) -> None:
+        """Reset peak tracking for a fresh recovery round."""
+        self._peak_acc = 0.0
+
+    @property
+    def peak_acc(self) -> float:
+        return self._peak_acc
+
 
 # ---------------------------------------------------------------------------
 # Progress / ETA

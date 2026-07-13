@@ -154,7 +154,7 @@ class TrainerConfigV2:
     reduce_lr_on_plateau: bool = False
     """Step a ReduceLROnPlateau scheduler each epoch using val_loss (or train_loss)."""
 
-    reduce_lr_patience: int = 5
+    reduce_lr_patience: int = 20
     """Epochs of no improvement before LR is reduced."""
 
     reduce_lr_factor: float = 0.5
@@ -165,6 +165,10 @@ class TrainerConfigV2:
 
     reduce_lr_threshold: float = 1e-4
     """Minimum change in monitored metric to count as improvement."""
+
+    reduce_lr_metric: str = "val_loss"
+    """Metric to monitor for ReduceLROnPlateau. Use 'val_acc' (mode=max) in QAT
+    since val_loss often diverges from accuracy once quantization noise is active."""
 
     # ---- MixUp / CutMix / Random Erasing ---------------------------------
     mixup: float = 0.0
@@ -189,11 +193,37 @@ class TrainerConfigV2:
     num_classes: int = 1000
     """Number of output classes, used by timm Mixup to build soft-target vectors."""
 
+    # ---- Breakdown detection and recovery ---------------------------------
+    breakdown_detection: bool = False
+    """Detect catastrophic val_acc drops and recover from the best checkpoint."""
+
+    breakdown_relative_drop: float = 0.7
+    """Trigger recovery when val_acc falls below (1 - 0.7) = 30 % of its peak.
+    A 70 % relative drop (e.g. 0.67 → 0.20) counts as a breakdown."""
+
+    breakdown_peak_min_factor: float = 10.0
+    """Detection is armed only after peak val_acc exceeds this multiple of the
+    random-chance accuracy (1/num_classes).  Prevents false triggers at epoch 0."""
+
+    breakdown_max_recoveries: int = 3
+    """Maximum number of recovery attempts before giving up."""
+
+    breakdown_lr_factor: float = 0.1
+    """LR is multiplied by this factor on each recovery (default: ÷10)."""
+
     # ---- EMA --------------------------------------------------------------
     ema_decay: float = 0.0
     """EMA decay for shadow model parameters. Set > 0 to enable (typical: 0.9999).
     Validation uses EMA weights via a temporary parameter swap; the EMA state is
     bundled into every checkpoint's 'extra' key for post-training recovery."""
+
+    # ---- BN freezing -------------------------------------------------------
+    freeze_bn: bool = False
+    """Freeze BatchNorm running stats and affine params throughout training.
+    Use when fine-tuning from a converged checkpoint to prevent BN stat drift
+    from heavy augmentation causing val_acc regression at low LR.
+    Applied at the start of every training epoch (after model.train()), so it
+    overrides the recursive model.train() call that would otherwise unfreeze BN."""
 
     # ---- Helpers -----------------------------------------------------------
     def resolve_device(self) -> str:

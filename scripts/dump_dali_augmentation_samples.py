@@ -51,19 +51,44 @@ def main():
         num_threads=args.num_threads,
     )
 
-    print("Fetching one batch …")
+    print("Fetching one train batch …")
     images, labels = next(iter(train_loader))  # [N, 3, 224, 224] float GPU
 
+    print("\n--- Train samples ---")
     saved = 0
     for i in range(min(args.num_images, images.shape[0])):
-        img = denormalize(images[i])          # float [0, 1] CHW on GPU
+        img_raw = images[i]
+        img = denormalize(img_raw)            # float [0, 1] CHW on GPU
         img_pil = TF.to_pil_image(img.cpu()) # converts to PIL RGB
-        out_path = out_dir / f"sample_{i:02d}_label{labels[i].item()}.png"
+        out_path = out_dir / f"train_sample_{i:02d}_label{labels[i].item()}.png"
         img_pil.save(out_path)
         saved += 1
-        print(f"  saved {out_path}")
+        print(f"  [{i:02d}] min={img_raw.min():.4f}  max={img_raw.max():.4f}  saved {out_path}")
 
-    print(f"\nDone — {saved} images written to {out_dir}")
+    print(f"\nDone — {saved} train images written to {out_dir}")
+
+    print(f"\nBuilding DALI val pipeline from {args.data_dir} …")
+    _, val_loader = build_dali_loaders(
+        data_dir=args.data_dir,
+        batch_size=args.num_images,
+        num_threads=args.num_threads,
+    )
+
+    print("Fetching one val batch …")
+    val_images, val_labels = next(iter(val_loader))
+
+    print("\n--- Val samples ---")
+    val_saved = 0
+    for i in range(min(args.num_images, val_images.shape[0])):
+        img_raw = val_images[i]
+        img = denormalize(img_raw)
+        img_pil = TF.to_pil_image(img.cpu())
+        out_path = out_dir / f"val_sample_{i:02d}_label{val_labels[i].item()}.png"
+        img_pil.save(out_path)
+        val_saved += 1
+        print(f"  [{i:02d}] min={img_raw.min():.4f}  max={img_raw.max():.4f}  saved {out_path}")
+
+    print(f"\nDone — {val_saved} val images written to {out_dir}")
 
 
 if __name__ == "__main__":

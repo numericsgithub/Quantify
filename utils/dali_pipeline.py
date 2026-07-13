@@ -24,13 +24,39 @@ from nvidia.dali import fn, pipeline_def, types
 from nvidia.dali.plugin.pytorch import DALIClassificationIterator, LastBatchPolicy
 from nvidia.dali.auto_aug import rand_augment
 
+# Default normalization: standard ImageNet statistics (used by torchvision and
+# most timm checkpoints). Some checkpoints — e.g. timm's mobilenetv1_100.ra4 —
+# were trained with mean=std=0.5 instead, so mean/std are configurable per model.
+IMAGENET_MEAN = (0.485, 0.456, 0.406)
+IMAGENET_STD = (0.229, 0.224, 0.225)
+HALF_MEAN = (0.5, 0.5, 0.5)
+HALF_STD = (0.5, 0.5, 0.5)
+
+# Normalization matching each model's pretrained timm checkpoint. Most use
+# standard ImageNet stats, but timm's mobilenetv1_100.ra4 checkpoint was trained
+# with inception-style mean=std=0.5 — feeding it ImageNet-normalized inputs
+# collapses accuracy (~17% instead of ~73%).
+_MODEL_NORM = {
+    "resnet18":    (IMAGENET_MEAN, IMAGENET_STD),
+    "resnet50":    (IMAGENET_MEAN, IMAGENET_STD),
+    "mobilenetv1": (HALF_MEAN, HALF_STD),
+    "mobilenetv2": (IMAGENET_MEAN, IMAGENET_STD),
+}
+
+
+def norm_for_model(arch: str):
+    """Return the (mean, std) normalization matching a model's pretrained checkpoint."""
+    return _MODEL_NORM.get(arch, (IMAGENET_MEAN, IMAGENET_STD))
+
+
 # ---------------------------------------------------------------------------
 # Pipeline definitions
 # ---------------------------------------------------------------------------
 
 @pipeline_def(enable_conditionals=True)  # required for auto_aug
 def _train_pipeline(file_root: str, num_shards: int, shard_id: int,
-                    crop: int = 224, randaugment_n: int = 2, randaugment_m: int = 7):
+                    crop: int = 224, randaugment_n: int = 2, randaugment_m: int = 7,
+                    mean=IMAGENET_MEAN, std=IMAGENET_STD):
     jpegs, labels = fn.readers.file(
         file_root=file_root,
         random_shuffle=True,
@@ -56,8 +82,8 @@ def _train_pipeline(file_root: str, num_shards: int, shard_id: int,
         device="gpu",
         dtype=types.FLOAT,
         output_layout="CHW",
-        mean=[0.485 * 255, 0.456 * 255, 0.406 * 255],
-        std=[0.229 * 255, 0.224 * 255, 0.225 * 255],
+        mean=[m * 255 for m in mean],
+        std=[s * 255 for s in std],
         mirror=fn.random.coin_flip(probability=0.5),
     )
     return images, labels.gpu()
@@ -65,7 +91,8 @@ def _train_pipeline(file_root: str, num_shards: int, shard_id: int,
 
 @pipeline_def
 def _val_pipeline(file_root: str, num_shards: int, shard_id: int,
-                  crop: int = 224, resize_shorter: int = 256):
+                  crop: int = 224, resize_shorter: int = 256,
+                  mean=IMAGENET_MEAN, std=IMAGENET_STD):
     jpegs, labels = fn.readers.file(
         file_root=file_root,
         random_shuffle=False,
@@ -82,8 +109,8 @@ def _val_pipeline(file_root: str, num_shards: int, shard_id: int,
         dtype=types.FLOAT,
         output_layout="CHW",
         crop=(crop, crop),  # center crop
-        mean=[0.485 * 255, 0.456 * 255, 0.406 * 255],
-        std=[0.229 * 255, 0.224 * 255, 0.225 * 255],
+        mean=[m * 255 for m in mean],
+        std=[s * 255 for s in std],
     )
     return images, labels.gpu()
 
@@ -168,6 +195,8 @@ def build_dali_loaders(
     resize_shorter: int = 256,
     randaugment_n: int = 2,
     randaugment_m: int = 7,
+    mean=IMAGENET_MEAN,
+    std=IMAGENET_STD,
 ) -> tuple[DALILoader, DALILoader]:
     """
     Build DALI train and val loaders from an ImageFolder directory.
@@ -182,6 +211,9 @@ def build_dali_loaders(
                          matching the standard torchvision IMAGENET1K recipe).
         randaugment_n:   Number of RandAugment transforms applied per image (default 2).
         randaugment_m:   RandAugment magnitude (default 7).
+        mean, std:       Per-channel normalization stats in [0, 1] (scaled by 255
+                         internally). Defaults to ImageNet stats; pass (0.5, 0.5, 0.5)
+                         for checkpoints trained with inception-style normalization.
 
     Returns:
         (train_loader, val_loader)
@@ -196,12 +228,14 @@ def build_dali_loaders(
         _train_pipeline,
         file_root=train_dir, num_shards=1, shard_id=0,
         crop=crop, randaugment_n=randaugment_n, randaugment_m=randaugment_m,
+        mean=mean, std=std,
         **dali_kwargs,
     )
     val_factory = functools.partial(
         _val_pipeline,
         file_root=val_dir, num_shards=1, shard_id=0,
         crop=crop, resize_shorter=resize_shorter,
+        mean=mean, std=std,
         **dali_kwargs,
     )
 
