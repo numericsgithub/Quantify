@@ -159,6 +159,15 @@ def parse_args() -> argparse.Namespace:
     )
     q.add_argument("--bias-bits", type=int, default=8, help="Bias bit width")
     q.add_argument(
+        "--clipped-ste",
+        action="store_true",
+        help="Use a clipped straight-through estimator on all quantizers: zero "
+             "the gradient for values the forward clamp saturated (out of the "
+             "representable range) instead of leaking slope-1 gradients through "
+             "them. Default is plain STE. Only affects training gradients; the "
+             "forward/ONNX output is unchanged.",
+    )
+    q.add_argument(
         "--weight-lsb-subtract",
         type=int,
         default=0,
@@ -456,22 +465,28 @@ def _make_weight_quant(args: argparse.Namespace):
         return WeightQuant
 
     bw = args.weight_bits
+    cs = args.clipped_ste
     class WeightQuant(FixedPointPerTensorWeightQuant):
         bit_width = bw
+        clipped_ste = cs
     return WeightQuant
 
 
 def _make_act_quant(args: argparse.Namespace):
     bw = args.act_bits
+    cs = args.clipped_ste
     class ActQuant(FixedPointPerTensorActivationQuant):
         bit_width = bw
+        clipped_ste = cs
     return ActQuant
 
 
 def _make_bias_quant(args: argparse.Namespace):
     bw = args.bias_bits
+    cs = args.clipped_ste
     class BiasQuant(FixedPointPerTensorBiasQuant):
         bit_width = bw
+        clipped_ste = cs
     return BiasQuant
 
 
