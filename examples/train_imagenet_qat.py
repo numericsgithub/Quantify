@@ -159,6 +159,16 @@ def parse_args() -> argparse.Namespace:
     )
     q.add_argument("--bias-bits", type=int, default=8, help="Bias bit width")
     q.add_argument(
+        "--no-act-quant",
+        action="store_true",
+        help="Quantize weights and bias only; leave activations in float "
+             "(builds the model with act_quant=None, so there are no activation "
+             "quantizers at all). Weight-only quantization is nearly lossless, "
+             "so this is a strong Phase-1 curriculum: fine-tune to ~float "
+             "accuracy first, then warm-start a second run WITH activation "
+             "quantization to add it on top of an already-strong model.",
+    )
+    q.add_argument(
         "--clipped-ste",
         action="store_true",
         help="Use a clipped straight-through estimator on all quantizers: zero "
@@ -473,6 +483,8 @@ def _make_weight_quant(args: argparse.Namespace):
 
 
 def _make_act_quant(args: argparse.Namespace):
+    if getattr(args, "no_act_quant", False):
+        return None  # float activations (Phase-1 weight+bias-only curriculum)
     bw = args.act_bits
     cs = args.clipped_ste
     class ActQuant(FixedPointPerTensorActivationQuant):
@@ -580,7 +592,10 @@ def _default_pretrained_qat_cache(args) -> str:
     config reuses the same file across runs. BatchNorm is always fused, so it
     isn't part of the key.
     """
-    tag = f"{args.model}_W{args.weight_bits}_A{args.act_bits}_B{args.bias_bits}"
+    if getattr(args, "no_act_quant", False):
+        tag = f"{args.model}_W{args.weight_bits}_Anone_B{args.bias_bits}"
+    else:
+        tag = f"{args.model}_W{args.weight_bits}_A{args.act_bits}_B{args.bias_bits}"
     tag += f"_r{args.ptq_search_radius}"
     return os.path.join("output", "pretrained_qat_cache", f"{tag}.pt")
 
