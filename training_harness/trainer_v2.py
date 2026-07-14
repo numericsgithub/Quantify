@@ -388,7 +388,15 @@ class QATTrainerV2:
                         all_metrics.get("val_loss", all_metrics.get("train_loss", 0.0)),
                     )
                     self._plateau_lr_sched.step(plateau_val)
-                    all_metrics["lr"] = self.optimizer.param_groups[0]["lr"]
+
+                # Always record the current learning rate — per epoch — for every
+                # schedule (cosine, plateau, or fixed). Logged to CSV/TB/W&B via
+                # all_metrics and attached to the tracker's latest (val) snapshot
+                # so it can be plotted per epoch (get_metric_series("lr")).
+                current_lr = self.optimizer.param_groups[0]["lr"]
+                all_metrics["lr"] = current_lr
+                if self.tracker.history:
+                    self.tracker.history[-1].update("lr", current_lr)
 
                 self.logger.log_epoch(epoch, all_metrics)
 

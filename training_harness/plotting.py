@@ -83,6 +83,7 @@ class TrainingPlotter:
 
         paths.append(self.plot_loss(tracker))
         paths.append(self.plot_accuracy(tracker))
+        paths.append(self.plot_lr(tracker))
         paths.append(self.plot_overview(tracker, lr_history=lr_history))
 
         if tracker.scale_history:
@@ -126,33 +127,65 @@ class TrainingPlotter:
         return self._save(fig, "loss")
 
     def plot_accuracy(self, tracker) -> Optional[str]:
-        """Plot train and validation accuracy curves (if available)."""
+        """Plot train/val accuracy, annotate the best val point, and overlay the
+        per-epoch learning rate on a secondary axis (so you can see how accuracy
+        responds to the LR schedule)."""
         train_ep, train_acc = tracker.get_metric_series("train_acc")
         val_ep,   val_acc   = tracker.get_metric_series("val_acc")
 
         if not train_acc and not val_acc:
             return None
 
-        fig, ax = plt.subplots(figsize=_FIGSIZE_SINGLE)
+        fig, ax = plt.subplots(figsize=_FIGSIZE_WIDE)
         _style_axes(ax)
+
+        # LR overlay on a secondary axis (drawn first so accuracy sits on top)
+        lr_ep, lr_vals = tracker.get_metric_series("lr")
+        if lr_vals:
+            ax_lr = ax.twinx()
+            ax_lr.plot(lr_ep, lr_vals, color=_COLORS["muted"], lw=1.2,
+                       linestyle=":", alpha=0.8, label="LR")
+            ax_lr.set_yscale("log")
+            ax_lr.set_ylabel("Learning rate", color=_COLORS["muted"])
+            ax_lr.tick_params(axis="y", colors=_COLORS["muted"])
+            ax_lr.grid(False)
 
         if train_acc:
             ax.plot(train_ep, train_acc, color=_COLORS["train"], label="Train", linewidth=1.8)
         if val_acc:
             ax.plot(val_ep, val_acc, color=_COLORS["val"], label="Val", linewidth=1.8)
             best_idx = val_acc.index(max(val_acc))
-            ax.scatter(
-                [val_ep[best_idx]], [val_acc[best_idx]],
-                color=_COLORS["val"], s=60, zorder=5,
-                label=f"Best val: {val_acc[best_idx]:.4f}"
-            )
+            bx, by = val_ep[best_idx], val_acc[best_idx]
+            ax.scatter([bx], [by], color=_COLORS["val"], s=70, zorder=6, marker="*",
+                       edgecolors="white", linewidths=0.6,
+                       label=f"Best val: {by:.4f} @ ep{bx}")
+            ax.axhline(by, color=_COLORS["val"], linestyle="--", alpha=0.3, linewidth=1)
+            ax.annotate(f"{by:.4f}", (bx, by), textcoords="offset points",
+                        xytext=(6, 6), fontsize=9, fontweight="bold",
+                        color=_COLORS["val"])
 
         ax.set_xlabel("Epoch")
         ax.set_ylabel("Accuracy")
         ax.set_title(f"{self.experiment_name} — Accuracy")
-        ax.legend(framealpha=0.8)
+        ax.legend(framealpha=0.8, loc="lower right")
 
         return self._save(fig, "accuracy")
+
+    def plot_lr(self, tracker) -> Optional[str]:
+        """Plot the per-epoch learning rate (log scale)."""
+        ep, lr = tracker.get_metric_series("lr")
+        if not lr:
+            return None
+
+        fig, ax = plt.subplots(figsize=_FIGSIZE_SINGLE)
+        _style_axes(ax)
+        ax.plot(ep, lr, color=_COLORS["accent"], linewidth=1.8, marker="o", markersize=2)
+        ax.set_yscale("log")
+        ax.set_xlabel("Epoch")
+        ax.set_ylabel("Learning rate")
+        ax.set_title(f"{self.experiment_name} — Learning Rate")
+
+        return self._save(fig, "lr")
 
     def plot_scale_factors(self, tracker) -> Optional[str]:
         """
