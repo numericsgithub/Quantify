@@ -106,16 +106,17 @@ def _remap_timm_mobilenetv2_sd(timm_sd: dict) -> dict:
         op = f"features.{feat_i}.conv"
 
         if flat_i == 0:
-            # expand_ratio=1: timm has no expansion conv; our conv.0 stays at init
-            # dw → conv.3, bn1 → conv.4, conv_pw → conv.6, bn2 → conv.7
-            out[f"{op}.3.weight"] = timm_sd[f"{tp}.conv_dw.weight"]
+            # expand_ratio=1: neither timm nor our model has an expansion conv, so the
+            # block is a 5-slot Sequential (no leading pw-expand):
+            #   dw → conv.0, bn1 → conv.1, conv_pw → conv.3, bn2 → conv.4
+            out[f"{op}.0.weight"] = timm_sd[f"{tp}.conv_dw.weight"]
             for sfx in _BN_SUFFIXES:
                 if f"{tp}.bn1.{sfx}" in timm_sd:
-                    out[f"{op}.4.{sfx}"] = timm_sd[f"{tp}.bn1.{sfx}"]
-            out[f"{op}.6.weight"] = timm_sd[f"{tp}.conv_pw.weight"]
+                    out[f"{op}.1.{sfx}"] = timm_sd[f"{tp}.bn1.{sfx}"]
+            out[f"{op}.3.weight"] = timm_sd[f"{tp}.conv_pw.weight"]
             for sfx in _BN_SUFFIXES:
                 if f"{tp}.bn2.{sfx}" in timm_sd:
-                    out[f"{op}.7.{sfx}"] = timm_sd[f"{tp}.bn2.{sfx}"]
+                    out[f"{op}.4.{sfx}"] = timm_sd[f"{tp}.bn2.{sfx}"]
         else:
             # Full inverted residual: conv_pw → conv.0, bn1 → conv.1,
             #                         conv_dw → conv.3, bn2 → conv.4,

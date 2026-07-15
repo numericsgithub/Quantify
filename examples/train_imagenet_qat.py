@@ -43,6 +43,7 @@ from quantizers.fixedpoint_per_tensor import (
     FixedPointPerTensorBiasQuant,
 )
 from quantizers.coefficient_per_tensor_weights import CoefficientPerTensorWeightQuant
+from quantizers.manager import QuantizerManager
 from training_harness.trainer_v2 import QATTrainerV2
 from training_harness.config_v2 import TrainerConfigV2, QATScheduleConfigV2
 from training_harness.config import CheckpointConfig
@@ -50,6 +51,7 @@ from training_harness.schedulers import WarmupCosineScheduler
 from training_harness.lr_finder import find_lr
 from utils.weight_mapping import load_timm_weights
 from utils.bn_fusion import fuse_bn_into_conv
+from utils.run_utils import env_default, next_run_dir, setup_output_tee
 
 
 # ---------------------------------------------------------------------------
@@ -109,11 +111,12 @@ def parse_args() -> argparse.Namespace:
     d.add_argument(
         "--data-dir",
         type=str,
-        default=None,
+        default=env_default("IMAGENET_DALI_PATH"),
         metavar="PATH",
         help="Path to ImageFolder dataset (train/ and val/ subdirs). "
              "When set, uses NVIDIA DALI instead of the HuggingFace dataloader. "
-             "Extract with: python scripts/extract_imagenet.py --output-dir PATH",
+             "Extract with: python scripts/extract_imagenet.py --output-dir PATH. "
+             "Defaults to $IMAGENET_DALI_PATH if set.",
     )
     d.add_argument(
         "--hf-dataset",
@@ -265,7 +268,18 @@ def parse_args() -> argparse.Namespace:
     )
 
     # ---- Output ------------------------------------------------------------
-    p.add_argument("--output-dir", type=str, default="output/imagenet_qat")
+    p.add_argument(
+        "--output-dir", type=str, default=None,
+        help="Output directory. Defaults to output/imagenet_qat_<model> "
+             "(e.g. output/imagenet_qat_resnet18).",
+    )
+    p.add_argument(
+        "--new-run-dir",
+        action="store_true",
+        help="Auto-increment the output directory if it already exists "
+             "(output/imagenet_qat_<model> → output/imagenet_qat_<model>_1 → …). "
+             "Useful for keeping each run's checkpoints separate.",
+    )
     p.add_argument(
         "--experiment-name",
         type=str,
@@ -314,6 +328,37 @@ def parse_args() -> argparse.Namespace:
         help="Calibration pre-pass steps in Phase 1 (default: 10)",
     )
 
+    # ---- Reduce LR on plateau -----------------------------------------------
+    rlr = p.add_argument_group("reduce lr on plateau")
+    rlr.add_argument(
+        "--cosine-lr",
+        action="store_true",
+        default=False,
+        help="Use a per-step linear-warmup + cosine-annealing LR schedule "
+             "instead of ReduceLROnPlateau. Mutually exclusive with the "
+             "--reduce-lr-* options: cosine steps every batch and would "
+             "overwrite any plateau-triggered reduction, so ReduceLROnPlateau "
+             "is disabled when this is set.",
+    )
+    rlr.add_argument(
+        "--cosine-warmup-frac", type=float, default=0.1,
+        help="Fraction of total steps spent in linear warmup (--cosine-lr only)",
+    )
+    rlr.add_argument(
+        "--cosine-eta-min", type=float, default=1e-6,
+        help="Final LR at the end of cosine annealing (--cosine-lr only)",
+    )
+    rlr.add_argument("--reduce-lr-patience", type=int, default=20,
+                     help="Epochs of no improvement before reducing LR (default: 5)")
+    rlr.add_argument("--reduce-lr-factor", type=float, default=0.5,
+                     help="Multiplicative factor applied to LR on plateau (default: 0.5)")
+    rlr.add_argument("--reduce-lr-min-lr", type=float, default=1e-8,
+                     help="Lower bound on LR (default: 1e-8)")
+    rlr.add_argument(
+        "--reduce-lr-metric", type=str, default="val_loss",
+        help="Metric monitored by ReduceLROnPlateau (e.g. val_loss, val_acc)",
+    )
+
     # ---- Init from a PTQ checkpoint -----------------------------------------
     ptq = p.add_argument_group("ptq init")
     ptq.add_argument(
@@ -335,7 +380,66 @@ def parse_args() -> argparse.Namespace:
         ),
     )
 
+    # ---- Pretrained + in-process LSB search --------------------------------
+    pq = p.add_argument_group("pretrained qat")
+    pq.add_argument(
+        "--pretrained-qat",
+        action="store_true",
+        help=(
+            "Load pretrained float weights, fold BatchNorm into the preceding "
+            "conv/linear weights, run the full PTQ LSB search (weights -> bias "
+            "-> activations, the same greedy per-quantizer search as "
+            "examples/find_perfect_lsbs_imagenet_ptq.py) in-process, then start "
+            "QAT from the calibrated model. BatchNorm is always fused (QAT "
+            "trains the BN-folded deployment graph), so no separate flag is "
+            "needed. The searched model is cached to --pretrained-qat-cache so "
+            "the (slow) search runs only once; later runs with the same "
+            "model/bits/radius reuse it. Mutually exclusive with "
+            "--init-from-ptq. Consider pairing with --float-warmup-epochs 0 "
+            "since the model is already calibrated."
+        ),
+    )
+    pq.add_argument(
+        "--ptq-search-radius",
+        type=int,
+        default=7,
+        help="LSB positions tested on each side of the calibrated value during "
+             "the --pretrained-qat search (0 = calibrated position only).",
+    )
+    pq.add_argument(
+        "--ptq-eval-batches",
+        type=int,
+        default=None,
+        help="Validation batches per LSB candidate during the --pretrained-qat "
+             "search (None = full validation set; smaller = faster search).",
+    )
+    pq.add_argument(
+        "--pretrained-qat-cache",
+        type=str,
+        default=None,
+        metavar="PATH",
+        help="Where the --pretrained-qat LSB-searched checkpoint is cached. "
+             "Defaults to output/pretrained_qat_cache/<model>_W<w>_A<a>_B<b>"
+             "_r<radius>.pt.",
+    )
+    pq.add_argument(
+        "--force-lsb-search",
+        action="store_true",
+        help="Re-run the --pretrained-qat LSB search even if a cached "
+             "checkpoint already exists (overwrites it).",
+    )
+
     args = p.parse_args()
+    if args.output_dir is None:
+        args.output_dir = f"output/imagenet_qat_{args.model}"
+
+    if args.pretrained_qat and args.init_from_ptq:
+        p.error("--pretrained-qat and --init-from-ptq are mutually exclusive: "
+                "the former runs the LSB search itself, the latter loads one.")
+    if args.pretrained_qat and args.weight_coeffs:
+        p.error("--pretrained-qat requires fixed-point weights (--weight-bits); "
+                "the LSB search does not apply to coefficient weights.")
+
     _print_args(p, args)
     return args
 
@@ -408,7 +512,7 @@ def _load_pretrained(model: nn.Module, args) -> nn.Module:
     return load_timm_weights(model, float_model, args.model)
 
 
-def _load_ptq_checkpoint(model: nn.Module, ckpt_path: str) -> nn.Module:
+def _load_ptq_checkpoint(model: nn.Module, ckpt_path: str) -> tuple[nn.Module, bool]:
     """
     Load a checkpoint produced by examples/find_perfect_lsbs_imagenet_ptq.py,
     typically the activations-mode run chained from a weights-mode run via
@@ -421,18 +525,24 @@ def _load_ptq_checkpoint(model: nn.Module, ckpt_path: str) -> nn.Module:
     than the one being constructed here will legitimately have mismatched
     quantizer buffers for the role that wasn't searched.
 
-    If the checkpoint was produced with --fuse-bn, its model_state_dict has
-    BatchNorm folded into the preceding conv/linear (conv gained a bias,
-    BatchNorm became Identity) — loading that into a freshly built model
-    that still has separate, randomly-initialized BatchNorm layers would
-    leave BatchNorm untrained and silently produce garbage output. Detect
-    this via extra.fuse_bn and fuse this model's BatchNorm the same way
-    before loading, so the module structures match.
+    If the checkpoint was produced with --fuse-bn (or was itself a QAT
+    checkpoint saved from such a run), its model_state_dict has BatchNorm
+    folded into the preceding conv/linear (conv gained a bias, BatchNorm
+    became Identity) — loading that into a freshly built model that still
+    has separate, randomly-initialized BatchNorm layers would leave BatchNorm
+    untrained and silently produce garbage output. Detect this via
+    extra.fuse_bn and fuse this model's BatchNorm the same way before
+    loading, so the module structures match.
+
+    Returns (model, bn_fused) so the caller can propagate fuse_bn=True into
+    subsequent checkpoint saves, allowing further chained runs to work.
     """
     print(f"[init-from-ptq] Loading {ckpt_path} …")
     payload = torch.load(ckpt_path, map_location="cpu")
+    bn_fused = False
     if payload.get("extra", {}).get("fuse_bn"):
         n_fused = fuse_bn_into_conv(model)
+        bn_fused = True
         print(f"[init-from-ptq] Checkpoint was produced with --fuse-bn; fused "
               f"{n_fused} BatchNorm layer(s) into preceding conv/linear weights "
               f"to match its module structure.")
@@ -444,7 +554,157 @@ def _load_ptq_checkpoint(model: nn.Module, ckpt_path: str) -> nn.Module:
     metrics = payload.get("metrics", {})
     if metrics:
         print(f"[init-from-ptq] Checkpoint metrics: {metrics}")
-    return model
+    return model, bn_fused
+
+
+def _default_pretrained_qat_cache(args) -> str:
+    """Deterministic cache path for the --pretrained-qat LSB-searched model.
+
+    Keyed on everything that changes the search result (model, per-role bit
+    widths, search radius) so different configs never collide and a matching
+    config reuses the same file across runs. BatchNorm is always fused, so it
+    isn't part of the key.
+    """
+    tag = f"{args.model}_W{args.weight_bits}_A{args.act_bits}_B{args.bias_bits}"
+    tag += f"_r{args.ptq_search_radius}"
+    return os.path.join("output", "pretrained_qat_cache", f"{tag}.pt")
+
+
+def _run_pretrained_qat_search(args, model: nn.Module, device, train_loader, val_loader) -> None:
+    """Run the weights -> bias -> activations LSB search in-process on `model`.
+
+    Mirrors examples/find_perfect_lsbs_imagenet_ptq.py, but drives all three
+    roles over a single in-memory model (each role searched with the previously
+    searched roles kept active) instead of chaining checkpoints across three
+    separate processes. Leaves every quantizer calibrated (search_done=True,
+    annealing_alpha=1) so QAT can start immediately with
+    preserve_calibrated_quantizers=True.
+    """
+    from pathlib import Path
+    from examples.find_perfect_lsbs_imagenet_ptq import (
+        _assign_descriptive_ids,
+        _evaluate,
+        search_role_lsbs,
+    )
+
+    out_dir = Path(args.output_dir) / "ptq_lsb_search"
+    out_dir.mkdir(parents=True, exist_ok=True)
+    log_path = out_dir / "ptq_search.log"
+
+    _assign_descriptive_ids(model)
+    mgr = QuantizerManager()
+    mgr.quantization_start_gap = 2
+    loss_fn = nn.CrossEntropyLoss()
+    # Near-zero LR: weights barely move, but a training-mode forward+backward is
+    # what lets each quantizer's calibration fire (see base_quantizer.forward).
+    search_optimizer = torch.optim.SGD(model.parameters(), lr=1e-10)
+
+    # Baseline (float) pass: force every quantizer to calibrated-passthrough so
+    # eval mode neither raises nor calibrates, and so this first forward pass
+    # establishes each quantizer's forward-execution order for the search.
+    for q in mgr.quantizers.values():
+        q.search_done.fill_(True)
+        q.annealing_alpha.data.fill_(0.0)
+    print("[pretrained-qat] Baseline evaluation (no quantization) …")
+    _evaluate(model, val_loader, loss_fn, device, args.ptq_eval_batches, label="baseline")
+
+    # One calibration batch, reused for every quantizer (weights barely move).
+    for _imgs, _lbls in train_loader:
+        calib_images = _imgs.to(device)
+        calib_labels = _lbls.to(device).long()
+        break
+
+    role_bits = {
+        "weight":     args.weight_bits,
+        "bias":       args.bias_bits,
+        "activation": args.act_bits,
+    }
+    active_roles: set[str] = set()
+    for role in ("weight", "bias", "activation"):
+        if not any(q.quantizer_role == role for q in mgr.quantizers.values()):
+            print(f"\n[pretrained-qat] ── LSB search: {role} — SKIPPED "
+                  f"(model has no {role} quantizers)")
+            continue
+        print(f"\n[pretrained-qat] ── LSB search: {role} ({role_bits[role]}b) "
+              f"─ keeping active: {sorted(active_roles) or 'none'}")
+        search_role_lsbs(
+            model=model,
+            target_role=role,
+            bit_width=role_bits[role],
+            val_loader=val_loader,
+            loss_fn=loss_fn,
+            device=device,
+            search_radius=args.ptq_search_radius,
+            eval_batches=args.ptq_eval_batches,
+            out_dir=out_dir,
+            log_path=log_path,
+            calib_images=calib_images,
+            calib_labels=calib_labels,
+            optimizer=search_optimizer,
+            active_roles=set(active_roles),
+        )
+        active_roles.add(role)
+
+    print("\n[pretrained-qat] Final evaluation (all quantizers active) …")
+    _evaluate(model, val_loader, loss_fn, device, args.ptq_eval_batches, label="final")
+
+
+def _prepare_pretrained_qat(args, model: nn.Module, device, train_loader, val_loader) -> tuple[nn.Module, bool]:
+    """Load-or-run the --pretrained-qat LSB search. Returns (model, bn_fused).
+
+    On a cache hit, the freshly built `model` is populated from the cached
+    checkpoint (BatchNorm re-fused first to match its BN-folded structure) via
+    the same _load_ptq_checkpoint path used by --init-from-ptq, so the search
+    is skipped entirely. Otherwise the search runs and its result is cached.
+    """
+    cache_path = args.pretrained_qat_cache or _default_pretrained_qat_cache(args)
+
+    if os.path.exists(cache_path) and not args.force_lsb_search:
+        print(f"[pretrained-qat] Using cached LSB-searched checkpoint: {cache_path}")
+        print(f"                 (delete it or pass --force-lsb-search to re-run the search)")
+        return _load_ptq_checkpoint(model, cache_path)
+
+    if args.force_lsb_search and os.path.exists(cache_path):
+        print(f"[pretrained-qat] --force-lsb-search: re-running search (overwriting {cache_path})")
+    else:
+        print(f"[pretrained-qat] No cache at {cache_path}; running LSB search …")
+
+    model = _load_pretrained(model, args)
+    # QAT trains the BN-folded deployment graph, so always fuse BatchNorm into
+    # the preceding conv/linear weights before the search calibrates against
+    # that same weight distribution.
+    n_fused = fuse_bn_into_conv(model)
+    bn_fused = True
+    print(f"[pretrained-qat] Fused {n_fused} BatchNorm layer(s) into preceding conv/linear weights.")
+
+    model = model.to(device)
+    _run_pretrained_qat_search(args, model, device, train_loader, val_loader)
+
+    os.makedirs(os.path.dirname(cache_path), exist_ok=True)
+    payload = {
+        "epoch": 0,
+        "model_state_dict": model.state_dict(),
+        "metrics": {},
+        "config": {
+            "model": args.model,
+            "weight_bits": args.weight_bits,
+            "act_bits": args.act_bits,
+            "bias_bits": args.bias_bits,
+            "search_radius": args.ptq_search_radius,
+        },
+        "extra": {
+            "pretrained_qat": True,
+            "fuse_bn": bn_fused,
+            "role_bit_widths": {
+                "weight": args.weight_bits,
+                "bias": args.bias_bits,
+                "activation": args.act_bits,
+            },
+        },
+    }
+    torch.save(payload, cache_path)
+    print(f"[pretrained-qat] Saved LSB-searched checkpoint: {cache_path}")
+    return model, bn_fused
 
 
 def _disable_act_quant_proxies(model: nn.Module) -> None:
@@ -550,14 +810,18 @@ def _build_dataloaders(args):
 
 
 def _build_dali_loaders(args):
-    from utils.dali_pipeline import build_dali_loaders
+    from utils.dali_pipeline import build_dali_loaders, norm_for_model
+    mean, std = norm_for_model(args.model)
     print(f"Building DALI loaders from {args.data_dir} …")
+    print(f"  normalization for {args.model}: mean={mean} std={std}")
     train_loader, val_loader = build_dali_loaders(
         data_dir=args.data_dir,
         batch_size=args.batch_size,
         num_threads=args.dali_threads,
         randaugment_n=args.randaugment_n,
         randaugment_m=args.randaugment_m,
+        mean=mean,
+        std=std,
     )
     print(f"  train: {len(train_loader):,} batches   val: {len(val_loader):,} batches")
     return train_loader, val_loader
@@ -579,6 +843,12 @@ def main() -> None:
     act_quant    = _make_act_quant(args)
     bias_quant   = _make_bias_quant(args)
 
+    # Resolve output directory (auto-increment if --new-run-dir is set)
+    if args.new_run_dir:
+        args.output_dir = next_run_dir(args.output_dir)
+
+    setup_output_tee(args.output_dir)
+
     # Derive a descriptive experiment name if not provided
     weight_desc = (
         f"coeffs_{os.path.splitext(os.path.basename(args.weight_coeffs))[0]}"
@@ -593,7 +863,8 @@ def main() -> None:
     print(f"  Weight Q   : {weight_desc}")
     print(f"  Act Q      : A{args.act_bits}")
     print(f"  Bias Q     : B{args.bias_bits}")
-    print(f"  Pretrained : {args.pretrained}")
+    print(f"  Pretrained : {args.pretrained_qat or args.pretrained}"
+          f"{'  (+ in-process LSB search)' if args.pretrained_qat else ''}")
     print(f"  AMP        : {args.mixed_precision}")
     if args.data_dir:
         print(f"  Data       : DALI  ({args.data_dir})  threads={args.dali_threads}")
@@ -601,18 +872,24 @@ def main() -> None:
         print(f"  Data       : HuggingFace ({args.hf_dataset})  workers={args.num_workers}")
     print(f"{'═'*60}\n")
 
+    # Data (built before the model is loaded because --pretrained-qat's LSB
+    # search needs the validation loader and a calibration batch).
+    train_loader, val_loader = _build_dataloaders(args)
+
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
     # Build model
     model = _build_model(args, weight_quant, act_quant, bias_quant)
-    if args.pretrained:
+    bn_fused = False
+    if args.pretrained_qat:
+        model, bn_fused = _prepare_pretrained_qat(args, model, device, train_loader, val_loader)
+    elif args.pretrained:
         model = _load_pretrained(model, args)
     if args.init_from_ptq:
-        model = _load_ptq_checkpoint(model, args.init_from_ptq)
+        model, bn_fused = _load_ptq_checkpoint(model, args.init_from_ptq)
 
     if args.weight_lsb_subtract:
         _apply_weight_lsb_subtract(model, args.weight_lsb_subtract)
-
-    # Data
-    train_loader, val_loader = _build_dataloaders(args)
 
     # Optimizer
     optimizer = torch.optim.AdamW(
@@ -636,10 +913,22 @@ def main() -> None:
         )
         return
     # ─────────────────────────────────────────────────────────────────────────
-    # ReduceLROnPlateau manages the LR epoch-by-epoch inside the harness.
-    # A per-step cosine scheduler would override every plateau-triggered
-    # reduction on the very next batch, so the two cannot coexist.
+    # By default ReduceLROnPlateau manages the LR epoch-by-epoch inside the
+    # harness. A per-step cosine scheduler would override every plateau-triggered
+    # reduction on the very next batch, so the two cannot coexist; --cosine-lr
+    # swaps to cosine and disables the plateau scheduler below.
     scheduler = None
+    if args.cosine_lr:
+        total_steps = len(train_loader) * args.epochs
+        scheduler = WarmupCosineScheduler(
+            optimizer,
+            warmup_steps=int(total_steps * args.cosine_warmup_frac),
+            total_steps=total_steps,
+            eta_min=args.cosine_eta_min,
+        )
+        print(f"[lr-schedule] Cosine: total_steps={total_steps:,} "
+              f"warmup={int(total_steps * args.cosine_warmup_frac):,} "
+              f"eta_min={args.cosine_eta_min} (ReduceLROnPlateau disabled)")
 
     # V2 harness config
     config = TrainerConfigV2(
@@ -665,7 +954,7 @@ def main() -> None:
             quantization_start_gap=args.qat_gap,
             freeze_bn_at_qat=True,
             track_scale_factors=True,
-            preserve_calibrated_quantizers=bool(args.init_from_ptq),
+            preserve_calibrated_quantizers=bool(args.init_from_ptq or args.pretrained_qat),
         ),
 
         checkpoint=CheckpointConfig(
@@ -676,10 +965,11 @@ def main() -> None:
         ),
 
         early_stopping_patience=None,
-        reduce_lr_on_plateau=True,
-        reduce_lr_patience=5,
-        reduce_lr_factor=0.5,
-        reduce_lr_min_lr=1e-8,
+        reduce_lr_on_plateau=not args.cosine_lr,
+        reduce_lr_patience=args.reduce_lr_patience,
+        reduce_lr_factor=args.reduce_lr_factor,
+        reduce_lr_min_lr=args.reduce_lr_min_lr,
+        reduce_lr_metric=args.reduce_lr_metric,
 
         mixup=args.mixup,
         cutmix=args.cutmix,
@@ -700,6 +990,7 @@ def main() -> None:
         loss_fn=nn.CrossEntropyLoss(),
         scheduler=scheduler,
         onnx_dummy_input=torch.zeros(1, 3, 224, 224),
+        extra_checkpoint_fields={"fuse_bn": True} if bn_fused else None,
     )
 
     print("\nPre-training evaluation (eval mode, quantization disabled):")

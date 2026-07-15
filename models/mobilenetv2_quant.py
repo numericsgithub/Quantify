@@ -2,6 +2,7 @@ import torch
 import torch.nn as nn
 import brevitas.nn as qnn
 from quantizers.fixedpoint_per_tensor import FixedPointPerTensorWeightQuant
+from models.quant_activations import QuantReLU6
 
 class QuantInvertedResidual(nn.Module):
     """Quantized Inverted Residual Block for MobileNetV2.
@@ -14,32 +15,35 @@ class QuantInvertedResidual(nn.Module):
         self.use_res_connect = stride == 1 and inp == oup
 
         hidden_dim = int(round(inp * expand_ratio))
-        
-        # The 'conv' attribute in torchvision is a Sequential containing:
-        # 0: Conv2d (pw)
-        # 1: BatchNorm2d
-        # 2: ReLU6
-        # 3: Conv2d (dw)
-        # 4: BatchNorm2d
-        # 5: ReLU6
-        # 6: Conv2d (pw-linear)
-        # 7: BatchNorm2d
-        self.conv = nn.Sequential(
-            # pw
-            qnn.QuantConv2d(inp, hidden_dim, 1, 1, 0, bias=False, 
-                            weight_bit_width=weight_bit_width, weight_quant=weight_quant),
-            nn.BatchNorm2d(hidden_dim),
-            qnn.QuantReLU(bit_width=act_bit_width, act_quant=act_quant),
+
+        # Mirrors torchvision: the leading pointwise-expand conv is omitted when
+        # expand_ratio == 1 (hidden_dim == inp), otherwise the pretrained checkpoint
+        # has no weights for it and it would sit in the forward path randomly
+        # initialised, corrupting the features.
+        layers = []
+        if expand_ratio != 1:
+            # pw-expand
+            layers += [
+                qnn.QuantConv2d(inp, hidden_dim, 1, 1, 0, bias=False,
+                                weight_bit_width=weight_bit_width, weight_quant=weight_quant),
+                nn.BatchNorm2d(hidden_dim),
+                QuantReLU6(bit_width=act_bit_width, act_quant=act_quant),
+            ]
+        layers += [
             # dw
-            qnn.QuantConv2d(hidden_dim, hidden_dim, 3, stride, 1, groups=hidden_dim, bias=False, 
+            qnn.QuantConv2d(hidden_dim, hidden_dim, 3, stride, 1, groups=hidden_dim, bias=False,
                             weight_bit_width=weight_bit_width, weight_quant=weight_quant),
             nn.BatchNorm2d(hidden_dim),
-            qnn.QuantReLU(bit_width=act_bit_width, act_quant=act_quant),
+            QuantReLU6(bit_width=act_bit_width, act_quant=act_quant),
             # pw-linear
-            qnn.QuantConv2d(hidden_dim, oup, 1, 1, 0, bias=False, 
+            qnn.QuantConv2d(hidden_dim, oup, 1, 1, 0, bias=False,
                             weight_bit_width=weight_bit_width, weight_quant=weight_quant),
             nn.BatchNorm2d(oup),
-        )
+        ]
+        # Resulting 'conv' Sequential indices:
+        #   expand_ratio != 1 (8 slots):  0 pw / 1 bn / 2 relu / 3 dw / 4 bn / 5 relu / 6 pwl / 7 bn
+        #   expand_ratio == 1 (5 slots):  0 dw / 1 bn / 2 relu / 3 pwl / 4 bn
+        self.conv = nn.Sequential(*layers)
 
     def forward(self, x):
         if self.use_res_connect:
@@ -76,7 +80,7 @@ class QuantMobileNetV2(nn.Module):
         self.config = [
             [1, 16, 1, 1],
             [6, 24, 2, 2],
-            [6, 32, 3, 1],
+            [6, 32, 3, 2],
             [6, 64, 4, 2],
             [6, 96, 3, 1],
             [6, 160, 3, 2],
@@ -90,7 +94,7 @@ class QuantMobileNetV2(nn.Module):
                             weight_bit_width=weight_bit_width, weight_quant=weight_quant)
         )
         self.features.append(nn.BatchNorm2d(32))
-        self.features.append(qnn.QuantReLU(bit_width=act_bit_width, act_quant=act_quant))
+        self.features.append(QuantReLU6(bit_width=act_bit_width, act_quant=act_quant))
 
         # Inverted Residual Blocks
         in_channels = 32
@@ -110,7 +114,7 @@ class QuantMobileNetV2(nn.Module):
                             weight_bit_width=weight_bit_width, weight_quant=weight_quant)
         )
         self.features.append(nn.BatchNorm2d(1280))
-        self.features.append(qnn.QuantReLU(bit_width=act_bit_width, act_quant=act_quant))
+        self.features.append(QuantReLU6(bit_width=act_bit_width, act_quant=act_quant))
 
         self.features = nn.Sequential(*self.features)
 

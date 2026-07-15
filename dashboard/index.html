@@ -250,6 +250,7 @@
 <div class="controls-panel" id="controlsPanel" data-enabled="false">
   <div class="head">
     ⚙ Controls
+    <span class="badge suspended" id="pausedBadge" style="display:none">PAUSED</span>
     <span class="warn">— these mutate the live run. Changes apply at the next safe boundary (step/epoch), not instantly.</span>
     <span class="toast" id="controlsToast"></span>
   </div>
@@ -272,6 +273,16 @@
     </div>
 
     <div class="control-box">
+      <h3>LR scheduler (plateau)</h3>
+      <div class="row">
+        <input type="number" id="schedPatience" placeholder="patience" min="0" step="1" style="width:90px">
+        <input type="number" id="schedFactor" placeholder="factor" min="0" max="1" step="0.05" style="width:90px">
+        <button class="act" id="schedApply">Apply</button>
+      </div>
+      <div class="hint" id="schedPlateauHint">ReduceLROnPlateau patience/factor. Applied at epoch end.</div>
+    </div>
+
+    <div class="control-box">
       <h3>Extend run</h3>
       <div class="row">
         <input type="number" id="addEpochsInput" placeholder="+ epochs" min="1" step="1">
@@ -282,15 +293,81 @@
 
     <div class="control-box">
       <h3>Reload best checkpoint</h3>
-      <div class="hint" style="margin-top:0">Destructive: replaces current model weights with the top-1 checkpoint (weights only; optimizer state not restored). Applied at epoch end.</div>
+      <div class="hint" style="margin-top:0">Destructive: replaces current model weights with the best checkpoint for the chosen criterion. Applied at epoch end.</div>
+      <div class="row" style="margin-top:8px">
+        <select id="reloadCriterion" title="which best-checkpoint pool to reload"></select>
+        <label class="confirm" title="weights only (safe) vs also restore optimizer + scheduler">
+          <input type="checkbox" id="reloadWeightsOnly" checked> weights only
+        </label>
+      </div>
       <div class="row" style="margin-top:8px">
         <label class="confirm"><input type="checkbox" id="reloadConfirm"> I understand</label>
         <button class="danger" id="reloadApply">Reload best</button>
       </div>
     </div>
 
+    <div class="control-box">
+      <h3>Run control</h3>
+      <div class="row">
+        <button class="act" id="pauseApply">Pause</button>
+        <button class="act" id="resumeApply">Resume</button>
+        <button id="endEpochApply">End epoch early</button>
+      </div>
+      <div class="row" style="margin-top:8px">
+        <label class="confirm"><input type="checkbox" id="haltConfirm"> I understand</label>
+        <button class="danger" id="haltApply">Halt after epoch</button>
+      </div>
+      <div class="hint">Pause blocks at the next step (resume continues). End-epoch-early skips to validation. Halt stops the run after this epoch — not resumable.</div>
+    </div>
+
+    <div class="control-box">
+      <h3>QAT — quantizer group</h3>
+      <div class="row">
+        <label style="font-size:11.5px;color:var(--text-muted)">group</label>
+        <select id="qatGroup">
+          <option value="all">all</option>
+          <option value="weights">weights</option>
+          <option value="biases">biases</option>
+          <option value="activations">activations</option>
+        </select>
+      </div>
+      <div class="row" style="margin-top:8px">
+        <select id="annealMode">
+          <option value="ramp">ramp α 0→1 over n</option>
+          <option value="absolute">set α = X</option>
+          <option value="step">set step = X</option>
+        </select>
+        <input type="number" id="annealValue" step="0.01" placeholder="n or X" style="width:90px">
+        <button class="act" id="annealApply">Apply</button>
+      </div>
+      <div class="hint">Annealing → next step. ramp: integer n≥1; absolute/step: 0–1.</div>
+      <div class="row" style="margin-top:8px">
+        <label class="confirm"><input type="checkbox" id="qatConfirm"> I understand</label>
+        <button id="recalApply">Recalibrate</button>
+        <button class="danger" id="disableApply">Disable quant</button>
+      </div>
+      <div class="hint">Recalibrate + Disable → epoch end, need confirm. Disable sets α=0 for the group (e.g. disable activations, keep weights quantized).</div>
+    </div>
+
+    <div class="control-box">
+      <h3>Set LSB (per quantizer)</h3>
+      <div class="row">
+        <select id="lsbQuantId" title="fixed-point quantizers only"></select>
+        <input type="number" id="lsbValue" step="1" placeholder="lsb" style="width:74px">
+        <button class="act" id="lsbApply">Set LSB</button>
+      </div>
+      <div class="hint">Fixed-point only. Applied at the next step; does not recalibrate. See the quantizer table below for current LSBs.</div>
+    </div>
+
   </div>
 </div>
+
+<!-- ── Quantizer inspector (read-only) ──────────────────────────────── -->
+<div class="section-title">Quantizers <span class="cb-meta" id="rolesSummary"></span></div>
+<table id="quantTable">
+  <thead><tr><th>id</th><th>role</th><th>α</th><th>LSB</th><th>calibrated</th></tr></thead>
+  <tbody><tr><td colspan="5">—</td></tr></tbody>
+</table>
 
 <!-- ── Callbacks + command/event log ────────────────────────────────── -->
 <div class="two-col" style="margin-top:12px">
@@ -403,6 +480,9 @@ async function poll() {
       getJSON(`/api/v1/metrics?since_step=${state.sinceStep}&since_epoch=${state.sinceEpoch}`),
     ]);
     state.status = status;
+    // Control availability comes from /status, NOT from the callbacks list:
+    // V2 has control enabled but an empty callbacks list.
+    state.controlEnabled = status.control_enabled === true;
     for (const s of metrics.steps) { state.steps.push(s); state.sinceStep = s.step; }
     for (const e of metrics.epochs) { state.epochs.push(e); state.sinceEpoch = e.epoch; }
     state.failures = 0;
@@ -412,6 +492,7 @@ async function poll() {
     renderStatus(); renderCharts();
     if (state.steps.length === metrics.steps.length || metrics.epochs.length) fetchCheckpoints();
     fetchControlState();
+    fetchQuantizers();
   } catch (err) {
     state.failures += 1;
     if (state.failures >= 2) {
@@ -437,6 +518,57 @@ async function fetchCheckpoints() {
   } catch { /* keep last table */ }
 }
 
+async function fetchQuantizers() {
+  try {
+    const [q, roles] = await Promise.all([
+      getJSON("/api/v1/quantizers"),
+      getJSON("/api/v1/quantizers/roles"),
+    ]);
+    renderQuantizers(q.quantizers || [], (roles && roles.histogram) || {});
+  } catch { /* keep last render */ }
+}
+
+function renderQuantizers(quants, hist) {
+  const parts = ["weight", "bias", "activation", "unknown"]
+    .filter((k) => hist[k]).map((k) => `${hist[k]} ${k}`);
+  let summary = quants.length ? `— ${parts.join(" · ")} · ${hist.total} total` : "";
+  if (hist.unknown) summary += "  ⚠ unknown-role quantizers present (group ops skip them)";
+  $("rolesSummary").textContent = summary;
+
+  const rows = quants.map((q) => {
+    const tr = document.createElement("tr");
+    const cells = [
+      q.quant_id,
+      q.role,
+      q.alpha != null ? q.alpha.toFixed(3) : "—",
+      q.lsb != null ? String(q.lsb) : "—",
+      q.search_done == null ? "—" : (q.search_done ? "yes" : "no"),
+    ];
+    cells.forEach((t, i) => {
+      const td = document.createElement("td");
+      td.textContent = t;
+      if (i === 2 || i === 3) td.className = "num";
+      tr.appendChild(td);
+    });
+    return tr;
+  });
+  if (rows.length) $("quantTable").tBodies[0].replaceChildren(...rows);
+
+  // Populate the LSB dropdown from fixed-point quantizers (those exposing lsb).
+  const sel = $("lsbQuantId");
+  const ids = quants.filter((q) => q.lsb != null).map((q) => q.quant_id);
+  const have = Array.from(sel.options).map((o) => o.value);
+  if (ids.join("|") !== have.join("|")) {
+    const keep = sel.value;
+    sel.replaceChildren(...ids.map((id) => {
+      const o = document.createElement("option");
+      o.value = id; o.textContent = id;
+      return o;
+    }));
+    if (ids.includes(keep)) sel.value = keep;
+  }
+}
+
 async function fetchControlState() {
   try {
     const [callbacks, commands, events] = await Promise.all([
@@ -444,7 +576,8 @@ async function fetchControlState() {
       getJSON("/api/v1/commands"),
       getJSON(`/api/v1/events?since_id=${state.sinceEventId}`),
     ]);
-    state.controlEnabled = (callbacks.callbacks || []).length > 0;
+    // state.controlEnabled is set from /status (poll); do NOT derive it from
+    // the callbacks list — V2 has control but no callbacks.
     for (const e of events.events) { state.events.push(e); state.sinceEventId = e.id; }
     state.commands = commands.commands || [];
     renderCallbacks(callbacks.callbacks || []);
@@ -526,12 +659,44 @@ function renderStatus() {
     $("bestVal").textContent = fmtSci(best.value);
     $("bestSub").textContent = `epoch ${best.epoch} (${best.mode})`;
   }
+
+  // Plateau scheduler: show current patience/factor, or that there is none.
+  const ps = st.plateau_scheduler;
+  $("schedPlateauHint").textContent = ps
+    ? `Current: patience=${ps.patience}, factor=${ps.factor}. Applied at epoch end.`
+    : "No ReduceLROnPlateau on this run (set reduce_lr_on_plateau=True).";
+
+  // Pause state: badge + which of Pause/Resume is actionable.
+  const paused = st.paused === true;
+  $("pausedBadge").style.display = paused ? "" : "none";
+  const on = state.controlEnabled;
+  $("pauseApply").disabled = !on || paused;
+  $("resumeApply").disabled = !on || !paused;
+  $("endEpochApply").disabled = !on || paused;
+  $("haltApply").disabled = !on || st.halt_requested === true;
 }
 
 /* ────────────────────── checkpoints table ────────────────────── */
 
 function renderCheckpoints(data) {
   $("ckptMetricHead").textContent = data.monitor_metric || "metric";
+
+  // Populate the reload-criterion dropdown from the pools that actually exist:
+  // "best" (primary monitor) + one "best_<metric>" per tracked metric.
+  const sel = $("reloadCriterion");
+  const metrics = data.pool_metrics || [];
+  const wanted = ["best", ...metrics.map((m) => "best_" + m)];
+  const have = Array.from(sel.options).map((o) => o.value);
+  if (wanted.join("|") !== have.join("|")) {
+    const keep = sel.value;
+    sel.replaceChildren(...wanted.map((v) => {
+      const o = document.createElement("option");
+      o.value = v;
+      o.textContent = v === "best" ? `best (primary: ${data.monitor_metric || "?"})` : v;
+      return o;
+    }));
+    if (wanted.includes(keep)) sel.value = keep;
+  }
   const rows = (data.checkpoints || []).map((c) => {
     const tr = document.createElement("tr");
     const cells = [
@@ -566,7 +731,10 @@ function el(tag, cls, text) {
 function renderCallbacks(callbacks) {
   const list = $("cbList");
   if (!callbacks.length) {
-    list.replaceChildren(el("div", "cb-meta", "control API not enabled for this run"));
+    const msg = state.controlEnabled
+      ? "no toggleable callbacks (V2 trainer)"
+      : "control API not enabled for this run";
+    list.replaceChildren(el("div", "cb-meta", msg));
     return;
   }
   list.replaceChildren(...callbacks.map((cb) => {
@@ -640,6 +808,13 @@ async function postControl(path, body) {
     if (resp.status === 202) {
       toast(`queued ${data.type} (${data.id.slice(0, 6)}…) — ${data.apply_at} boundary`, false);
       fetchControlState();  // reflect pending immediately
+    } else if (resp.ok) {
+      // Direct actions (pause/resume) return 200, not a queued command.
+      const msg = data.paused ? "paused — training halts at the next step"
+                : data.resumed ? "resumed"
+                : "applied";
+      toast(msg, false);
+      poll();               // refresh status/paused state immediately
     } else {
       toast(data.error || `HTTP ${resp.status}`, true);
     }
@@ -665,17 +840,76 @@ function addEpochs() {
 }
 function reloadBest() {
   if (!$("reloadConfirm").checked) return toast("tick the confirm box first", true);
-  postControl("/api/v1/control/reload-best", { confirm: true });
+  const criterion = $("reloadCriterion").value || "best";
+  const weights_only = $("reloadWeightsOnly").checked;
+  postControl("/api/v1/control/reload-best", { confirm: true, criterion, weights_only });
   $("reloadConfirm").checked = false;
+}
+function haltRun() {
+  if (!$("haltConfirm").checked) return toast("tick the confirm box first", true);
+  postControl("/api/v1/control/halt", { confirm: true });
+  $("haltConfirm").checked = false;
 }
 function toggleCallback(name, enabled) {
   postControl(`/api/v1/control/callbacks/${encodeURIComponent(name)}`, { enabled });
+}
+function applyAnnealing() {
+  const group = $("qatGroup").value;
+  const mode = $("annealMode").value;
+  const raw = $("annealValue").value;
+  const body = { group, mode };
+  if (mode === "ramp") {
+    const n = parseInt(raw, 10);
+    if (!Number.isInteger(n) || n < 1) return toast("ramp needs an integer n ≥ 1", true);
+    body.n = n;
+  } else {
+    const x = parseFloat(raw);
+    if (!Number.isFinite(x) || x < 0 || x > 1) return toast("enter a value in [0, 1]", true);
+    body[mode === "absolute" ? "alpha" : "step"] = x;
+  }
+  postControl("/api/v1/control/quant/annealing", body);
+}
+function recalGroup() {
+  if (!$("qatConfirm").checked) return toast("tick the confirm box first", true);
+  postControl("/api/v1/control/quant/recalibrate", { group: $("qatGroup").value, confirm: true });
+  $("qatConfirm").checked = false;
+}
+function disableGroup() {
+  if (!$("qatConfirm").checked) return toast("tick the confirm box first", true);
+  postControl("/api/v1/control/quant/disable", { group: $("qatGroup").value, confirm: true });
+  $("qatConfirm").checked = false;
+}
+function setLsb() {
+  const qid = $("lsbQuantId").value;
+  const lsb = parseInt($("lsbValue").value, 10);
+  if (!qid) return toast("pick a quantizer", true);
+  if (!Number.isInteger(lsb)) return toast("enter an integer LSB", true);
+  postControl("/api/v1/control/quant/lsb", { quant_id: qid, lsb });
+}
+function setSchedParams() {
+  const body = {};
+  const p = parseInt($("schedPatience").value, 10);
+  const f = parseFloat($("schedFactor").value);
+  if (Number.isInteger(p)) body.patience = p;
+  if (Number.isFinite(f)) body.factor = f;
+  if (!("patience" in body) && !("factor" in body))
+    return toast("enter patience and/or factor", true);
+  postControl("/api/v1/control/scheduler-params", body);
 }
 
 $("lrApply").onclick = setLR;
 $("wdApply").onclick = setWD;
 $("addEpochsApply").onclick = addEpochs;
 $("reloadApply").onclick = reloadBest;
+$("pauseApply").onclick = () => postControl("/api/v1/control/pause", {});
+$("resumeApply").onclick = () => postControl("/api/v1/control/resume", {});
+$("endEpochApply").onclick = () => postControl("/api/v1/control/end-epoch-early", {});
+$("haltApply").onclick = haltRun;
+$("schedApply").onclick = setSchedParams;
+$("annealApply").onclick = applyAnnealing;
+$("recalApply").onclick = recalGroup;
+$("disableApply").onclick = disableGroup;
+$("lsbApply").onclick = setLsb;
 $("resumeSched").onclick = () =>
   postControl("/api/v1/control/hyperparams", { suspend_scheduler: false });
 

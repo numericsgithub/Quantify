@@ -74,12 +74,12 @@ trainer = Trainer(
 tracker = trainer.fit()
 ```
 
-## 📊 Live Training Dashboard (read-only)
+## 📊 Live Training Dashboard
 
-Every training run can expose a **read-only HTTP monitoring API** from inside the
+Every training run can expose an **HTTP monitoring + control API** from inside the
 training process, and a separate lightweight web UI visualizes it live. Works with
-both `Trainer` (V1) and `QATTrainerV2`. The API is versioned under `/api/v1/` so
-control endpoints can be added later without redesign.
+both `Trainer` (V1) and `QATTrainerV2` — **`QATTrainerV2` is the control target**;
+the read-only monitoring works on both. The API is versioned under `/api/v1/`.
 
 ### 1. Enable the API on a run
 
@@ -107,10 +107,13 @@ python dashboard/serve.py --port 8080 --api http://127.0.0.1:8765
 Open `http://127.0.0.1:8080/`. The UI polls the API incrementally (`?since_step=`),
 shows train loss (with smoothing), validation accuracy vs. a configurable target,
 LR over time, the current QAT phase with quantizer progress, ETA, the top-K
-checkpoint list, a **Controls panel**, the callback list, and an audit log. If the
-API becomes unreachable (run finished or crashed), the UI keeps the last known
-state and shows a *disconnected* indicator. The API base URL can be switched in the
-page header to watch multiple concurrent runs.
+checkpoint list, a **Controls panel** (LR/WD, add-epochs, reload-by-criterion,
+pause/resume/end-epoch/halt, and **group-targeted QAT controls** — annealing,
+recalibrate, disable, set-LSB), a **quantizer inspector** table (id / role / α /
+LSB / calibrated, with the role histogram), the callback list, and an audit log.
+If the API becomes unreachable (run finished or crashed), the UI keeps the last
+known state and shows a *disconnected* indicator. The API base URL can be switched
+in the page header to watch multiple concurrent runs.
 
 For a remote GPU box, either set `api_host="0.0.0.0"` or tunnel the port:
 `ssh -L 8765:localhost:8765 user@gpu-box`.
@@ -121,12 +124,15 @@ For a remote GPU box, either set `api_host="0.0.0.0"` or tunnel the port:
 curl http://127.0.0.1:8765/api/v1/health           # {"ok": true}
 curl http://127.0.0.1:8765/api/v1/status           # run state, phase (float_warmup/qat),
                                                    # epoch, step, ETA, LR, best metric, pid,
-                                                   # scheduler_active / scheduler_suspended
+                                                   # scheduler_active / scheduler_suspended,
+                                                   # control_enabled, paused, halt_requested
 curl http://127.0.0.1:8765/api/v1/config           # effective TrainerConfig as JSON
 curl http://127.0.0.1:8765/api/v1/metrics          # full step + epoch history
 curl "http://127.0.0.1:8765/api/v1/metrics?since_step=500&since_epoch=10"   # increments only
 curl http://127.0.0.1:8765/api/v1/metrics/latest   # newest values, cheap to poll
 curl http://127.0.0.1:8765/api/v1/checkpoints      # top-K checkpoints (epoch, metric, path)
+curl http://127.0.0.1:8765/api/v1/quantizers       # per-quantizer inspector: id, role, alpha, lsb
+curl http://127.0.0.1:8765/api/v1/quantizers/roles # per-role quantizer histogram + unknown count
 curl http://127.0.0.1:8765/api/v1/callbacks        # registered loop callbacks + enabled state
 curl http://127.0.0.1:8765/api/v1/events           # audit log (phase, checkpoint, commands)
 curl http://127.0.0.1:8765/api/v1/commands         # control command history + statuses
@@ -151,8 +157,9 @@ then marks it `applied` or `failed`. Poll `/commands/<id>` to see it take effect
 never assume instant success.
 
 ```bash
-# Change learning rate (applied at the next step). If an LR scheduler is active it
+# Change learning rate (applied at the next step). If any LR scheduler is active it
 # is suspended so it doesn't overwrite the override; resume with suspend_scheduler=false.
+# On V2 this suspends BOTH a per-step scheduler and ReduceLROnPlateau.
 curl -X POST http://127.0.0.1:8765/api/v1/control/hyperparams \
      -H 'Content-Type: application/json' -d '{"lr": 1e-4}'
 curl -X POST http://127.0.0.1:8765/api/v1/control/hyperparams \
@@ -160,23 +167,75 @@ curl -X POST http://127.0.0.1:8765/api/v1/control/hyperparams \
 curl -X POST http://127.0.0.1:8765/api/v1/control/hyperparams \
      -H 'Content-Type: application/json' -d '{"suspend_scheduler": false}'   # resume scheduler
 
-# Enable/disable a registered callback (core ones like optimizer_step are rejected)
-curl -X POST http://127.0.0.1:8765/api/v1/control/callbacks/scale_factor_tracking \
-     -H 'Content-Type: application/json' -d '{"enabled": false}'
-
 # Extend the epoch budget live (status/ETA/progress update to the new total)
 curl -X POST http://127.0.0.1:8765/api/v1/control/add-epochs \
      -H 'Content-Type: application/json' -d '{"count": 10}'
 
-# Reload the top-1 checkpoint's weights (destructive; weights only, no optimizer
-# state; requires explicit confirm). Applied at the epoch boundary.
+# Reload a best checkpoint (destructive; requires confirm). Applied at the epoch
+# boundary. criterion selects the pool: "best" (primary monitor) or
+# "best_<metric>" for a secondary pool (e.g. best_train_loss). weights_only
+# defaults true (safer: model weights only); false also restores optimizer/scheduler.
 curl -X POST http://127.0.0.1:8765/api/v1/control/reload-best \
+     -H 'Content-Type: application/json' \
+     -d '{"confirm": true, "criterion": "best_val_acc", "weights_only": true}'
+
+# Pause / resume (pause blocks the loop at the next step boundary; both are
+# applied immediately, NOT queued). Returns 200 with {paused/resumed: true}.
+curl -X POST http://127.0.0.1:8765/api/v1/control/pause  -d '{}'
+curl -X POST http://127.0.0.1:8765/api/v1/control/resume -d '{}'
+
+# End the current epoch early, then run validation (applied at the next step)
+curl -X POST http://127.0.0.1:8765/api/v1/control/end-epoch-early -d '{}'
+
+# Halt after the current epoch (NOT resumable; requires confirm). Epoch boundary.
+curl -X POST http://127.0.0.1:8765/api/v1/control/halt \
      -H 'Content-Type: application/json' -d '{"confirm": true}'
+
+# Enable/disable a registered loop behavior (both V1 and V2). Core behaviors
+# (optimizer_step, metrics_logging) are listed but reject toggles. Epoch boundary.
+curl -X POST http://127.0.0.1:8765/api/v1/control/callbacks/scale_factor_tracking \
+     -H 'Content-Type: application/json' -d '{"enabled": false}'
+
+# Edit the live ReduceLROnPlateau (patience / factor / min_lr). Epoch boundary;
+# only when the run was built with reduce_lr_on_plateau=True.
+curl -X POST http://127.0.0.1:8765/api/v1/control/scheduler-params \
+     -H 'Content-Type: application/json' -d '{"patience": 8, "factor": 0.3}'
 ```
 
-Control is currently wired into the V1 `Trainer`. The command-queue design (and the
-gotchas it handles — scheduler suspension, the `add-epochs` loop change, allowlisted
-callback toggles) is documented in
+**QAT group controls** (target `group ∈ {weights, biases, activations, all}`; the
+role histogram at `/quantizers/roles` is the safety net — a group op reports any
+`unknown`-role quantizers it could not classify and did NOT touch):
+
+```bash
+# Annealing (step boundary). mode is kept distinct on purpose:
+#   ramp     -> alpha 0->1 over n forward passes
+#   absolute -> set alpha=X now (leaves the per-step increment)
+#   step     -> set the per-forward increment only
+curl -X POST http://127.0.0.1:8765/api/v1/control/quant/annealing \
+     -H 'Content-Type: application/json' -d '{"group": "weights", "mode": "ramp", "n": 200}'
+curl -X POST http://127.0.0.1:8765/api/v1/control/quant/annealing \
+     -H 'Content-Type: application/json' -d '{"group": "all", "mode": "absolute", "alpha": 1.0}'
+
+# Deactivate quantization for a group — e.g. keep weights quantized, leave
+# activations in float (alpha=0, step=0). Epoch boundary; requires confirm.
+curl -X POST http://127.0.0.1:8765/api/v1/control/quant/disable \
+     -H 'Content-Type: application/json' -d '{"group": "activations", "confirm": true}'
+
+# Recalibrate a group — clears search_done so each quantizer re-runs its LSB
+# search on its NEXT forward (lazy; calibrates against the next batch). Epoch.
+curl -X POST http://127.0.0.1:8765/api/v1/control/quant/recalibrate \
+     -H 'Content-Type: application/json' -d '{"group": "all", "confirm": true}'
+
+# Set the fixed-point LSB for ONE quantizer, addressed by quant_id (step). List
+# quantizers (id, role, alpha, lsb) via GET /api/v1/quantizers.
+curl -X POST http://127.0.0.1:8765/api/v1/control/quant/lsb \
+     -H 'Content-Type: application/json' -d '{"quant_id": "conv1_weight", "lsb": -5}'
+```
+
+Control is wired into **both** trainers through one shared `ControlManager`
+command queue; on `QATTrainerV2` the interactive console and the HTTP API feed the
+**same** queue. The command-queue design (and the gotchas it handles — dual-scheduler
+suspension, the `add-epochs` loop change, the V2 callback registry) is documented in
 [docs/llm/skills/dashboard-control-command-queue.md](docs/llm/skills/dashboard-control-command-queue.md).
 
 ## 🔢 Custom Quantizers & ONNX Export

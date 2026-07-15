@@ -12,6 +12,27 @@
 - Pass your model, optimizer, and data loaders directly to `Trainer(config=..., model=..., optimizer=..., train_loader=..., val_loader=...)`.
 - Let the harness handle logging, checkpointing, and metric tracking. Only override `Trainer` methods if you have highly specific requirements.
 
+## 2. `freeze_bn()` is undone by `model.train()` — must re-apply every epoch
+
+**When this happens:** You call `freeze_bn(model)` once (e.g. in `_activate_qat()`) and expect BN to stay frozen for the entire training run.
+
+**The Problem:** `_run_epoch()` calls `self.model.train(is_train)` at the very start of each epoch. PyTorch's `Module.train()` is **recursive** — it calls `.train()` on every submodule, setting every BN layer back to training mode. The single `freeze_bn()` call is fully undone by the next epoch's `model.train(True)`. This means `freeze_bn_at_qat=True` was silently not working during training epochs.
+
+**Consequence:** BN running statistics are updated throughout training. When fine-tuning at very low LR with heavy augmentation (MixUp, CutMix, RandAugment), the batch statistics are noisier than the clean-data distributions used to build the original running stats. After a full epoch of augmented batches, the running stats drift, and val_acc regresses slightly even though the weights barely changed.
+
+**The Fix:** Re-apply `freeze_bn()` **after** `model.train(True)` at the start of every training epoch. In `_run_epoch()`:
+```python
+self.model.train(is_train)
+if is_train and (self.config.freeze_bn or
+                 (self._qat_active and self.config.qat.freeze_bn_at_qat)):
+    freeze_bn(self.model)
+```
+
+**How to enable for fine-tuning:** Pass `freeze_bn=True` to `TrainerConfigV2`, or use `--freeze-bn` in `train_imagenet_float.py`. Always use this when:
+- Fine-tuning a converged checkpoint at LR ≤ 1e-5
+- Heavy augmentation is active (mixup, cutmix, reprob all on by default in the float script)
+- You expect val_acc to improve, not drift downward
+
 ## 2. UnicodeEncodeError on Windows (cp1252) from Box-Drawing Characters
 **When this happens:** Running the harness on Windows, especially with stdout redirected to a file (e.g. background runs, CI). Crashes with `UnicodeEncodeError: 'charmap' codec can't encode characters` the moment `log_hardware_info()` or an epoch banner prints.
 **The Problem:** The harness prints banners with box-drawing characters (`─`, `═`). Windows defaults to the cp1252 locale encoding for redirected stdout and for `open()` without an explicit `encoding=`, and cp1252 cannot represent those characters. `ExperimentLogger.log_text` writes with `encoding="utf-8"` explicitly, but `print()` output still goes through the console encoding.

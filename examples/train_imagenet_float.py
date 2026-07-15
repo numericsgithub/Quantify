@@ -51,7 +51,9 @@ from quantizers.fixedpoint_per_tensor import (
 from training_harness.trainer_v2 import QATTrainerV2
 from training_harness.config_v2 import TrainerConfigV2, QATScheduleConfigV2
 from training_harness.config import CheckpointConfig
+from training_harness.schedulers import WarmupCosineScheduler
 from utils.weight_mapping import load_timm_weights
+from utils.run_utils import env_default, next_run_dir, setup_output_tee
 
 
 # ---------------------------------------------------------------------------
@@ -127,9 +129,10 @@ def parse_args() -> argparse.Namespace:
     d.add_argument(
         "--data-dir",
         type=str,
-        default=None,
+        default=env_default("IMAGENET_DALI_PATH"),
         metavar="PATH",
-        help="ImageFolder root (train/ and val/). Uses DALI when set.",
+        help="ImageFolder root (train/ and val/). Uses DALI when set. "
+             "Defaults to $IMAGENET_DALI_PATH if set.",
     )
     d.add_argument("--hf-dataset", type=str, default="ILSVRC/imagenet-1k")
     d.add_argument("--num-workers", type=int, default=20)
@@ -167,6 +170,10 @@ def parse_args() -> argparse.Namespace:
                    help="Random Erasing probability (0 = off)")
     t.add_argument("--ema-decay", type=float, default=0.9999,
                    help="EMA shadow model decay (0 = off)")
+    t.add_argument("--freeze-bn", action="store_true", default=False,
+                   help="Freeze BatchNorm running stats and affine params throughout "
+                        "training. Prevents BN stat drift from heavy augmentation "
+                        "causing val_acc regression when fine-tuning at low LR.")
     t.add_argument(
         "--repeat-aug",
         type=int,
@@ -185,14 +192,46 @@ def parse_args() -> argparse.Namespace:
     # ---- LR schedule -------------------------------------------------------
     s = p.add_argument_group("lr schedule")
     s.add_argument(
-        "--reduce-lr-patience", type=int, default=5,
+        "--cosine-lr",
+        action="store_true",
+        default=False,
+        help="Use a per-step linear-warmup + cosine-annealing LR schedule "
+             "instead of ReduceLROnPlateau. Mutually exclusive with the "
+             "--reduce-lr-* options: cosine steps every batch and would "
+             "overwrite any plateau-triggered reduction, so ReduceLROnPlateau "
+             "is disabled when this is set.",
+    )
+    s.add_argument(
+        "--cosine-warmup-frac", type=float, default=0.1,
+        help="Fraction of total steps spent in linear warmup (--cosine-lr only)",
+    )
+    s.add_argument(
+        "--cosine-eta-min", type=float, default=1e-6,
+        help="Final LR at the end of cosine annealing (--cosine-lr only)",
+    )
+    s.add_argument(
+        "--reduce-lr-patience", type=int, default=20,
         help="ReduceLROnPlateau: epochs of no improvement before reducing LR",
     )
     s.add_argument("--reduce-lr-factor", type=float, default=0.5)
     s.add_argument("--reduce-lr-min-lr", type=float, default=1e-8)
+    s.add_argument(
+        "--reduce-lr-metric", type=str, default="val_loss",
+        help="Metric monitored by ReduceLROnPlateau (e.g. val_loss, val_acc)",
+    )
 
     # ---- Output ------------------------------------------------------------
-    p.add_argument("--output-dir", type=str, default="output/imagenet_float")
+    p.add_argument(
+        "--output-dir", type=str, default=None,
+        help="Output directory. Defaults to output/imagenet_float_<model> "
+             "(e.g. output/imagenet_float_resnet18).",
+    )
+    p.add_argument(
+        "--new-run-dir",
+        action="store_true",
+        help="Auto-increment the output directory if it already exists "
+             "(output/imagenet_float_<model> → output/imagenet_float_<model>_1 → …).",
+    )
     p.add_argument("--experiment-name", type=str, default=None)
 
     # ---- Dry-run -----------------------------------------------------------
@@ -200,6 +239,8 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--dry-run-batches", type=int, default=10)
 
     args = p.parse_args()
+    if args.output_dir is None:
+        args.output_dir = f"output/imagenet_float_{args.model}"
     _print_args(p, args)
     return args
 
@@ -299,14 +340,18 @@ def _build_dataloaders(args):
 
 
 def _build_dali_loaders(args):
-    from utils.dali_pipeline import build_dali_loaders
+    from utils.dali_pipeline import build_dali_loaders, norm_for_model
+    mean, std = norm_for_model(args.model)
     print(f"Building DALI loaders from {args.data_dir} …")
+    print(f"  normalization for {args.model}: mean={mean} std={std}")
     train_loader, val_loader = build_dali_loaders(
         data_dir=args.data_dir,
         batch_size=args.batch_size,
         num_threads=args.dali_threads,
         randaugment_n=args.randaugment_n,
         randaugment_m=args.randaugment_m,
+        mean=mean,
+        std=std,
     )
     print(f"  train: {len(train_loader):,} batches   val: {len(val_loader):,} batches")
     return train_loader, val_loader
@@ -322,6 +367,11 @@ def _build_hf_loaders(args):
 
 def main() -> None:
     args = parse_args()
+
+    if args.new_run_dir:
+        args.output_dir = next_run_dir(args.output_dir)
+
+    setup_output_tee(args.output_dir)
 
     exp_name = args.experiment_name or f"{args.model}_float"
 
@@ -349,6 +399,23 @@ def main() -> None:
     optimizer = torch.optim.AdamW(
         model.parameters(), lr=args.lr, weight_decay=args.weight_decay,
     )
+
+    # A per-step cosine schedule and epoch-level ReduceLROnPlateau cannot
+    # coexist: the cosine scheduler steps every batch and would overwrite any
+    # plateau-triggered reduction on the next batch (see commit 0265040). When
+    # --cosine-lr is set we build the scheduler and turn the plateau one off.
+    scheduler = None
+    if args.cosine_lr:
+        total_steps = len(train_loader) * args.epochs
+        scheduler = WarmupCosineScheduler(
+            optimizer,
+            warmup_steps=int(total_steps * args.cosine_warmup_frac),
+            total_steps=total_steps,
+            eta_min=args.cosine_eta_min,
+        )
+        print(f"[lr-schedule] Cosine: total_steps={total_steps:,} "
+              f"warmup={int(total_steps * args.cosine_warmup_frac):,} "
+              f"eta_min={args.cosine_eta_min} (ReduceLROnPlateau disabled)")
 
     # QATScheduleConfigV2 with astronomically large warmup_epochs and patience
     # so the plateau detector never fires and QAT is never activated.
@@ -385,10 +452,11 @@ def main() -> None:
 
         early_stopping_patience=args.early_stopping_patience,
 
-        reduce_lr_on_plateau=True,
+        reduce_lr_on_plateau=not args.cosine_lr,
         reduce_lr_patience=args.reduce_lr_patience,
         reduce_lr_factor=args.reduce_lr_factor,
         reduce_lr_min_lr=args.reduce_lr_min_lr,
+        reduce_lr_metric=args.reduce_lr_metric,
 
         mixup=args.mixup,
         cutmix=args.cutmix,
@@ -398,6 +466,7 @@ def main() -> None:
         reprob=args.reprob,
         num_classes=args.num_classes,
         ema_decay=args.ema_decay,
+        freeze_bn=args.freeze_bn,
     )
 
     trainer = QATTrainerV2(
@@ -407,12 +476,19 @@ def main() -> None:
         train_loader=train_loader,
         val_loader=val_loader,
         loss_fn=nn.CrossEntropyLoss(),
-        scheduler=None,
+        scheduler=scheduler,
         onnx_dummy_input=torch.zeros(1, 3, 224, 224),
     )
 
     print(f"Checkpoint output: {os.path.abspath(config.checkpoint_dir)}")
     print(f"  Load in QAT script via:  --init-from-ptq {config.checkpoint_dir}/last.pt\n")
+
+    print("─" * 60)
+    print("  Pre-training evaluation (pretrained weights, quant off)")
+    print("─" * 60)
+    trainer.evaluate(val_loader,   label="val")
+    trainer.evaluate(train_loader, label="train")
+    print("─" * 60)
 
     tracker = trainer.fit()
 

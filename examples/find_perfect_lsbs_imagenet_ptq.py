@@ -798,171 +798,145 @@ def _build_quantized_model(
     return model, target_role, bw, prev_extra, prev_role_bit_widths
 
 
-def _disable_target_role_keep_others_active(mgr: QuantizerManager, target_role: str) -> None:
+def _set_search_states(
+    mgr: QuantizerManager, target_role: str, active_roles: set[str]
+) -> None:
     """
-    Disable target-role quantizers (about to be searched fresh this run);
-    keep any already-calibrated other-role quantizers (e.g. loaded via
-    --init-from-ckpt) fully active throughout this run.
+    Put every registered quantizer into the right state for a per-role LSB
+    search of `target_role`:
+
+      - target_role quantizers  -> disabled passthrough (alpha=0). The search
+        loop re-enables and calibrates them one at a time.
+      - quantizers whose role is in `active_roles` -> fully active (alpha=1,
+        no further annealing). These are already calibrated — an earlier role
+        in a weights->bias->activations sweep, or a role loaded via
+        --init-from-ckpt — so their effect is visible while target_role is
+        searched on top of them.
+      - every other quantizer   -> disabled passthrough.
+
+    search_done is forced True on the non-active quantizers so an eval-mode
+    forward (the baseline eval / the LSB sweeps) treats them as calibrated
+    passthrough instead of trying to calibrate mid-eval (which would raise in
+    eval mode). The search loop flips search_done back to False on each target
+    quantizer right before calibrating it.
+
+    Passing `active_roles` explicitly (rather than inferring "already active"
+    from search_done, as an earlier version did) is what makes a multi-role
+    search in a single process correct: disabled non-target quantizers get
+    search_done=True here, so a later role could no longer be distinguished
+    from a genuinely-calibrated one by search_done alone.
     """
-    for _, q in mgr.quantizers.items():
+    for q in mgr.quantizers.values():
         if q.quantizer_role == target_role:
             q.annealing_alpha.data.fill_(0.0)
             q.search_done.fill_(True)
-        elif q.search_done.item():
-            # Already calibrated from a previous run — keep it fully active.
+        elif q.quantizer_role in active_roles:
             q.annealing_alpha.data.fill_(1.0)
             q.annealing_alpha_step = 0.0
         else:
-            # Not the role being searched and not calibrated — disable safely.
             q.annealing_alpha.data.fill_(0.0)
             q.search_done.fill_(True)
 
 
-# ---------------------------------------------------------------------------
-# Main
-# ---------------------------------------------------------------------------
+def _disable_target_role_keep_others_active(mgr: QuantizerManager, target_role: str) -> None:
+    """Backward-compatible shim over _set_search_states that infers the roles to
+    keep active from search_done (any non-target quantizer already calibrated)
+    rather than taking them explicitly.
 
-def main() -> None:
-    args = parse_args()
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    Kept for the single-role --init-from-ckpt chaining path (and its tests):
+    there, the roles carried in from the checkpoint are exactly the ones with
+    search_done=True, so inferring is equivalent to passing them. The multi-role
+    in-process search instead calls _set_search_states with an explicit
+    active_roles set (see the module docstring on _set_search_states for why
+    that distinction matters).
+    """
+    active_roles = {
+        q.quantizer_role
+        for q in mgr.quantizers.values()
+        if q.quantizer_role != target_role and q.search_done.item()
+    }
+    _set_search_states(mgr, target_role, active_roles)
 
-    model, target_role, bw, prev_extra, prev_role_bit_widths = _build_quantized_model(args, device)
+
+def search_role_lsbs(
+    *,
+    model: nn.Module,
+    target_role: str,
+    bit_width: int,
+    val_loader,
+    loss_fn: nn.Module,
+    device: torch.device,
+    search_radius: int,
+    eval_batches: Optional[int],
+    out_dir: Path,
+    log_path: Path,
+    calib_images: torch.Tensor,
+    calib_labels: torch.Tensor,
+    optimizer: torch.optim.Optimizer,
+    active_roles: Optional[set] = None,
+) -> dict:
+    """
+    Greedy per-quantizer LSB search for every quantizer of `target_role`, in
+    forward-pass order, on an already-built model whose quantizers are
+    registered with the singleton QuantizerManager and have already been given
+    descriptive ids (_assign_descriptive_ids).
+
+    A forward pass must have run over the model before this is called so that
+    inference_sequence_id — hence forward-execution order — is defined; the
+    caller's baseline evaluation satisfies that.
+
+    active_roles: roles already calibrated that stay fully active throughout
+    (earlier roles in a weights->bias->activations sweep, or roles loaded via
+    --init-from-ckpt). Defaults to empty.
+
+    Writes per-quantizer plots + log entries under out_dir. Returns a summary
+    dict: {qids, display_names, calib_lsbs, selected_lsbs, accs, losses}.
+    """
+    mgr = QuantizerManager()
+    mgr.quantization_start_gap = 2   # each quantizer at position N gates for N*2
+                                     # steps before activating — cleared naturally
+                                     # by prior calibration loops
+    mgr.diagnostics_dir = str(out_dir)
+    active_roles = set(active_roles or ())
+
+    _set_search_states(mgr, target_role, active_roles)
 
     # ── Identify quantizers to optimise (in forward-pass order) ─────────────
-    mgr = QuantizerManager()
-    target_items: list[tuple[str, BaseQuantizer]] = [
-        (qid, q) for qid, q in mgr.quantizers.items()
-        if q.quantizer_role == target_role
-    ]
-    if not target_items:
-        print(f"[ERROR] No {target_role} quantizers found in this model. "
-              "Check model construction arguments.")
-        return
-
-    n_total = len(target_items)
-
-    # ── Manager-level PTQ settings ───────────────────────────────────────────
-    mgr.quantization_start_gap = 2   # each quantizer at position N gates for N*2 steps before
-                                     # activating — cleared naturally by prior calibration loops
-
-    _disable_target_role_keep_others_active(mgr, target_role)
-
-    # ── Output directory & log ───────────────────────────────────────────────
-    exp_name = (args.experiment_name
-                or f"{args.model}_{args.mode}_{bw}b_r{args.search_radius}")
-    out_dir  = Path(args.output_dir) / exp_name
-    out_dir.mkdir(parents=True, exist_ok=True)
-    print(f"Output directory : {out_dir.resolve()}")
-    log_path = out_dir / "ptq_search.log"
-
-    with open(log_path, "w") as fh:
-        fh.write(
-            f"PTQ LSB Search Log\n"
-            f"{'='*68}\n"
-            f"  Model          : {args.model}\n"
-            f"  Mode           : {args.mode}  ({bw}b)\n"
-            f"  Init from ckpt : {args.init_from_ckpt or 'none'}"
-            f"{f' (roles already calibrated: {prev_role_bit_widths})' if prev_role_bit_widths else ''}\n"
-            f"  Pretrained     : {args.pretrained}\n"
-            f"  Search radius  : ±{args.search_radius}\n"
-            f"  Eval batches   : {args.eval_batches or 'full'}\n"
-            f"  Quant gap      : {mgr.quantization_start_gap}\n"
-            f"  N quantizers   : {n_total}\n"
-            f"  Device         : {device}\n"
-            f"  Started        : {datetime.now()}\n"
-            f"{'='*68}\n"
-        )
-
-    print(f"\n{'═'*68}")
-    print(f"  PTQ LSB Search — {exp_name}")
-    print(f"  Model: {args.model}  |  Mode: {args.mode}  |  {bw}b")
-    print(f"  Radius: ±{args.search_radius}  |  Gap: {mgr.quantization_start_gap}"
-          f"  |  Eval: {args.eval_batches or 'full'} batches")
-    print(f"  Quantizers to search: {n_total}")
-    print(f"{'═'*68}\n")
-
-    # ── Data & optimiser ─────────────────────────────────────────────────────
-    print("Loading data …")
-    train_loader, val_loader = _build_dataloaders(args)
-    loss_fn = nn.CrossEntropyLoss()
-
-    # Near-zero LR: weights barely move, but the training-mode forward+backward
-    # pass is what allows quantizer calibration to fire (base_quantizer guards
-    # on self.training before running _calibrate).
-    optimizer = torch.optim.SGD(model.parameters(), lr=1e-10)
-
-    # ── Baseline evaluation (all quantizers disabled = float precision) ───────
-    print("Baseline evaluation (no quantization) …")
-    baseline_loss, baseline_acc = _evaluate(model, val_loader, loss_fn, device,
-                                             args.eval_batches, label="baseline")
-    print(f"  val_loss={baseline_loss:.4f}  val_acc={baseline_acc:.2f}%\n")
-
-    with open(log_path, "a") as fh:
-        fh.write(
-            f"\nBaseline (no quantization):\n"
-            f"  val_loss={baseline_loss:.6f}  val_acc={baseline_acc:.3f}%\n"
-        )
-
-    # The baseline forward pass above is the first time every quantizer that is
-    # actually wired into the model's execution graph runs forward() — that's
-    # when inference_sequence_id flips from -1 to a real value (base_quantizer.py).
-    # Brevitas's injector machinery also instantiates throwaway quantizer objects
-    # while resolving each injector; those register with QuantizerManager too but
-    # are never attached to any module the model actually calls, so their
-    # inference_sequence_id stays -1 forever. Drop them here so the search only
-    # touches quantizers that are genuinely part of the model.
     # Search upstream -> downstream so each quantizer's optimum reflects the
-    # FINAL settings of everything feeding into it, instead of being
-    # calibrated against not-yet-searched upstream quantizers and going stale
-    # once those change later in the loop. Also drops Brevitas's internal
-    # "ghost" quantizer objects (registered but never reached by forward()).
+    # FINAL settings of everything feeding into it. quantizers_in_execution_order
+    # also drops Brevitas's internal "ghost" quantizer objects (registered but
+    # never reached by forward()).
     ordered_ids = {
         q.quant_id: i for i, q in enumerate(mgr.quantizers_in_execution_order())
     }
-    n_before = len(target_items)
-    target_items = [item for item in target_items if item[1].quant_id in ordered_ids]
-    n_ghosts = n_before - len(target_items)
-    if n_ghosts:
-        print(f"  Skipping {n_ghosts} internal Brevitas {target_role} quantizer object(s) "
-              f"never reached by the model's forward pass (not real layers).")
+    target_items: list[tuple[str, BaseQuantizer]] = [
+        (qid, q) for qid, q in mgr.quantizers.items()
+        if q.quantizer_role == target_role and q.quant_id in ordered_ids
+    ]
     if not target_items:
-        print(f"[ERROR] No reachable {target_role} quantizers after filtering. "
-              "Check model construction arguments.")
-        return
+        raise ValueError(
+            f"No reachable {target_role} quantizers found in this model "
+            "(after dropping objects never reached by the forward pass). "
+            "Check model construction arguments."
+        )
     target_items.sort(key=lambda item: ordered_ids[item[1].quant_id])
-
     n_total = len(target_items)
-    print(f"  Quantizers in execution path: {n_total}\n")
-
-    # Point BaseQuantizer's built-in diagnostics at the same output directory so
-    # the calibration-time LSB search plot (find_optimal_lsb's search_records —
-    # SAD bars + unique-count line vs LSB position) and the histogram plot are
-    # saved as quantizer_<id>_calibration_N.{svg,png} /
-    # quantizer_<id>_calibration_N_lsb_search.{svg,png} alongside the ptq_* plots.
-    mgr.diagnostics_dir = str(out_dir)
-
-    # Pre-fetch one calibration batch from the training set and reuse it for
-    # every quantizer.  Weights stay nearly fixed (lr=1e-10), so one batch is
-    # representative enough for PTQ calibration.
-    for _calib_images, _calib_labels in train_loader:
-        calib_images = _calib_images.to(device)
-        calib_labels = _calib_labels.to(device).long()
-        break
+    print(f"  {target_role} quantizers in execution path: {n_total}\n")
 
     # ── Per-quantizer search ──────────────────────────────────────────────────
-    summary_qids:         List[str]   = []
-    summary_display_names: List[str]  = []
-    summary_calib_lsbs:   List[int]   = []
-    summary_lsbs:         List[int]   = []
-    summary_accs:         List[float] = []
-    summary_losses:       List[float] = []
+    summary_qids:          List[str]   = []
+    summary_display_names: List[str]   = []
+    summary_calib_lsbs:    List[int]   = []
+    summary_lsbs:          List[int]   = []
+    summary_accs:          List[float] = []
+    summary_losses:        List[float] = []
 
     sep = "─" * 68
 
     for qi, (qid, q) in enumerate(target_items, start=1):
         t0 = time.time()
         print(sep)
-        print(f"[{qi}/{n_total}]  {q.display_name}  ({target_role}, {bw}b)")
+        print(f"[{qi}/{n_total}]  {q.display_name}  ({target_role}, {bit_width}b)")
         print(sep)
 
         # ── Calibrate ─────────────────────────────────────────────────────────
@@ -974,10 +948,7 @@ def main() -> None:
         q.annealing_alpha_step = 1.0
 
         # Advance inference_counter to exactly the gap threshold so calibration
-        # fires on the very first training step.  The gap mechanism is designed
-        # for QAT multi-epoch training where steps accumulate naturally; for PTQ
-        # we force the counter to the threshold instead of waiting for it to
-        # accumulate organically (which may require many steps per quantizer).
+        # fires on the very first training step.
         gap_threshold = q.inference_sequence_id * mgr.quantization_start_gap
         if q.inference_counter < gap_threshold:
             q.inference_counter = gap_threshold
@@ -990,10 +961,6 @@ def main() -> None:
 
         # Run training steps until search_done flips True.  With the counter
         # pre-advanced above, calibration fires on step 1 for all quantizers.
-        # The loop guards against the degenerate case where find_optimal_lsb
-        # sees only 1 unique value in the calibration data and refuses to mark
-        # calibration as done (_save_calibration only sets search_done=True when
-        # num_unique > 1); a hard limit prevents an infinite loop in that case.
         MAX_CALIB_STEPS = 10
         calib_steps = 0
         while not q.search_done.item():
@@ -1025,8 +992,8 @@ def main() -> None:
         print(f"  Calibrated in {calib_steps} step(s): LSB={calib_lsb}  signed={calib_signed}")
 
         # ── Sweep LSB candidates ───────────────────────────────────────────────
-        candidates = list(range(calib_lsb - args.search_radius,
-                                calib_lsb + args.search_radius + 1))
+        candidates = list(range(calib_lsb - search_radius,
+                                calib_lsb + search_radius + 1))
         results: List[Tuple[int, float, float]] = []
 
         n_candidates = len(candidates)
@@ -1036,7 +1003,7 @@ def main() -> None:
 
             tag = " (calibrated)" if candidate_lsb == calib_lsb else ""
             print(f"  [{ci}/{n_candidates}] evaluating LSB={candidate_lsb}{tag} …")
-            v_loss, v_acc = _evaluate(model, val_loader, loss_fn, device, args.eval_batches,
+            v_loss, v_acc = _evaluate(model, val_loader, loss_fn, device, eval_batches,
                                       label=f"LSB={candidate_lsb}")
             results.append((candidate_lsb, v_loss, v_acc))
 
@@ -1061,13 +1028,13 @@ def main() -> None:
               f"[{elapsed:.0f}s]")
 
         # ── Sanity check ──────────────────────────────────────────────────────
-        _sanity_check_quantizer(q, best_lsb, bw)
+        _sanity_check_quantizer(q, best_lsb, bit_width)
 
         # ── Log + plot ─────────────────────────────────────────────────────────
         _log_quantizer_result(
             log_path,
             quant_id=qid, display_name=q.display_name,
-            quantizer_role=target_role, bit_width=bw,
+            quantizer_role=target_role, bit_width=bit_width,
             calib_lsb=calib_lsb, selected_lsb=best_lsb, results=results,
         )
         _save_ptq_search_plot(
@@ -1077,7 +1044,7 @@ def main() -> None:
             quant_id=qid,
             display_name=q.display_name,
             quantizer_role=target_role,
-            bit_width=bw,
+            bit_width=bit_width,
             quantizer_index=qi,
             n_quantizers=n_total,
             out_dir=out_dir,
@@ -1092,7 +1059,138 @@ def main() -> None:
         summary_accs.append(best_r[2])
         summary_losses.append(best_r[1])
 
+    return {
+        "qids": summary_qids,
+        "display_names": summary_display_names,
+        "calib_lsbs": summary_calib_lsbs,
+        "selected_lsbs": summary_lsbs,
+        "accs": summary_accs,
+        "losses": summary_losses,
+    }
+
+
+# ---------------------------------------------------------------------------
+# Main
+# ---------------------------------------------------------------------------
+
+def main() -> None:
+    args = parse_args()
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+    model, target_role, bw, prev_extra, prev_role_bit_widths = _build_quantized_model(args, device)
+
+    # Roles already calibrated via --init-from-ckpt stay fully active while the
+    # target role is searched on top (the target role itself is (re)searched).
+    active_roles = {r for r in prev_role_bit_widths if r != target_role}
+
+    mgr = QuantizerManager()
+    mgr.quantization_start_gap = 2   # each quantizer at position N gates for N*2 steps before
+                                     # activating — cleared naturally by prior calibration loops
+
+    # Rough pre-filter count for the header/log (ghost objects are dropped once
+    # the search runs and forward-execution order is known).
+    n_target = sum(1 for q in mgr.quantizers.values() if q.quantizer_role == target_role)
+    if n_target == 0:
+        print(f"[ERROR] No {target_role} quantizers found in this model. "
+              "Check model construction arguments.")
+        return
+
+    # ── Output directory & log ───────────────────────────────────────────────
+    exp_name = (args.experiment_name
+                or f"{args.model}_{args.mode}_{bw}b_r{args.search_radius}")
+    out_dir  = Path(args.output_dir) / exp_name
+    out_dir.mkdir(parents=True, exist_ok=True)
+    print(f"Output directory : {out_dir.resolve()}")
+    log_path = out_dir / "ptq_search.log"
+
+    with open(log_path, "w") as fh:
+        fh.write(
+            f"PTQ LSB Search Log\n"
+            f"{'='*68}\n"
+            f"  Model          : {args.model}\n"
+            f"  Mode           : {args.mode}  ({bw}b)\n"
+            f"  Init from ckpt : {args.init_from_ckpt or 'none'}"
+            f"{f' (roles already calibrated: {prev_role_bit_widths})' if prev_role_bit_widths else ''}\n"
+            f"  Pretrained     : {args.pretrained}\n"
+            f"  Search radius  : ±{args.search_radius}\n"
+            f"  Eval batches   : {args.eval_batches or 'full'}\n"
+            f"  Quant gap      : {mgr.quantization_start_gap}\n"
+            f"  N quantizers   : {n_target}\n"
+            f"  Device         : {device}\n"
+            f"  Started        : {datetime.now()}\n"
+            f"{'='*68}\n"
+        )
+
+    print(f"\n{'═'*68}")
+    print(f"  PTQ LSB Search — {exp_name}")
+    print(f"  Model: {args.model}  |  Mode: {args.mode}  |  {bw}b")
+    print(f"  Radius: ±{args.search_radius}  |  Gap: {mgr.quantization_start_gap}"
+          f"  |  Eval: {args.eval_batches or 'full'} batches")
+    print(f"  Quantizers to search: {n_target}")
+    print(f"{'═'*68}\n")
+
+    # ── Data & optimiser ─────────────────────────────────────────────────────
+    print("Loading data …")
+    train_loader, val_loader = _build_dataloaders(args)
+    loss_fn = nn.CrossEntropyLoss()
+
+    # Near-zero LR: weights barely move, but the training-mode forward+backward
+    # pass is what allows quantizer calibration to fire (base_quantizer guards
+    # on self.training before running _calibrate).
+    optimizer = torch.optim.SGD(model.parameters(), lr=1e-10)
+
+    # ── Baseline evaluation ───────────────────────────────────────────────────
+    # Put quantizers in search state first: the target role and every
+    # not-yet-calibrated role are passthrough, while roles carried in from
+    # --init-from-ckpt stay active. This is also the first forward pass over the
+    # model, so it establishes each quantizer's inference_sequence_id (hence the
+    # forward-execution order the search relies on).
+    _set_search_states(mgr, target_role, active_roles)
+    print("Baseline evaluation (no quantization) …")
+    baseline_loss, baseline_acc = _evaluate(model, val_loader, loss_fn, device,
+                                             args.eval_batches, label="baseline")
+    print(f"  val_loss={baseline_loss:.4f}  val_acc={baseline_acc:.2f}%\n")
+
+    with open(log_path, "a") as fh:
+        fh.write(
+            f"\nBaseline (no quantization):\n"
+            f"  val_loss={baseline_loss:.6f}  val_acc={baseline_acc:.3f}%\n"
+        )
+
+    # Pre-fetch one calibration batch from the training set and reuse it for
+    # every quantizer.  Weights stay nearly fixed (lr=1e-10), so one batch is
+    # representative enough for PTQ calibration.
+    for _calib_images, _calib_labels in train_loader:
+        calib_images = _calib_images.to(device)
+        calib_labels = _calib_labels.to(device).long()
+        break
+
+    # ── Per-quantizer search ──────────────────────────────────────────────────
+    summary = search_role_lsbs(
+        model=model,
+        target_role=target_role,
+        bit_width=bw,
+        val_loader=val_loader,
+        loss_fn=loss_fn,
+        device=device,
+        search_radius=args.search_radius,
+        eval_batches=args.eval_batches,
+        out_dir=out_dir,
+        log_path=log_path,
+        calib_images=calib_images,
+        calib_labels=calib_labels,
+        optimizer=optimizer,
+        active_roles=active_roles,
+    )
+    summary_qids          = summary["qids"]
+    summary_display_names = summary["display_names"]
+    summary_calib_lsbs    = summary["calib_lsbs"]
+    summary_lsbs          = summary["selected_lsbs"]
+    summary_accs          = summary["accs"]
+    summary_losses        = summary["losses"]
+
     # ── Final evaluation ──────────────────────────────────────────────────────
+    sep = "─" * 68
     print(f"\n{sep}")
     print("Final evaluation (all optimized quantizers active) …")
     final_loss, final_acc = _evaluate(model, val_loader, loss_fn, device, args.eval_batches,

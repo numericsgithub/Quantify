@@ -185,7 +185,6 @@ class CheckpointManager:
                 epoch, model, optimizer, scheduler, metrics_dict or {}, config_dict, extra
             )
             torch.save(payload, periodic_path)
-            self._export_onnx(model, periodic_path.replace('.pt', '.onnx'), dummy_input)
 
         # Top-K logic
         if self._should_save(metric_value):
@@ -195,7 +194,6 @@ class CheckpointManager:
                 epoch, model, optimizer, scheduler, metrics_dict or {}, config_dict, extra
             )
             torch.save(payload, path)
-            self._export_onnx(model, path.replace('.pt', '.onnx'), dummy_input)
 
             record = CheckpointRecord(epoch=epoch, metric_value=metric_value, path=path)
             self._add_record(record)
@@ -214,6 +212,12 @@ class CheckpointManager:
         if not self._records:
             return None
         return self._records[0].path  # Already sorted best-first
+
+    def best_checkpoint_record(self) -> Optional[CheckpointRecord]:
+        """Return the best checkpoint's full record (epoch, metric_value, path),
+        or None if none saved. Lets callers report *which* checkpoint they are
+        about to restore, not just its path."""
+        return self._records[0] if self._records else None
 
     def last_checkpoint_path(self) -> Optional[str]:
         """Return the path of the 'last.pt' checkpoint."""

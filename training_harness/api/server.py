@@ -16,6 +16,7 @@ UI is served from a different port than the API.
 from __future__ import annotations
 
 import logging
+import os
 import threading
 from typing import Optional
 
@@ -61,6 +62,29 @@ def create_app(collector: RunStateCollector,
     def health():
         return jsonify({"ok": True})
 
+    # ── Quantizer role histogram (standing safety net) ────────────────
+    # Counts of registered quantizers per canonical role plus an "unknown"
+    # count: a nonzero "unknown" means some quantizers cannot be group-
+    # addressed, so every group-targeted control would silently skip them.
+    # Also carries the pid so the shared-state / fork check that the temporary
+    # /debug/identity endpoint used to provide is still available here.
+    @app.get("/api/v1/quantizers/roles")
+    def quantizer_roles():
+        from quantizers.manager import QuantizerManager
+        mgr = QuantizerManager()
+        return jsonify({
+            "pid": os.getpid(),
+            "id_quantization_manager": id(mgr),
+            "histogram": mgr.role_histogram(),
+        })
+
+    @app.get("/api/v1/quantizers")
+    def quantizers_list():
+        # Per-quantizer inspector: id, role, alpha, alpha_step, lsb, search_done.
+        # Drives the group controls' targeting and the LSB-by-id control.
+        from quantizers.manager import QuantizerManager
+        return jsonify({"quantizers": QuantizerManager().describe_quantizers()})
+
     @app.get("/api/v1/status")
     def status():
         return jsonify(collector.status_snapshot())
@@ -90,7 +114,9 @@ def create_app(collector: RunStateCollector,
 
     @app.get("/api/v1/callbacks")
     def callbacks():
-        if control is None:
+        # control.callbacks is None on V2 (no registry) — report an empty list
+        # rather than 500. Toggle attempts are rejected at submit time.
+        if control is None or control.callbacks is None:
             return jsonify({"callbacks": []})
         return jsonify({"callbacks": control.callbacks.list()})
 
@@ -127,6 +153,60 @@ def create_app(collector: RunStateCollector,
     @app.post("/api/v1/control/add-epochs")
     def control_add_epochs():
         return _submit("add_epochs", request.get_json(silent=True) or {})
+
+    @app.post("/api/v1/control/pause")
+    def control_pause():
+        # Direct, off-queue (symmetric with resume): queuing pause would race a
+        # subsequent resume. Only the loop's blocking gate is on the training
+        # thread; toggling the Event is a safe cross-thread signal.
+        gate = _require_control()
+        if gate is not None:
+            return gate
+        return jsonify(control.pause())
+
+    @app.post("/api/v1/control/resume")
+    def control_resume():
+        # Direct, off-queue: the training loop is blocked at the pause gate and
+        # cannot drain the queue, so resume cannot be a queued command.
+        gate = _require_control()
+        if gate is not None:
+            return gate
+        return jsonify(control.resume())
+
+    @app.post("/api/v1/control/end-epoch-early")
+    def control_end_epoch_early():
+        return _submit("end_epoch_early", request.get_json(silent=True) or {})
+
+    @app.post("/api/v1/control/halt")
+    def control_halt():
+        return _submit("halt", request.get_json(silent=True) or {})
+
+    @app.post("/api/v1/control/scheduler-params")
+    def control_scheduler_params():
+        # body: {patience?, factor?, min_lr?} — edits the live ReduceLROnPlateau
+        return _submit("set_scheduler_params", request.get_json(silent=True) or {})
+
+    # ── QAT group controls (Phase 4) ──────────────────────────────────
+
+    @app.post("/api/v1/control/quant/annealing")
+    def control_quant_annealing():
+        # body: {group, mode: ramp|absolute|step, + n|alpha|step}
+        return _submit("set_annealing", request.get_json(silent=True) or {})
+
+    @app.post("/api/v1/control/quant/lsb")
+    def control_quant_lsb():
+        # body: {quant_id, lsb}
+        return _submit("set_lsb", request.get_json(silent=True) or {})
+
+    @app.post("/api/v1/control/quant/recalibrate")
+    def control_quant_recalibrate():
+        # body: {group, confirm}
+        return _submit("recalibrate", request.get_json(silent=True) or {})
+
+    @app.post("/api/v1/control/quant/disable")
+    def control_quant_disable():
+        # body: {group, confirm}
+        return _submit("disable_quant", request.get_json(silent=True) or {})
 
     return app
 

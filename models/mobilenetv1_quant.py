@@ -13,11 +13,15 @@ Architecture:
 import torch.nn as nn
 import brevitas.nn as qnn
 
+from models.quant_activations import QuantReLU6
+
 
 def _relu(act_quant):
+    # MobileNetV1 (incl. timm's mobilenetv1_100 checkpoints) uses ReLU6, not an
+    # unbounded ReLU; see models/quant_activations.py:QuantReLU6.
     if act_quant is not None:
-        return qnn.QuantReLU(act_quant=act_quant)
-    return nn.ReLU(inplace=True)
+        return QuantReLU6(act_quant=act_quant)
+    return nn.ReLU6(inplace=True)
 
 
 class QuantDWSepBlock(nn.Module):
