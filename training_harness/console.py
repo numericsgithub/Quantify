@@ -156,15 +156,37 @@ class TrainingConsole:
             except ValueError:
                 tqdm.write(f"[console] Bad LR value: {args[0]!r}")
                 return
-            for pg in t.optimizer.param_groups:
-                pg["lr"] = new_lr
-            tqdm.write(f"[console] Learning rate → {new_lr:.3e}")
+            # Route through the shared ControlManager queue so the console and
+            # the dashboard use ONE apply path (validation, audit log, and the
+            # scheduler-suspension guard all live there).
+            ctrl = getattr(t, "_control", None)
+            if ctrl is not None:
+                try:
+                    cmd = ctrl.submit("set_hyperparams", {"lr": new_lr})
+                    tqdm.write(f"[console] LR change queued [{cmd.id}] — applies next step.")
+                except Exception as e:
+                    tqdm.write(f"[console] LR change rejected: {e}")
+            else:
+                for pg in t.optimizer.param_groups:
+                    pg["lr"] = new_lr
+                tqdm.write(f"[console] Learning rate → {new_lr:.3e}")
 
         elif verb == "stop":
             self._stop_requested = True
             tqdm.write("[console] Stop requested — will halt after this epoch.")
 
         elif verb in ("load-best", "load_best"):
+            # Route through the shared ControlManager queue (applied at the
+            # epoch boundary, with audit logging) rather than mutating the model
+            # directly from this handler.
+            ctrl = getattr(t, "_control", None)
+            if ctrl is not None:
+                try:
+                    cmd = ctrl.submit("reload_best", {"confirm": True})
+                    tqdm.write(f"[console] reload-best queued [{cmd.id}] — applies next epoch.")
+                except Exception as e:
+                    tqdm.write(f"[console] reload-best rejected: {e}")
+                return
             path = t.checkpoint_mgr.best_checkpoint_path()
             if path is None:
                 tqdm.write("[console] No best checkpoint saved yet.")

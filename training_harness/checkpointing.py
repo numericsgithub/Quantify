@@ -213,6 +213,12 @@ class CheckpointManager:
             return None
         return self._records[0].path  # Already sorted best-first
 
+    def best_checkpoint_record(self) -> Optional[CheckpointRecord]:
+        """Return the best checkpoint's full record (epoch, metric_value, path),
+        or None if none saved. Lets callers report *which* checkpoint they are
+        about to restore, not just its path."""
+        return self._records[0] if self._records else None
+
     def last_checkpoint_path(self) -> Optional[str]:
         """Return the path of the 'last.pt' checkpoint."""
         path = os.path.join(self.save_dir, "last.pt")

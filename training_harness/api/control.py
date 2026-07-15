@@ -27,6 +27,7 @@ toggleable entries without moving any logic out of the loop.
 from __future__ import annotations
 
 import math
+import os
 import queue
 import threading
 import time
@@ -41,6 +42,9 @@ from typing import Any, Callable, Dict, List, Optional
 MAX_LR = 10.0
 MAX_WEIGHT_DECAY = 1.0
 MAX_ADD_EPOCHS = 100_000
+
+# Valid quantizer groups for the Phase-4 group-targeted QAT controls.
+_QUANT_GROUPS = ("weights", "biases", "activations", "all")
 
 
 class ControlValidationError(ValueError):
@@ -164,11 +168,23 @@ class ControlManager:
         "toggle_callback": "epoch",
         "reload_best": "epoch",
         "add_epochs": "epoch",
+        "end_epoch_early": "step",
+        "halt": "epoch",
+        "set_scheduler_params": "epoch",
+        # QAT group controls (Phase 4)
+        "set_annealing": "step",
+        "set_lsb": "step",
+        "recalibrate": "epoch",
+        "disable_quant": "epoch",
+        # NB: pause/resume are NOT queued — see pause()/resume() below.
     }
 
-    def __init__(self, trainer: Any, collector: Any, callbacks: CallbackRegistry):
+    def __init__(self, trainer: Any, collector: Any,
+                 callbacks: Optional[CallbackRegistry] = None):
         self.trainer = trainer
         self.collector = collector
+        # May be None: the V2 trainer has no CallbackRegistry, so callback
+        # toggling is rejected there (see _validate_toggle_callback).
         self.callbacks = callbacks
         self._queues: Dict[str, "queue.Queue[ControlCommand]"] = {
             "step": queue.Queue(),
@@ -276,6 +292,11 @@ class ControlManager:
         return clean
 
     def _validate_toggle_callback(self, params: Dict[str, Any]) -> Dict[str, Any]:
+        if self.callbacks is None:
+            raise ControlValidationError(
+                "callback toggling is not supported on this trainer "
+                "(V2 has no callback registry - a known regression from V1, "
+                "pending the callback-system work)")
         name = params.get("name")
         if not isinstance(name, str) or not name:
             raise ControlValidationError("callback name is required")
@@ -289,7 +310,115 @@ class ControlManager:
             raise ControlValidationError(
                 "reload-best is destructive to in-flight progress; "
                 "resend with {\"confirm\": true}")
+        # Which checkpoint pool to reload from: "best" (primary monitor) or
+        # "best_<metric>" (a secondary pool, e.g. best_train_loss). Resolved at
+        # apply time against the trainer's pools; an unknown one fails there.
+        criterion = params.get("criterion", "best")
+        if not isinstance(criterion, str) or not criterion:
+            raise ControlValidationError("criterion must be a non-empty string")
+        # weights_only=True (default, safer) restores only model weights; False
+        # also restores optimizer + scheduler state.
+        weights_only = params.get("weights_only", True)
+        if not isinstance(weights_only, bool):
+            raise ControlValidationError("weights_only must be a boolean")
+        return {"confirm": True, "criterion": criterion, "weights_only": weights_only}
+
+    def _validate_end_epoch_early(self, params: Dict[str, Any]) -> Dict[str, Any]:
+        return {}
+
+    def _validate_halt(self, params: Dict[str, Any]) -> Dict[str, Any]:
+        if params.get("confirm") is not True:
+            raise ControlValidationError(
+                "halt ends the run and is NOT resumable; "
+                "resend with {\"confirm\": true}")
         return {"confirm": True}
+
+    def _validate_set_scheduler_params(self, params: Dict[str, Any]) -> Dict[str, Any]:
+        """Edit the live ReduceLROnPlateau (patience / factor / min_lr)."""
+        clean: Dict[str, Any] = {}
+        if params.get("patience") is not None:
+            p = params["patience"]
+            if not isinstance(p, int) or isinstance(p, bool) or p < 0:
+                raise ControlValidationError("patience must be a non-negative integer")
+            clean["patience"] = p
+        if params.get("factor") is not None:
+            f = self._as_float(params["factor"], "factor")
+            if not (0.0 < f < 1.0):
+                raise ControlValidationError("factor must be in (0, 1)")
+            clean["factor"] = f
+        if params.get("min_lr") is not None:
+            m = self._as_float(params["min_lr"], "min_lr")
+            if m < 0.0:
+                raise ControlValidationError("min_lr must be >= 0")
+            clean["min_lr"] = m
+        if not clean:
+            raise ControlValidationError(
+                "provide at least one of: patience, factor, min_lr")
+        return clean
+
+    # ---- QAT group controls (Phase 4) ---------------------------------
+
+    def _require_group(self, params: Dict[str, Any]) -> str:
+        group = params.get("group")
+        if group not in _QUANT_GROUPS:
+            raise ControlValidationError(
+                f"group must be one of {list(_QUANT_GROUPS)}; got {group!r}")
+        return group
+
+    def _validate_set_annealing(self, params: Dict[str, Any]) -> Dict[str, Any]:
+        group = self._require_group(params)
+        mode = params.get("mode")
+        # ramp vs absolute vs step are kept distinct on purpose — see the
+        # semantics trap in the Phase-4 notes.
+        if mode not in ("ramp", "absolute", "step"):
+            raise ControlValidationError(
+                "mode must be one of: 'ramp' (alpha 0->1 over n passes), "
+                "'absolute' (set alpha=X now), 'step' (set per-forward increment)")
+        clean: Dict[str, Any] = {"group": group, "mode": mode}
+        if mode == "ramp":
+            n = params.get("n")
+            if not isinstance(n, int) or isinstance(n, bool) or n < 1:
+                raise ControlValidationError("ramp mode requires integer n >= 1")
+            clean["n"] = n
+        elif mode == "absolute":
+            a = self._as_float(params.get("alpha"), "alpha")
+            if not (0.0 <= a <= 1.0):
+                raise ControlValidationError("alpha must be in [0, 1]")
+            clean["alpha"] = a
+        else:  # step
+            s = self._as_float(params.get("step"), "step")
+            if not (0.0 <= s <= 1.0):
+                raise ControlValidationError("step must be in [0, 1]")
+            clean["step"] = s
+        return clean
+
+    def _validate_set_lsb(self, params: Dict[str, Any]) -> Dict[str, Any]:
+        qid = params.get("quant_id")
+        if not isinstance(qid, str) or not qid:
+            raise ControlValidationError("quant_id (string) is required")
+        lsb = params.get("lsb")
+        if not isinstance(lsb, int) or isinstance(lsb, bool):
+            raise ControlValidationError("lsb must be an integer")
+        if not (-32 <= lsb <= 32):
+            raise ControlValidationError("lsb must be in [-32, 32]")
+        return {"quant_id": qid, "lsb": lsb}
+
+    def _validate_recalibrate(self, params: Dict[str, Any]) -> Dict[str, Any]:
+        group = self._require_group(params)
+        if params.get("confirm") is not True:
+            raise ControlValidationError(
+                "recalibration re-runs the LSB search on the next forward "
+                "(against whatever batch comes next); resend with "
+                "{\"confirm\": true}")
+        return {"group": group, "confirm": True}
+
+    def _validate_disable_quant(self, params: Dict[str, Any]) -> Dict[str, Any]:
+        group = self._require_group(params)
+        if params.get("confirm") is not True:
+            raise ControlValidationError(
+                "disabling quantization changes the model mid-run; "
+                "resend with {\"confirm\": true}")
+        return {"group": group, "confirm": True}
 
     def _validate_add_epochs(self, params: Dict[str, Any]) -> Dict[str, Any]:
         count = params.get("count")
@@ -331,11 +460,16 @@ class ControlManager:
         # Scheduler suspension. Only meaningful when a scheduler exists (it
         # would otherwise overwrite the LR on its next step). Default: an LR
         # change suspends it; suspend_scheduler=false explicitly resumes.
-        if t.scheduler is not None:
+        # V2 can run TWO LR-writing schedulers (a per-step self.scheduler AND an
+        # epoch-stepped ReduceLROnPlateau); the flag suspends BOTH (see
+        # trainer_v2 where both step() calls are guarded by _scheduler_suspended).
+        has_scheduler = (t.scheduler is not None
+                         or getattr(t, "_plateau_lr_sched", None) is not None)
+        if has_scheduler:
             suspend = params.get("suspend_scheduler", "lr" in params)
             if "suspend_scheduler" in params or "lr" in params:
                 t._scheduler_suspended = bool(suspend)
-                changes.append("scheduler " + ("suspended" if suspend else "resumed"))
+                changes.append("scheduler(s) " + ("suspended" if suspend else "resumed"))
         return ", ".join(changes) if changes else "no-op"
 
     def _apply_toggle_callback(self, params: Dict[str, Any]) -> str:
@@ -345,22 +479,167 @@ class ControlManager:
 
     def _apply_reload_best(self, params: Dict[str, Any]) -> str:
         t = self.trainer
-        mgr = getattr(t, "checkpoint_mgr", None)
-        best = mgr.best_checkpoint_path() if mgr is not None else None
-        if not best:
+        criterion = params.get("criterion", "best")
+        weights_only = params.get("weights_only", True)
+
+        # Resolve which pool: "best" -> primary; "best_<metric>"/"<metric>" ->
+        # a secondary pool. Falls back to the single checkpoint_mgr on trainers
+        # without the pool registry (V1).
+        pools = getattr(t, "_checkpoint_pools", None)
+        if pools and criterion not in ("best", ""):
+            metric = criterion[len("best_"):] if criterion.startswith("best_") else criterion
+            mgr = pools.get(metric)
+            if mgr is None:
+                raise RuntimeError(
+                    f"no checkpoint pool tracks {metric!r}; available criteria: "
+                    f"'best' + {sorted('best_' + m for m in pools)}")
+        else:
+            mgr = getattr(t, "checkpoint_mgr", None)
+
+        rec = mgr.best_checkpoint_record() if mgr is not None else None
+        if rec is None:
             raise RuntimeError("no best checkpoint available to reload")
-        # Weights only, no optimizer state, calibration preserved — mirrors
-        # the interactive console's load-best (console.py).
-        mgr.resume(t.model, path=best, device=str(t.device), reset_calibration=False)
-        return f"reloaded weights from {best}"
+
+        # weights_only (default) mirrors the safe console load-best: model
+        # weights only, calibration preserved, optimizer/scheduler untouched.
+        if weights_only:
+            mgr.resume(t.model, path=rec.path, device=str(t.device),
+                       reset_calibration=False)
+        else:
+            mgr.resume(t.model, optimizer=getattr(t, "optimizer", None),
+                       scheduler=getattr(t, "scheduler", None), path=rec.path,
+                       device=str(t.device), reset_calibration=False)
+
+        scope = "weights" if weights_only else "weights+optimizer"
+        return (f"restored epoch {rec.epoch} ({rec.metric_value:.4f}) "
+                f"[{criterion}, {scope}] from {os.path.basename(rec.path)}")
+
+    def _apply_end_epoch_early(self, params: Dict[str, Any]) -> str:
+        t = self.trainer
+        if not hasattr(t, "_end_epoch_early"):
+            raise RuntimeError("end-epoch-early is not supported by this trainer")
+        t._end_epoch_early = True
+        return "current epoch will end after this step, then validation runs"
+
+    def _apply_halt(self, params: Dict[str, Any]) -> str:
+        t = self.trainer
+        if not hasattr(t, "_halt_requested"):
+            raise RuntimeError("halt is not supported by this trainer")
+        t._halt_requested = True
+        return "run will halt after the current epoch (not resumable)"
+
+    def _apply_set_scheduler_params(self, params: Dict[str, Any]) -> str:
+        sched = getattr(self.trainer, "_plateau_lr_sched", None)
+        if sched is None:
+            raise RuntimeError(
+                "no ReduceLROnPlateau scheduler is active on this run "
+                "(set reduce_lr_on_plateau=True in the config)")
+        changes: List[str] = []
+        if "patience" in params:
+            sched.patience = params["patience"]
+            changes.append(f"patience={params['patience']}")
+        if "factor" in params:
+            sched.factor = params["factor"]
+            changes.append(f"factor={params['factor']:g}")
+        if "min_lr" in params:
+            # ReduceLROnPlateau keeps one min_lr per param group.
+            sched.min_lrs = [params["min_lr"]] * len(sched.min_lrs)
+            changes.append(f"min_lr={params['min_lr']:g}")
+        return "plateau scheduler: " + ", ".join(changes)
+
+    # ---- QAT group controls (Phase 4) ---------------------------------
+
+    def _apply_set_annealing(self, params: Dict[str, Any]) -> str:
+        from quantizers.manager import QuantizerManager
+        mgr = QuantizerManager()
+        group, mode = params["group"], params["mode"]
+        if mode == "ramp":
+            res = mgr.set_group_annealing_ramp(group, params["n"])
+            what = f"ramp alpha 0->1 over {params['n']} passes"
+        elif mode == "absolute":
+            res = mgr.set_group_annealing_alpha(group, params["alpha"])
+            what = f"alpha={params['alpha']:g}"
+        else:
+            res = mgr.set_group_annealing_step(group, params["step"])
+            what = f"alpha_step={params['step']:g}"
+        return self._group_result(what, res)
+
+    def _apply_set_lsb(self, params: Dict[str, Any]) -> str:
+        from quantizers.manager import QuantizerManager
+        res = QuantizerManager().set_lsb(params["quant_id"], params["lsb"])
+        return f"lsb={res['lsb']} set on {res['quant_id']} ({res['role']})"
+
+    def _apply_recalibrate(self, params: Dict[str, Any]) -> str:
+        from quantizers.manager import QuantizerManager
+        res = QuantizerManager().recalibrate_group(params["group"])
+        return self._group_result(
+            "recalibration armed (runs on each quantizer's next forward)", res)
+
+    def _apply_disable_quant(self, params: Dict[str, Any]) -> str:
+        from quantizers.manager import QuantizerManager
+        res = QuantizerManager().disable_group(params["group"])
+        return self._group_result("quantization disabled (alpha=0, step=0)", res)
+
+    @staticmethod
+    def _group_result(what: str, res: Dict[str, Any]) -> str:
+        msg = f"{what}: {res['count']} {res['group']} quantizer(s)"
+        if res.get("unknown_role"):
+            msg += (f" — WARNING: {res['unknown_role']} quantizer(s) have unknown "
+                    f"role and were NOT affected")
+        return msg
+
+    # ------------------------------------------------------------------
+    # Pause / resume — direct, off-queue, by design
+    # ------------------------------------------------------------------
+    #
+    # These are the sanctioned exceptions to "never mutate off the queue".
+    # Rationale: only the *blocking* must happen at a safe boundary, and it
+    # does — the loop's pause GATE (a threading.Event.wait() at the step
+    # boundary) runs on the training thread. Setting/clearing that Event is a
+    # cross-thread signal, exactly what threading.Event is for.
+    #
+    # Pause must be direct too (not queued): if it were queued, a resume could
+    # arrive and run BEFORE the still-queued pause applied, and the stale pause
+    # would then fire and re-pause the run. Direct set/clear has no such race.
+
+    def pause(self) -> Dict[str, Any]:
+        """Request a pause. The loop blocks at its next step-boundary gate."""
+        t = self.trainer
+        ev = getattr(t, "_pause_event", None)
+        if ev is None:
+            return {"paused": False, "reason": "pause not supported by this trainer"}
+        already = not ev.is_set()
+        t._paused = True
+        ev.clear()
+        self._event("paused",
+                    "pause requested (already paused)" if already
+                    else "pause requested — blocks at next step boundary")
+        return {"paused": True, "was_paused": already}
+
+    def resume(self) -> Dict[str, Any]:
+        """Release a paused run by setting the gate Event."""
+        t = self.trainer
+        ev = getattr(t, "_pause_event", None)
+        if ev is None:
+            return {"resumed": False, "reason": "pause not supported by this trainer"}
+        was_paused = not ev.is_set()
+        t._paused = False
+        ev.set()
+        self._event("resumed",
+                    "training resumed" if was_paused else "resume (was not paused)")
+        return {"resumed": True, "was_paused": was_paused}
 
     def _apply_add_epochs(self, params: Dict[str, Any]) -> str:
         t = self.trainer
         old = t.config.epochs
         t.config.epochs = old + params["count"]
-        timer = getattr(t, "_timer", None)
+        timer = getattr(t, "_timer", None)          # V1 exposes its EpochTimer
         if timer is not None:
             timer.total_epochs = t.config.epochs
+        # V2 runs `while epoch < self._end_epoch`; extend that re-read bound so
+        # the extra epochs actually run this session (V1 relies on config.epochs).
+        if getattr(t, "_end_epoch", None) is not None:
+            t._end_epoch += params["count"]
         return f"epoch budget {old} -> {t.config.epochs}"
 
     # ------------------------------------------------------------------

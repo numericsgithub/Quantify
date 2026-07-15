@@ -144,6 +144,21 @@ class TrainerConfigV2:
     checkpoint: CheckpointConfig = field(default_factory=CheckpointConfig)
     logging: LoggingConfig = field(default_factory=LoggingConfig)
 
+    # ---- Secondary checkpoint pools ---------------------------------------
+    secondary_checkpoint_metrics: list = field(default_factory=list)
+    """
+    Extra (metric, mode) pairs to keep a best-checkpoint pool for, IN ADDITION
+    to the primary ``checkpoint.monitor_metric`` pool. Lets the live
+    reload-best control target more than one criterion — e.g. keep the best
+    val_acc AND the best train_loss so a run can be snapped back to either::
+
+        secondary_checkpoint_metrics=[("train_loss", "min")]
+
+    Each entry keeps only its single best file (top_k=1, no last.pt / ONNX) in
+    ``checkpoints/by_<metric>/``. Reload targets it via
+    ``criterion="best_<metric>"``.
+    """
+
     # ---- Early stopping ----------------------------------------------------
     early_stopping_patience: Optional[int] = None
     """Only active after QAT has started. Set to None to disable."""

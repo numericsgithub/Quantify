@@ -17,6 +17,8 @@ Correct protocol:
 
 from __future__ import annotations
 
+import os
+import threading
 import time
 import warnings
 from typing import Callable, Dict, List, Optional
@@ -203,17 +205,106 @@ class QATTrainerV2:
         self._onnx_dummy_input = onnx_dummy_input
         self._extra_checkpoint_fields: Dict = extra_checkpoint_fields or {}
 
-        # Optional read-only monitoring API (opt-in via config.api_port)
+        # Manual-LR-vs-scheduler guard. Set by a set_hyperparams control
+        # command; while true the loop skips BOTH the per-step self.scheduler
+        # and the epoch-stepped ReduceLROnPlateau so a manually set LR is not
+        # immediately overwritten. Surfaced in /status as scheduler_suspended.
+        self._scheduler_suspended: bool = False
+        # Re-read epoch bound so the add-epochs control command can extend a
+        # live run; fit() drives `while epoch < self._end_epoch`.
+        self._end_epoch: Optional[int] = None
+        # Pause/resume (1b): a SET event means "running". A `pause` command
+        # clears it and the loop blocks at the step-boundary gate; `resume`
+        # (direct, off-queue) sets it again.
+        self._pause_event = threading.Event()
+        self._pause_event.set()
+        self._paused: bool = False
+        # Halt-after-epoch (1a): NOT resumable; the loop breaks after the epoch.
+        self._halt_requested: bool = False
+        # End-epoch-early (2): break the current epoch's batch loop, then validate.
+        self._end_epoch_early: bool = False
+
+        # Secondary best-checkpoint pools (metric -> manager) so reload-best can
+        # target criteria beyond the primary monitor (e.g. best train_loss
+        # alongside best val_acc). Each keeps only its single best file, no
+        # last.pt / ONNX (save_last=False), under checkpoints/by_<metric>/.
+        self._secondary_pools: Dict[str, CheckpointManager] = {}
+        for _metric, _mode in getattr(config, "secondary_checkpoint_metrics", []) or []:
+            self._secondary_pools[_metric] = CheckpointManager(
+                save_dir=os.path.join(config.checkpoint_dir, f"by_{_metric}"),
+                top_k=1, monitor_mode=_mode, save_last=False,
+                experiment_name=config.experiment_name,
+            )
+        # metric -> pool, primary included, for reload-by-criterion resolution.
+        self._checkpoint_pools: Dict[str, CheckpointManager] = {
+            config.checkpoint.monitor_metric: self.checkpoint_mgr,
+            **self._secondary_pools,
+        }
+
+        # Monitoring + control API. The ControlManager command queue is ALWAYS
+        # created so the dashboard (HTTP) and the interactive console both feed
+        # ONE queue with one apply path; the HTTP server itself is opt-in via
+        # config.api_port. callbacks=None -> callback toggles are rejected (V2
+        # has no CallbackRegistry).
         self.api_server = None
         self._api_collector = None
         if config.api_port is not None:
-            from .api import DashboardAPIServer, RunStateCollector
+            from .api import RunStateCollector
             self._api_collector = RunStateCollector(self)
             self.logger.add_listener(self._api_collector)
+        # Names the loop's toggleable behaviors so the dashboard can list and
+        # enable/disable them (V1 parity). Always built (default all-enabled =
+        # identical behavior); only mutated by a toggle_callback control command.
+        self.callbacks = self._build_callback_registry()
+
+        from .api.control import ControlManager
+        self._control = ControlManager(self, self._api_collector, callbacks=self.callbacks)
+        if config.api_port is not None:
+            from .api import DashboardAPIServer
             self.api_server = DashboardAPIServer(
-                self._api_collector, host=config.api_host, port=config.api_port
+                self._api_collector, control=self._control,
+                host=config.api_host, port=config.api_port,
             )
             self.api_server.start()
+
+    def _build_callback_registry(self):
+        """Register the V2 loop behaviors the dashboard can list / toggle.
+
+        These name behaviors that already exist inline in fit(); each gains a
+        one-line ``is_enabled()`` guard. This is not a callback framework — the
+        logic stays in the loop. Core behaviors are listed for transparency but
+        are non-toggleable.
+        """
+        from .api.control import CallbackRegistry
+        reg = CallbackRegistry()
+        reg.register("checkpointing", "epoch_end",
+                     "Save top-K / last / secondary-pool checkpoints", toggleable=True)
+        reg.register("scale_factor_tracking", "epoch_end",
+                     "Collect per-layer quantization scale factors (QAT only)",
+                     toggleable=True)
+        reg.register("plateau_qat_activation", "epoch_end",
+                     "Auto-start QAT early when the warmup loss plateaus "
+                     "(QAT still starts at float_warmup_epochs regardless)",
+                     toggleable=True)
+        if self.early_stopper is not None:
+            reg.register("early_stopping", "epoch_end",
+                         "Stop once QAT is fully annealed and the metric stalls",
+                         toggleable=True)
+        if self.config.breakdown_detection:
+            reg.register("breakdown_recovery", "epoch_end",
+                         "Detect val_acc collapse and recover from the best checkpoint",
+                         toggleable=True)
+        reg.register("user_after_step", "step_end",
+                     "User after_step_hook (if passed to fit)", toggleable=True)
+        reg.register("user_after_epoch", "epoch_end",
+                     "User after_epoch_hook (if passed to fit)", toggleable=True)
+        # Core — listed for transparency, never toggleable.
+        reg.register("optimizer_step", "step",
+                     "The optimizer update; disabling would break training",
+                     toggleable=False)
+        reg.register("metrics_logging", "step_end",
+                     "Metric logging the dashboard depends on", toggleable=False)
+        return reg
 
     # ------------------------------------------------------------------
     # Pre-training / standalone evaluation
@@ -365,15 +456,18 @@ class QATTrainerV2:
                 self.model, self.optimizer, self.scheduler, device=str(self.device)
             )
 
-        end_epoch = start_epoch + self.config.epochs
+        self._end_epoch = start_epoch + self.config.epochs
         recovery_count = 0
         all_metrics: Dict[str, float] = {}
 
         while True:
-            timer = EpochTimer(total_epochs=end_epoch - start_epoch)
+            timer = EpochTimer(total_epochs=self._end_epoch - start_epoch)
             breakdown_occurred = False
 
-            for epoch in range(start_epoch, end_epoch):
+            # while (not for-range) so the add-epochs control command can extend
+            # self._end_epoch mid-run and have the new budget take effect.
+            epoch = start_epoch
+            while epoch < self._end_epoch:
                 timer.start()
 
                 train_metrics = self._run_epoch(epoch, "train", after_step_hook=after_step_hook)
@@ -399,7 +493,10 @@ class QATTrainerV2:
                         self._plateau_lr_metric,
                         all_metrics.get("val_loss", all_metrics.get("train_loss", 0.0)),
                     )
-                    self._plateau_lr_sched.step(plateau_val)
+                    # Skip the step while suspended by a manual-LR override so
+                    # ReduceLROnPlateau does not overwrite it on its next epoch.
+                    if not self._scheduler_suspended:
+                        self._plateau_lr_sched.step(plateau_val)
                     all_metrics["lr"] = self.optimizer.param_groups[0]["lr"]
 
                 self.logger.log_epoch(epoch, all_metrics)
@@ -418,33 +515,51 @@ class QATTrainerV2:
                         train_metrics.get("train_loss", 0.0),
                     )
                     past_warmup = epoch >= self.config.qat.float_warmup_epochs
-                    if plateau_detector.step(plateau_val) or past_warmup:
+                    plateau_fired = (self.callbacks.is_enabled("plateau_qat_activation")
+                                     and plateau_detector.step(plateau_val))
+                    if plateau_fired or past_warmup:
                         self._activate_qat()
 
                 # Scale factor tracking (only once QAT is live)
-                if self._qat_active and self.config.qat.track_scale_factors:
+                if (self._qat_active and self.config.qat.track_scale_factors
+                        and self.callbacks.is_enabled("scale_factor_tracking")):
                     scales = collect_scale_factors(self.model)
                     self.tracker.record_scale_factors(epoch, scales)
                     self.logger.log_scale_factors(epoch, scales)
 
-                _ckpt_extra = {
-                    **({"ema_state_dict": self._ema.state_dict()} if self._ema else {}),
-                    **self._extra_checkpoint_fields,
-                }
-                self.checkpoint_mgr.save(
-                    epoch=epoch,
-                    metric_value=monitor_val,
-                    model=self.model,
-                    optimizer=self.optimizer,
-                    scheduler=self.scheduler,
-                    metrics_dict=all_metrics,
-                    config_dict=self.config.to_dict(),
-                    extra=_ckpt_extra or None,
-                    dummy_input=self._onnx_dummy_input,
-                )
+                if self.callbacks.is_enabled("checkpointing"):
+                    _ckpt_extra = {
+                        **({"ema_state_dict": self._ema.state_dict()} if self._ema else {}),
+                        **self._extra_checkpoint_fields,
+                    }
+                    self.checkpoint_mgr.save(
+                        epoch=epoch,
+                        metric_value=monitor_val,
+                        model=self.model,
+                        optimizer=self.optimizer,
+                        scheduler=self.scheduler,
+                        metrics_dict=all_metrics,
+                        config_dict=self.config.to_dict(),
+                        extra=_ckpt_extra or None,
+                        dummy_input=self._onnx_dummy_input,
+                    )
+
+                    # Secondary best pools (reload-by-criterion). Each ranks the
+                    # same weights by a different metric so the run can be
+                    # reloaded to e.g. best train_loss as well as the primary best.
+                    for _metric, _pool in self._secondary_pools.items():
+                        _mv = all_metrics.get(_metric)
+                        if _mv is not None:
+                            _pool.save(
+                                epoch=epoch, metric_value=_mv, model=self.model,
+                                optimizer=self.optimizer, scheduler=self.scheduler,
+                                metrics_dict=all_metrics, config_dict=self.config.to_dict(),
+                            )
 
                 # Breakdown detection: check for catastrophic accuracy collapse
-                if breakdown_detector is not None and "val_acc" in all_metrics:
+                if (breakdown_detector is not None
+                        and self.callbacks.is_enabled("breakdown_recovery")
+                        and "val_acc" in all_metrics):
                     if breakdown_detector.step(all_metrics["val_acc"]):
                         breakdown_occurred = True
 
@@ -454,6 +569,7 @@ class QATTrainerV2:
                 stop = False
                 if (
                     self.early_stopper is not None
+                    and self.callbacks.is_enabled("early_stopping")
                     and self._qat_active
                     and QuantizerManager().is_quantizing_everything_fully
                 ):
@@ -462,11 +578,16 @@ class QATTrainerV2:
                 elapsed, eta = timer.stop(epoch)
                 self._print_epoch_summary(epoch, elapsed, eta, all_metrics)
 
-                if after_epoch_hook is not None:
+                if after_epoch_hook is not None and self.callbacks.is_enabled("user_after_epoch"):
                     snap = self.tracker.history[-1] if self.tracker.history else None
                     after_epoch_hook(self, epoch, snap)
 
                 console.drain(epoch)
+                # Apply queued epoch-boundary control commands (reload-best,
+                # add-epochs). After console.drain so console-submitted commands
+                # are applied in the same pass. Cheap no-op when empty.
+                if self._control is not None:
+                    self._control.drain("epoch")
 
                 if breakdown_occurred:
                     break
@@ -482,6 +603,12 @@ class QATTrainerV2:
                 if console.stop_requested:
                     print(f"\n[console] Stopped at epoch {epoch}.")
                     break
+
+                if self._halt_requested:
+                    print(f"\n[control] Halt requested — stopping after epoch {epoch}.")
+                    break
+
+                epoch += 1
 
             # ── Outer recovery loop ────────────────────────────────────────
             if not breakdown_occurred:
@@ -506,7 +633,7 @@ class QATTrainerV2:
 
             # Fresh epoch range: full budget from the restored checkpoint
             start_epoch = best_epoch + 1
-            end_epoch = start_epoch + self.config.epochs
+            self._end_epoch = start_epoch + self.config.epochs
 
             # Fresh plateau detector (stale state would re-trigger QAT immediately
             # or never fire if it had already saturated)
@@ -753,11 +880,30 @@ class QATTrainerV2:
                 if self._ema is not None:
                     self._ema.update(self.model)
 
-                if self.scheduler is not None:
+                if self.scheduler is not None and not self._scheduler_suspended:
                     self.scheduler.step()
                     self._lr_history.append(self.scheduler.get_last_lr()[0])
 
                 self._global_step += 1
+
+                # Apply queued step-boundary control commands (LR / hyperparams,
+                # pause, end-epoch-early) here, after the optimizer + scheduler
+                # step, where nothing is mid-backward. Cheap no-op when empty.
+                if self._control is not None:
+                    self._control.drain("step")
+
+                # Pause gate: block here (a safe step boundary, nothing
+                # mid-backward) while paused. A `pause` command cleared the
+                # event; `resume` (direct, off-queue) sets it to release us.
+                if not self._pause_event.is_set():
+                    self._pause_event.wait()
+
+                # End-epoch-early: a queued command set the flag — stop taking
+                # training batches now. commit_epoch() below flushes the
+                # partial-epoch metrics; the caller then runs validation.
+                if self._end_epoch_early:
+                    self._end_epoch_early = False
+                    break
 
                 if self._global_step % self.config.logging.log_every_n_steps == 0:
                     self.logger.log_step(
@@ -766,7 +912,7 @@ class QATTrainerV2:
                         phase="train",
                     )
 
-                if after_step_hook is not None:
+                if after_step_hook is not None and self.callbacks.is_enabled("user_after_step"):
                     after_step_hook(self, loss.item(), outputs.detach(), targets)
 
             batch_size = inputs.size(0)
@@ -870,6 +1016,8 @@ class QATTrainerV2:
 _PROXY_SUFFIX_TO_ROLE: list[tuple[str, str]] = [
     (".weight_quant.tensor_quant",                              "_weight"),
     (".bias_quant.tensor_quant",                                "_bias"),
+    (".input_quant.fused_activation_quant_proxy.tensor_quant",  "_act_in"),
+    (".output_quant.fused_activation_quant_proxy.tensor_quant", "_act_out"),
     (".input_quant.tensor_quant",                               "_act_in"),
     (".output_quant.tensor_quant",                              "_act_out"),
     (".act_quant.fused_activation_quant_proxy.tensor_quant",    "_act"),
@@ -942,6 +1090,10 @@ def _reset_and_register(model: nn.Module) -> None:
 
     # Keep the manager's registry keys in sync with the descriptive names.
     mgr.quantizers = {q.quant_id: q for q in mgr.quantizers.values()}
+
+    # Cache each quantizer's canonical role (weight/bias/activation) now that
+    # quant_ids are finalized, so group-targeted control can address them.
+    mgr.stamp_roles()
 
 
 def _fully_disable_quantization(model: nn.Module) -> None:

@@ -184,8 +184,16 @@ class RunStateCollector:
             "epoch_progress": self._epoch_progress(global_step),
             "eta_s": self._eta_seconds(last_epoch, total_epochs),
             "current_lr": self._current_lr(),
-            "scheduler_active": getattr(t, "scheduler", None) is not None,
+            "scheduler_active": (getattr(t, "scheduler", None) is not None
+                                 or getattr(t, "_plateau_lr_sched", None) is not None),
             "scheduler_suspended": bool(getattr(t, "_scheduler_suspended", False)),
+            # Whether write/control endpoints are wired for this run. Distinct
+            # from "has callbacks": V2 has control but no callback registry, so
+            # the UI must NOT infer control from the callbacks list.
+            "control_enabled": getattr(t, "_control", None) is not None,
+            "paused": bool(getattr(t, "_paused", False)),
+            "halt_requested": bool(getattr(t, "_halt_requested", False)),
+            "plateau_scheduler": self._plateau_scheduler_info(),
             "best_metric": self._best_metric(),
             "last_update": self._last_update(),
         }
@@ -232,10 +240,15 @@ class RunStateCollector:
                     "mtime": self._mtime(rec.path),
                 })
         last_path = mgr.last_checkpoint_path() if mgr is not None else None
+        # Metrics with a best-checkpoint pool (primary + any secondary), so the
+        # UI can offer reload-best criteria that actually exist.
+        pools = getattr(self.trainer, "_checkpoint_pools", None)
+        pool_metrics = sorted(pools.keys()) if isinstance(pools, dict) else []
         return {
             "monitor_metric": getattr(config.checkpoint, "monitor_metric", None),
             "monitor_mode": getattr(config.checkpoint, "monitor_mode", None),
             "top_k": getattr(config.checkpoint, "top_k", None),
+            "pool_metrics": pool_metrics,
             "checkpoints": records,
             "last": {
                 "path": os.path.abspath(last_path),
@@ -255,6 +268,19 @@ class RunStateCollector:
             return records[:n]
         idx = bisect.bisect_right(keys, cursor, 0, n)
         return records[idx:n]
+
+    def _plateau_scheduler_info(self) -> Optional[Dict[str, Any]]:
+        """Current ReduceLROnPlateau settings (for the scheduler-params control),
+        or None if this run has no plateau scheduler."""
+        sched = getattr(self.trainer, "_plateau_lr_sched", None)
+        if sched is None:
+            return None
+        min_lrs = getattr(sched, "min_lrs", None)
+        return {
+            "patience": getattr(sched, "patience", None),
+            "factor": getattr(sched, "factor", None),
+            "min_lr": min_lrs[0] if min_lrs else None,
+        }
 
     def _phase_snapshot(self) -> Dict[str, Any]:
         t = self.trainer
