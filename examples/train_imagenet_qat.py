@@ -346,6 +346,28 @@ def parse_args() -> argparse.Namespace:
         "--find-lr-calib-steps", type=int, default=10,
         help="Calibration pre-pass steps in Phase 1 (default: 10)",
     )
+    lr.add_argument(
+        "--find-lr-bo",
+        action="store_true",
+        help=(
+            "Run the Bayesian-optimization LR finder (GP over log10(lr)) instead "
+            "of training. Each trial does ONE full epoch of a constant LR from "
+            "--init-from-ptq's checkpoint and scores the fresh post-epoch train "
+            "loss. Requires --init-from-ptq. Writes trials to <output-dir>/lr_bo."
+        ),
+    )
+    lr.add_argument("--find-lr-bo-min", type=float, default=1e-8,
+                    help="BO LR search lower bound (default 1e-8)")
+    lr.add_argument("--find-lr-bo-max", type=float, default=1e-3,
+                    help="BO LR search upper bound (default 1e-3)")
+    lr.add_argument("--find-lr-bo-n-initial", type=int, default=4,
+                    help="BO quasi-random seed points before the GP (default 4)")
+    lr.add_argument("--find-lr-bo-n-calls", type=int, default=16,
+                    help="BO total trials incl. seeds (default 16)")
+    lr.add_argument("--find-lr-bo-train-eval-subset", type=int, default=4096,
+                    help="Samples for the fixed post-epoch train evaluation (default 4096)")
+    lr.add_argument("--find-lr-bo-val-batches", type=int, default=None,
+                    help="Cap validation batches per trial eval (default: full val)")
 
     # ---- Reduce LR on plateau -----------------------------------------------
     rlr = p.add_argument_group("reduce lr on plateau")
@@ -940,6 +962,45 @@ def main() -> None:
             sweep_steps=args.find_lr_steps,
             out_dir=os.path.join(args.output_dir, "lr_finder"),
             grad_clip_norm=1.0,
+        )
+        return
+
+    # ── Bayesian-optimization LR finder ──────────────────────────────────────
+    if args.find_lr_bo:
+        from training_harness.lr_bayes_finder import find_learning_rate
+        if not args.init_from_ptq:
+            raise SystemExit("--find-lr-bo requires --init-from-ptq (the checkpoint "
+                             "every trial restarts from).")
+
+        # After each fresh checkpoint load, re-activate the calibrated quantizers
+        # (bypass the staggered-activation gate) so the reloaded model quantizes
+        # from its first forward instead of running as float passthrough.
+        def _prepare(m):
+            mgr = QuantizerManager()
+            mgr.quantization_start_gap = 0
+            mgr.set_annealing_for_n_inferences(1, skip_calibrated=True)
+            mgr.skip_gating_for_calibrated_quantizers()
+
+        wd = args.weight_decay
+        find_learning_rate(
+            model=model,
+            starting_checkpoint_path=args.init_from_ptq,
+            output_dir=os.path.join(args.output_dir, "lr_bo"),
+            train_loader=train_loader,
+            val_loader=val_loader,
+            optimizer_factory=lambda lr: torch.optim.AdamW(
+                model.parameters(), lr=lr, weight_decay=wd),
+            loss_fn=nn.CrossEntropyLoss(),
+            lr_min=args.find_lr_bo_min,
+            lr_max=args.find_lr_bo_max,
+            n_initial_points=args.find_lr_bo_n_initial,
+            n_calls=args.find_lr_bo_n_calls,
+            train_eval_subset_size=args.find_lr_bo_train_eval_subset,
+            val_eval_max_batches=args.find_lr_bo_val_batches,
+            device="auto",
+            seed=42,
+            grad_clip_norm=1.0,
+            prepare_model_fn=_prepare,
         )
         return
     # ─────────────────────────────────────────────────────────────────────────
