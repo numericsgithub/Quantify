@@ -14,3 +14,5 @@ datasets==4.8.4
 ultralytics[dill]==8.4.18
 matplotlib
 datasets
+# Bayesian-optimization LR finder (training_harness/lr_bayes_finder.py)
+scikit-optimize>=0.9.0

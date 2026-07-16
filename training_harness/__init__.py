@@ -16,6 +16,7 @@ from .engine_utils import set_seed, get_hardware_info, EarlyStopping
 from .trainer_v2 import QATTrainerV2
 from .config_v2 import TrainerConfigV2, QATScheduleConfigV2
 from .lr_finder import find_lr, LRFindResult
+from .lr_bayes_finder import find_learning_rate, LRFinderResult, LRTrial
 
 __all__ = [
     # V1
@@ -42,4 +43,7 @@ __all__ = [
     "QATScheduleConfigV2",
     "find_lr",
     "LRFindResult",
+    "find_learning_rate",
+    "LRFinderResult",
+    "LRTrial",
 ]
