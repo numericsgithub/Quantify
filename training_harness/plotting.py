@@ -84,6 +84,7 @@ class TrainingPlotter:
         paths.append(self.plot_loss(tracker))
         paths.append(self.plot_accuracy(tracker))
         paths.append(self.plot_lr(tracker))
+        paths.append(self.plot_train_loss_lr(tracker))
         paths.append(self.plot_overview(tracker, lr_history=lr_history))
 
         if tracker.scale_history:
@@ -186,6 +187,42 @@ class TrainingPlotter:
         ax.set_title(f"{self.experiment_name} — Learning Rate")
 
         return self._save(fig, "lr")
+
+    def plot_train_loss_lr(self, tracker) -> Optional[str]:
+        """Train loss and learning rate together on twin axes, so you can read
+        how the loss responds to the LR schedule at a glance."""
+        ep, train_loss = tracker.get_metric_series("train_loss")
+        lr_ep, lr      = tracker.get_metric_series("lr")
+        if not train_loss:
+            return None
+
+        fig, ax = plt.subplots(figsize=_FIGSIZE_WIDE)
+        _style_axes(ax)
+
+        ax.plot(ep, train_loss, color=_COLORS["train"], linewidth=1.8, label="Train loss")
+        ax.set_xlabel("Epoch")
+        ax.set_ylabel("Train loss", color=_COLORS["train"])
+        ax.tick_params(axis="y", colors=_COLORS["train"])
+
+        ax_lr = None
+        if lr:
+            ax_lr = ax.twinx()
+            ax_lr.plot(lr_ep, lr, color=_COLORS["accent"], linewidth=1.6,
+                       linestyle="--", label="Learning rate")
+            ax_lr.set_yscale("log")
+            ax_lr.set_ylabel("Learning rate", color=_COLORS["accent"])
+            ax_lr.tick_params(axis="y", colors=_COLORS["accent"])
+            ax_lr.grid(False)
+
+        ax.set_title(f"{self.experiment_name} — Train Loss & Learning Rate")
+
+        lines, labels = ax.get_legend_handles_labels()
+        if ax_lr is not None:
+            l2, lab2 = ax_lr.get_legend_handles_labels()
+            lines += l2; labels += lab2
+        ax.legend(lines, labels, framealpha=0.8, loc="upper right")
+
+        return self._save(fig, "train_loss_lr")
 
     def plot_scale_factors(self, tracker) -> Optional[str]:
         """
