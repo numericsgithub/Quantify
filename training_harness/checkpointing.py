@@ -43,7 +43,7 @@ class CheckpointRecord:
 def _build_payload(
     epoch: int,
     model: nn.Module,
-    optimizer: torch.optim.Optimizer,
+    optimizer: Optional[torch.optim.Optimizer],
     scheduler,
     metrics_dict: Dict[str, Any],
     config_dict: Optional[dict] = None,
@@ -52,9 +52,12 @@ def _build_payload(
     payload = {
         "epoch": epoch,
         "model_state_dict": model.state_dict(),
-        "optimizer_state_dict": optimizer.state_dict(),
         "metrics": metrics_dict,
     }
+    # Optimizer is optional: seed_best() may snapshot the starting checkpoint
+    # before/without one.
+    if optimizer is not None:
+        payload["optimizer_state_dict"] = optimizer.state_dict()
     if scheduler is not None:
         payload["scheduler_state_dict"] = scheduler.state_dict()
     if config_dict is not None:
@@ -128,6 +131,10 @@ class CheckpointManager:
 
         # Ranked list of saved checkpoints (best first)
         self._records: List[CheckpointRecord] = []
+        # Threshold behind 'best.pt': only a strictly better metric overwrites it.
+        # seed_best() sets this from the STARTING checkpoint so a run that only
+        # makes things worse can never regress a chained pipeline.
+        self._best_metric: Optional[float] = None
         self._load_index()
 
     # ------------------------------------------------------------------
@@ -186,6 +193,24 @@ class CheckpointManager:
             )
             torch.save(payload, periodic_path)
 
+        # 'best.pt' / 'best.onnx' — stable names for chaining runs. Only a
+        # strictly better metric than the current threshold overwrites them; the
+        # threshold is seeded from the starting checkpoint via seed_best(), so a
+        # run that ends worse than it started leaves the previous best intact.
+        if self._is_better_than_best(metric_value):
+            prev = self._best_metric
+            self._best_metric = metric_value
+            best_path = os.path.join(self.save_dir, "best.pt")
+            payload = _build_payload(
+                epoch, model, optimizer, scheduler, metrics_dict or {}, config_dict, extra
+            )
+            torch.save(payload, best_path)
+            self._export_onnx(model, best_path.replace(".pt", ".onnx"), dummy_input)
+            self._save_index()
+            prev_s = "none" if prev is None else f"{prev:.6f}"
+            print(f"  [ckpt] New best → best.pt / best.onnx "
+                  f"({metric_value:.6f}, previous {prev_s})")
+
         # Top-K logic
         if self._should_save(metric_value):
             fname = f"{self.experiment_name}_epoch{epoch:04d}_metric{metric_value:.6f}.pt"
@@ -206,6 +231,45 @@ class CheckpointManager:
             )
 
         return path
+
+    def seed_best(
+        self,
+        metric_value: float,
+        model: nn.Module,
+        optimizer: Optional[torch.optim.Optimizer] = None,
+        scheduler=None,
+        metrics_dict: Optional[Dict[str, Any]] = None,
+        config_dict: Optional[dict] = None,
+        extra: Optional[dict] = None,
+        dummy_input: Optional[torch.Tensor] = None,
+    ) -> str:
+        """Seed 'best.pt'/'best.onnx' from the STARTING checkpoint and set the
+        best-metric threshold to its score.
+
+        This keeps a chain of runs monotonic: if a run starts at 71.00% and ends
+        at 69.20%, nothing beat the threshold, so best.pt still holds the 71.00%
+        model and the next run in the chain picks that up instead of regressing.
+        Call this right after the pre-training (baseline) evaluation.
+        """
+        self._best_metric = metric_value
+        best_path = os.path.join(self.save_dir, "best.pt")
+        payload = _build_payload(
+            -1, model, optimizer, scheduler, metrics_dict or {}, config_dict, extra
+        )
+        torch.save(payload, best_path)
+        self._export_onnx(model, best_path.replace(".pt", ".onnx"), dummy_input)
+        self._save_index()
+        print(f"  [ckpt] Seeded best.pt / best.onnx from the starting checkpoint "
+              f"(threshold {metric_value:.6f} — a worse run cannot regress the chain)")
+        return best_path
+
+    def _is_better_than_best(self, metric_value: float) -> bool:
+        """True if metric_value beats the current best threshold."""
+        if self._best_metric is None:
+            return True
+        if self.monitor_mode == "min":
+            return metric_value < self._best_metric
+        return metric_value > self._best_metric
 
     def best_checkpoint_path(self) -> Optional[str]:
         """Return the path of the best checkpoint, or None if none saved."""
@@ -349,6 +413,7 @@ class CheckpointManager:
         data = {
             "monitor_mode": self.monitor_mode,
             "top_k": self.top_k,
+            "best_metric": self._best_metric,
             "records": [r.to_dict() for r in self._records],
         }
         with open(self._index_path(), "w") as f:
@@ -360,6 +425,7 @@ class CheckpointManager:
             return
         with open(path) as f:
             data = json.load(f)
+        self._best_metric = data.get("best_metric")
         self._records = [
             CheckpointRecord(**r)
             for r in data.get("records", [])

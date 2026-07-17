@@ -47,7 +47,7 @@ from quantizers.manager import QuantizerManager
 from training_harness.trainer_v2 import QATTrainerV2
 from training_harness.config_v2 import TrainerConfigV2, QATScheduleConfigV2
 from training_harness.config import CheckpointConfig
-from training_harness.schedulers import WarmupCosineScheduler
+from training_harness.schedulers import WarmupCosineScheduler, StepDecayScheduler
 from training_harness.lr_finder import find_lr
 from utils.weight_mapping import load_timm_weights
 from utils.bn_fusion import fuse_bn_into_conv
@@ -380,6 +380,24 @@ def parse_args() -> argparse.Namespace:
              "--reduce-lr-* options: cosine steps every batch and would "
              "overwrite any plateau-triggered reduction, so ReduceLROnPlateau "
              "is disabled when this is set.",
+    )
+    rlr.add_argument(
+        "--step-lr",
+        action="store_true",
+        help="Use a simple piecewise-constant step-decay LR schedule instead of "
+             "cosine/ReduceLROnPlateau: hold --lr, then multiply by "
+             "--step-lr-gamma at each --step-lr-milestones fraction of the run. "
+             "Easier to attribute a piece of the loss curve to a specific LR than "
+             "a cosine (which changes every step).",
+    )
+    rlr.add_argument(
+        "--step-lr-milestones", type=float, nargs="+", default=[1.0 / 3.0, 2.0 / 3.0],
+        metavar="FRAC",
+        help="Fractions of the run at which the LR drops (default: 0.333 0.667)",
+    )
+    rlr.add_argument(
+        "--step-lr-gamma", type=float, default=0.1,
+        help="Multiplicative LR factor at each milestone (default: 0.1)",
     )
     rlr.add_argument(
         "--cosine-warmup-frac", type=float, default=0.1,
@@ -1009,6 +1027,8 @@ def main() -> None:
     # reduction on the very next batch, so the two cannot coexist; --cosine-lr
     # swaps to cosine and disables the plateau scheduler below.
     scheduler = None
+    if args.cosine_lr and args.step_lr:
+        raise SystemExit("--cosine-lr and --step-lr are mutually exclusive.")
     if args.cosine_lr:
         total_steps = len(train_loader) * args.epochs
         scheduler = WarmupCosineScheduler(
@@ -1020,6 +1040,20 @@ def main() -> None:
         print(f"[lr-schedule] Cosine: total_steps={total_steps:,} "
               f"warmup={int(total_steps * args.cosine_warmup_frac):,} "
               f"eta_min={args.cosine_eta_min} (ReduceLROnPlateau disabled)")
+    elif args.step_lr:
+        total_steps = len(train_loader) * args.epochs
+        scheduler = StepDecayScheduler(
+            optimizer,
+            total_steps=total_steps,
+            milestones_frac=args.step_lr_milestones,
+            gamma=args.step_lr_gamma,
+        )
+        stages = [args.lr * (args.step_lr_gamma ** i)
+                  for i in range(len(args.step_lr_milestones) + 1)]
+        print(f"[lr-schedule] Step decay: total_steps={total_steps:,} "
+              f"milestones={args.step_lr_milestones} gamma={args.step_lr_gamma} "
+              f"→ stage LRs {['%.2e' % s for s in stages]} "
+              f"(ReduceLROnPlateau disabled)")
 
     # V2 harness config
     config = TrainerConfigV2(
@@ -1056,7 +1090,7 @@ def main() -> None:
         ),
 
         early_stopping_patience=None,
-        reduce_lr_on_plateau=not args.cosine_lr,
+        reduce_lr_on_plateau=not (args.cosine_lr or args.step_lr),
         reduce_lr_patience=args.reduce_lr_patience,
         reduce_lr_factor=args.reduce_lr_factor,
         reduce_lr_min_lr=args.reduce_lr_min_lr,

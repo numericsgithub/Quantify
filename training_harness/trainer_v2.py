@@ -328,6 +328,26 @@ class QATTrainerV2:
                 f"  Baseline  val_loss={baseline.get('val_loss', float('nan')):.4f}"
                 f"  val_acc={baseline.get('val_acc', float('nan')):.4f}\n"
             )
+            # Seed best.pt/best.onnx from the STARTING checkpoint and set the
+            # best threshold to its score, so a run that ends worse than it
+            # started leaves the previous best intact (chained runs stay
+            # monotonic — the next run picks up this checkpoint, not a
+            # regression).
+            _seed_metric = baseline.get(self.config.checkpoint.monitor_metric)
+            if _seed_metric is not None:
+                self.checkpoint_mgr.seed_best(
+                    metric_value=_seed_metric,
+                    model=self.model,
+                    optimizer=self.optimizer,
+                    scheduler=self.scheduler,
+                    metrics_dict=baseline,
+                    config_dict=self.config.to_dict(),
+                    extra={
+                        **({"ema_state_dict": self._ema.state_dict()} if self._ema else {}),
+                        **self._extra_checkpoint_fields,
+                    } or None,
+                    dummy_input=self._onnx_dummy_input,
+                )
 
         plateau_detector = LossPlateauDetector(
             patience=self.config.qat.plateau_patience,

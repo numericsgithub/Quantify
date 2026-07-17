@@ -199,7 +199,14 @@ class TrainingPlotter:
         fig, ax = plt.subplots(figsize=_FIGSIZE_WIDE)
         _style_axes(ax)
 
-        ax.plot(ep, train_loss, color=_COLORS["train"], linewidth=1.8, label="Train loss")
+        # Raw loss (faint) + a smoothed trend line on top, so the trend is
+        # readable through the per-epoch noise.
+        ax.plot(ep, train_loss, color=_COLORS["train"], linewidth=1.0, alpha=0.35,
+                label="Train loss (raw)")
+        smooth = _smooth(train_loss)
+        if smooth is not None:
+            ax.plot(ep, smooth, color=_COLORS["train"], linewidth=2.4,
+                    label=f"Train loss (smoothed, w={_smooth_window(len(train_loss))})")
         ax.set_xlabel("Epoch")
         ax.set_ylabel("Train loss", color=_COLORS["train"])
         ax.tick_params(axis="y", colors=_COLORS["train"])
@@ -358,6 +365,28 @@ class TrainingPlotter:
         plt.close(fig)
         print(f"[plot] Saved → {path}")
         return path
+
+
+def _smooth_window(n: int) -> int:
+    """Odd smoothing window ~9% of the series, clamped to [3, 21]."""
+    w = max(3, min(21, int(round(n * 0.09)) | 1))
+    return w if w % 2 == 1 else w + 1
+
+
+def _smooth(values: List[float]) -> Optional[List[float]]:
+    """Centered moving average with shrinking windows at the edges (so the
+    smoothed line spans the full x-range instead of being clipped)."""
+    n = len(values)
+    if n < 5:
+        return None
+    w = _smooth_window(n)
+    half = w // 2
+    out: List[float] = []
+    for i in range(n):
+        lo, hi = max(0, i - half), min(n, i + half + 1)
+        window = values[lo:hi]
+        out.append(sum(window) / len(window))
+    return out
 
 
 def _style_axes(ax) -> None:

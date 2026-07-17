@@ -87,6 +87,56 @@ class WarmupCosineScheduler(LRScheduler):
 
 
 # ---------------------------------------------------------------------------
+# StepDecayScheduler
+# ---------------------------------------------------------------------------
+
+class StepDecayScheduler(LRScheduler):
+    """
+    Piecewise-constant ("step decay") learning rate.
+
+    Holds a constant LR, then multiplies it by ``gamma`` at each milestone.
+    Milestones are given as *fractions of the run* so the same config works for
+    any epoch count.
+
+    Deliberately simpler than cosine: because the LR is constant within each
+    stage, it is easy to attribute a piece of the loss curve to a specific LR
+    (a cosine sweeps continuously, so every epoch has a different LR and you
+    cannot tell which value produced which behaviour).
+
+    Call ``scheduler.step()`` once per **optimizer step** (not per epoch).
+
+    Example (default): lr for the first third, lr*0.1 for the second third,
+    lr*0.01 for the last third::
+
+        scheduler = StepDecayScheduler(optimizer, total_steps=N,
+                                       milestones_frac=(1/3, 2/3), gamma=0.1)
+    """
+
+    def __init__(
+        self,
+        optimizer: Optimizer,
+        total_steps: int,
+        milestones_frac=(1.0 / 3.0, 2.0 / 3.0),
+        gamma: float = 0.1,
+        last_epoch: int = -1,
+    ):
+        if total_steps <= 0:
+            raise ValueError(f"total_steps must be > 0, got {total_steps}")
+        for f in milestones_frac:
+            if not (0.0 < f < 1.0):
+                raise ValueError(f"milestone fractions must be in (0, 1), got {milestones_frac}")
+        self.total_steps = total_steps
+        self.gamma = gamma
+        self.milestones = sorted(int(total_steps * f) for f in milestones_frac)
+        super().__init__(optimizer, last_epoch)
+
+    def get_lr(self):
+        n_passed = sum(1 for m in self.milestones if self.last_epoch >= m)
+        factor = self.gamma ** n_passed
+        return [base_lr * factor for base_lr in self.base_lrs]
+
+
+# ---------------------------------------------------------------------------
 # QATWarmupScheduler
 # ---------------------------------------------------------------------------
 
