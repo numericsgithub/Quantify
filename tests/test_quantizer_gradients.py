@@ -38,6 +38,7 @@ EXPECTED_W_GRAD = -18.0
 EXPECTED_B_GRAD = -6.0
 EXPECTED_Y_HAT = 7.0
 TOL = 1e-4
+CALIB_LSB = 0     # pinned by the fixture: step = 2^0 = 1, w=2.0 exact, no saturation
 
 # Two-layer formula: h = q1(w_1)*x + b_1 ; y_hat = h*q2(w_2) + b_2
 # w_1=2, b_1=1, x=3, w_2=2, b_2=0, y=20
@@ -136,6 +137,14 @@ def _make_calibrated_quantizer(bit_width: int = 8) -> FixedPointPerTensorQuantiz
     with torch.no_grad():
         q(torch.tensor([0.0, 1.0, 2.0, 3.0, 4.0]))  # triggers _calibrate() -> sets search_done=True
     assert q.search_done.item(), "calibration did not set search_done=True"
+
+    # Pin the grid rather than depending on whichever rule find_optimal_lsb
+    # currently uses. This module measures gradient flow, and its ground-truth
+    # values assume an integer grid (step = 2^0 = 1) on which w=2.0 is exact and
+    # nothing saturates. Which selection rule happens to produce that grid is not
+    # what these tests are about, and letting it leak in makes them fail for
+    # unrelated reasons whenever calibration changes.
+    q.search_result_lsb.fill_(CALIB_LSB)
     return q
 
 

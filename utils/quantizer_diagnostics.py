@@ -29,8 +29,18 @@ import torch
 import numpy as np
 
 # Maximum number of individual values sent to numpy/matplotlib for plotting.
-# Metrics are always computed on the full tensor regardless of this limit.
 MAX_PLOT_SAMPLES = 100_000
+
+# Maximum number of elements the scalar metrics reduce over. Activation tensors
+# at batch 1024 reach hundreds of millions of elements (e.g. 1024×32×112×112 =
+# 411M); reducing over the full tensor — especially torch.unique(), which SORTS
+# its whole input — allocated ~9 GiB in a single op mid-training and OOM'd the
+# GPU. Reductions over a uniform random subsample of this many elements give
+# statistically identical MAE/MSE/SQNR/clip-% and still capture every
+# meaningfully-used code on the ≤2^bit_width grid, at a peak cost of a few
+# hundred MB regardless of batch size. Tensors at or below this size are
+# measured exactly (all weight quantizers, and small activation tensors).
+MAX_METRIC_SAMPLES = 4_000_000
 
 
 # ---------------------------------------------------------------------------
@@ -46,10 +56,13 @@ def _compute_metrics(
     input_shape: Tuple[int, ...],
     quantizer_role: str,
 ) -> Dict[str, Any]:
-    """All heavy reductions stay on the tensor's original device."""
-    x_f = x.float()
-    q_f = quantized.float()
+    """All heavy reductions stay on the tensor's original device.
 
+    Reductions are computed over at most MAX_METRIC_SAMPLES elements (a uniform
+    random subsample for larger tensors) so peak memory is bounded regardless of
+    batch size — see the note on MAX_METRIC_SAMPLES. Percentages are relative to
+    the sampled count; ``n_elements`` still reports the full tensor size.
+    """
     step = 2.0 ** lsb
 
     if signed:
@@ -60,16 +73,30 @@ def _compute_metrics(
         q_max = (2 ** bit_width - 1) * step
     n_representable = 2 ** bit_width
 
-    n_elements = x_f.numel()
+    n_elements = x.numel()
+
+    # Bound peak memory: reduce over at most MAX_METRIC_SAMPLES elements.
+    # torch.take() gathers into an output the size of the index tensor and works
+    # on non-contiguous inputs, so nothing the size of the full tensor is ever
+    # materialised (the OOM was here: torch.unique over 411M elements).
+    if n_elements > MAX_METRIC_SAMPLES:
+        idx = torch.randint(0, n_elements, (MAX_METRIC_SAMPLES,), device=x.device)
+        x_f = torch.take(x, idx).float()
+        q_f = torch.take(quantized, idx).float()
+        n_sample = MAX_METRIC_SAMPLES
+    else:
+        x_f = x.reshape(-1).float()
+        q_f = quantized.reshape(-1).float()
+        n_sample = n_elements
 
     # unique_vals has at most 2^bit_width entries — safe to transfer to CPU
-    unique_vals = torch.unique(q_f.ravel())
+    unique_vals = torch.unique(q_f)
     n_unique = unique_vals.numel()
 
     clip_low  = int((x_f < q_min).sum().item())
     clip_high = int((x_f > q_max).sum().item())
-    clip_low_pct  = 100.0 * clip_low  / max(n_elements, 1)
-    clip_high_pct = 100.0 * clip_high / max(n_elements, 1)
+    clip_low_pct  = 100.0 * clip_low  / max(n_sample, 1)
+    clip_high_pct = 100.0 * clip_high / max(n_sample, 1)
 
     err = x_f - q_f
     mae    = err.abs().mean().item()
@@ -93,6 +120,7 @@ def _compute_metrics(
         "q_min":           q_min,
         "q_max":           q_max,
         "n_elements":      n_elements,
+        "n_metric_samples": n_sample,
         "input_shape":     input_shape,
         "quantizer_role":  quantizer_role,
         "n_unique":        n_unique,
@@ -122,8 +150,13 @@ def _append_log(log_path: Path, quant_id: str, trigger: str, m: Dict[str, Any]) 
 
     n_total = m["n_elements"]
     n_plot  = m.get("n_plot_samples", n_total)
-    sample_line = (f"  Plot sample        : {n_plot:,} / {n_total:,} (random subsample)\n"
-                   if n_plot < n_total else "")
+    n_metric = m.get("n_metric_samples", n_total)
+    sample_line = ""
+    if n_metric < n_total:
+        sample_line += (f"  Metric sample      : {n_metric:,} / {n_total:,} "
+                        f"(random subsample; %/MSE/SQNR estimated)\n")
+    if n_plot < n_total:
+        sample_line += f"  Plot sample        : {n_plot:,} / {n_total:,} (random subsample)\n"
 
     shape_str = "×".join(str(d) for d in m["input_shape"])
 

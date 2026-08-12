@@ -133,6 +133,21 @@ class TrainerConfigV2:
     checkpoint: CheckpointConfig = field(default_factory=CheckpointConfig)
     logging: LoggingConfig = field(default_factory=LoggingConfig)
 
+    # ---- best.pt selection -------------------------------------------------
+    seed_best_from_start: bool = True
+    """Seed best.pt from the starting checkpoint (keeps chained runs monotonic).
+    Set False when the starting model is NOT in the final quantization state you
+    care about — e.g. a progressive activation-introduction run that begins
+    weights+bias-only and must only ever save a FULLY quantized best.pt. A
+    partial-quant seed would set an unbeatable threshold and freeze best.pt."""
+
+    require_full_quant_for_best: bool = False
+    """Only allow best.pt to update on epochs where every quantizer is fully
+    quantized (quant_pct >= 1.0 — all gates open, all annealing complete). Used
+    by the activation-introduction curriculum so a partially-quantized epoch
+    (which scores higher precisely because fewer activations are quantized) can
+    never win best.pt. No effect on runs that are fully quantized from epoch 0."""
+
     # ---- Early stopping ----------------------------------------------------
     early_stopping_patience: Optional[int] = None
     """Only active after QAT has started. Set to None to disable."""

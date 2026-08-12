@@ -186,6 +186,50 @@ def parse_args() -> argparse.Namespace:
              "LSB position (finer grid). Implicitly disables all activation quantizers. "
              "A before/after table is printed as a sanity check.",
     )
+    q.add_argument(
+        "--no-clip-to-quant-range",
+        action="store_true",
+        help="Skip the one-time clamp of weights/biases into their quantizer's "
+             "representable range, which normally runs once after a PTQ checkpoint "
+             "is loaded and before training starts. The clamp is on by default "
+             "because a loaded checkpoint routinely holds parameters far outside "
+             "the grid their quantizer can represent (measured: 5x outside); those "
+             "are pinned at the clip bound, so their quantized value is frozen while "
+             "plain STE keeps pushing them further out. Clamping only moves the "
+             "latent float value inside the bounds — it does NOT round onto the "
+             "grid. Use this flag only to A/B the clamp's effect.",
+    )
+
+    q.add_argument(
+        "--no-seed-best",
+        action="store_true",
+        help="Do NOT seed best.pt from the starting checkpoint. Use when the "
+             "start state is not the final quantization state you want saved — "
+             "e.g. a progressive activation-introduction run that begins "
+             "weights+bias-only; seeding would freeze best.pt at that partial "
+             "model's score. best.pt then starts empty and captures the first "
+             "qualifying epoch.",
+    )
+    q.add_argument(
+        "--require-full-quant-for-best",
+        action="store_true",
+        help="Only let best.pt update on epochs where EVERY quantizer is fully "
+             "quantized (all gates open, annealing complete). Pairs with a "
+             "progressive introduction run so a partially-quantized epoch — "
+             "which scores higher only because fewer activations are quantized — "
+             "cannot win best.pt.",
+    )
+    q.add_argument(
+        "--weight-sigma-k",
+        type=float,
+        default=None,
+        metavar="K",
+        help="Override the robust-sigma k for WEIGHT LSB calibration "
+             "(fixedpoint_per_tensor.ROBUST_SIGMA_K_WEIGHT, default 12). The best "
+             "k is model-specific: MobileNetV2/ResNets ~12, but MobileNetV1's "
+             "depthwise layers need a much larger k (~20) or per-tensor "
+             "quantization collapses the model. See pitfall #15.",
+    )
 
     # ---- Training ----------------------------------------------------------
     t = p.add_argument_group("training")
@@ -787,6 +831,81 @@ def _disable_act_quant_proxies(model: nn.Module) -> None:
             m.disable_quant = True
 
 
+def _clip_params_to_quant_range(model: nn.Module) -> None:
+    """
+    One-time clamp of every quantized weight/bias into its quantizer's
+    representable range. Clamp only — nothing is rounded onto the grid; the
+    latent float values stay float, they are just brought inside the bounds.
+
+    Why: a PTQ checkpoint routinely contains parameters that sit far outside the
+    grid their quantizer can represent (classifier.1 was measured at |w|max=1.251
+    against a range of +/-0.25 — 5x outside). Those parameters are pinned at the
+    clip bound in the forward pass, so their quantized value is a constant, while
+    plain STE keeps leaking slope-1 gradient into them and pushes them further out
+    still. They are dead weight that training cannot recover: moving them changes
+    nothing the model sees. Clamping once at load puts them back on the boundary,
+    where a gradient step can actually bring them back into range.
+
+    Runs after BN fusion (which rewrites weights and creates conv biases) and
+    after any LSB edit, so the bounds are final. Quantizers that define no
+    uniform range (representable_range() -> None) are skipped, as are any not yet
+    calibrated.
+    """
+    from quantizers.base_quantizer import BaseQuantizer
+
+    col = 54
+    print("\n[clip-to-quant-range] Clamping weights/biases into their quantizer's range")
+    print(f"  {'Module path':<{col}}  {'kind':>6}  {'range':>22}  {'|p|max before':>13}  "
+          f"{'after':>9}  {'clamped':>9}")
+    print(f"  {'-'*col}  {'-'*6}  {'-'*22}  {'-'*13}  {'-'*9}  {'-'*9}")
+
+    n_seen = n_touched = n_elems = 0
+    for path, module in model.named_modules():
+        if not isinstance(module, BaseQuantizer):
+            continue
+        for suffix, attr in ((".weight_quant.tensor_quant", "weight"),
+                             (".weight_quant", "weight"),
+                             (".bias_quant.tensor_quant", "bias"),
+                             (".bias_quant", "bias")):
+            if not path.endswith(suffix):
+                continue
+            parent_path = path[: -len(suffix)]
+            try:
+                owner = model.get_submodule(parent_path)
+            except AttributeError:
+                break
+            param = getattr(owner, attr, None)
+            if param is None:      # e.g. a Brevitas ghost proxy, or bias=False
+                break
+            bounds = module.representable_range()
+            if bounds is None:     # uncalibrated, or no uniform grid (coefficient quant)
+                break
+            lo, hi = bounds
+            n_seen += 1
+            before = float(param.data.abs().max())
+            out = int(((param.data < lo) | (param.data > hi)).sum())
+            if out:
+                param.data.clamp_(lo, hi)
+                n_touched += 1
+                n_elems += out
+            after = float(param.data.abs().max())
+            if out:
+                print(f"  {parent_path:<{col}}  {attr:>6}  "
+                      f"[{lo:>9.4g},{hi:>9.4g}]  {before:>13.5g}  {after:>9.5g}  "
+                      f"{out:>9}")
+            break
+
+    if n_seen == 0:
+        print("  WARNING: no calibrated weight/bias quantizers found — nothing was "
+              "clamped. Load a PTQ checkpoint first, or this is a silent no-op.")
+    else:
+        print(f"\n  {n_seen} quantized tensor(s) checked; {n_touched} had out-of-range "
+              f"values ({n_elems} elements clamped).")
+        if n_touched == 0:
+            print("  (every parameter was already inside its grid)")
+    print()
+
+
 def _apply_weight_lsb_subtract(model: nn.Module, delta: int) -> None:
     """
     Subtract `delta` from every weight quantizer's search_result_lsb buffer,
@@ -908,6 +1027,12 @@ def _build_hf_loaders(args):
 def main() -> None:
     args = parse_args()
 
+    # Per-model weight-LSB k override (must be set before any quantizer calibrates).
+    if args.weight_sigma_k is not None:
+        import quantizers.fixedpoint_per_tensor as _fp
+        _fp.ROBUST_SIGMA_K_WEIGHT = float(args.weight_sigma_k)
+        print(f"[calib] ROBUST_SIGMA_K_WEIGHT overridden -> {args.weight_sigma_k}")
+
     # Build quantizer injector classes
     weight_quant = _make_weight_quant(args)
     act_quant    = _make_act_quant(args)
@@ -960,6 +1085,16 @@ def main() -> None:
 
     if args.weight_lsb_subtract:
         _apply_weight_lsb_subtract(model, args.weight_lsb_subtract)
+
+    # One-time clamp into the representable range. Must come after BN fusion (it
+    # rewrites weights and creates conv biases) and after --weight-lsb-subtract
+    # (it MUTATES search_result_lsb, which moves the bounds), so this is the first
+    # point where the grid is final. Both the --pretrained-qat and --init-from-ptq
+    # paths have converged by here, and training has not started.
+    # Note: --find-lr-bo reloads the checkpoint per trial, so the clamp does not
+    # persist across its trials.
+    if (args.pretrained_qat or args.init_from_ptq) and not args.no_clip_to_quant_range:
+        _clip_params_to_quant_range(model)
 
     # Optimizer
     optimizer = torch.optim.AdamW(
@@ -1081,6 +1216,9 @@ def main() -> None:
             track_scale_factors=True,
             preserve_calibrated_quantizers=bool(args.init_from_ptq or args.pretrained_qat),
         ),
+
+        seed_best_from_start=not args.no_seed_best,
+        require_full_quant_for_best=args.require_full_quant_for_best,
 
         checkpoint=CheckpointConfig(
             monitor_metric="val_acc",

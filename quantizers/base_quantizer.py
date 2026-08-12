@@ -221,6 +221,22 @@ class BaseQuantizer(nn.Module, ABC):
         """Return scale, zero_point, and bit_width tensors matching x's dtype/device."""
         raise NotImplementedError
 
+    def representable_range(self, params: Any = None) -> Optional[Tuple[float, float]]:
+        """
+        Return (lower, upper) — the float bounds this quantizer's grid can
+        represent, i.e. the exact values its forward clamp saturates against.
+
+        The base implementation returns None, meaning "this quantizer does not
+        define a uniform range". Callers must treat None as "skip me" rather than
+        assuming a range: CoefficientPerTensorWeightQuantizer, for instance,
+        quantizes onto a non-uniform grid with no LSB at all, so an LSB-derived
+        clamp would be actively wrong for it.
+
+        Also returns None when the quantizer has not been calibrated yet — there
+        is no grid to describe until a calibration forward has run.
+        """
+        return None
+
     def _in_range_mask(self, x: torch.Tensor, params: Any) -> Optional[torch.Tensor]:
         """
         Return a boolean/0-1 tensor (same shape as x) that is True where the

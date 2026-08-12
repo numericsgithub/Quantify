@@ -173,3 +173,51 @@ This has two consequences:
 4. **Wrong activation.** Brevitas `QuantReLU` is an *unbounded* ReLU in float mode (and whenever quantization is disabled — i.e. all of float warmup/fine-tuning). MobileNetV1/V2 pretrained weights are trained with **ReLU6**; the missing ceiling cost ~16 pts (V2: 0.56→0.73) and ~9 pts (V1: 0.66→0.75). Use `models/quant_activations.py::QuantReLU6` (clamps input at 6, then `QuantReLU`) — exact ReLU6 in float mode, preserves the *unsigned* activation quantizer for QAT, correct upper-branch gradient for STE.
 
 **How to Prevent It:** After any non-trivial weight remap, **verify the float model numerically against the reference** before trusting it — build the `timm` model and your model, disable quantization (`training_harness/trainer_v2.py::_fully_disable_quantization`), and run both over the val set on the same loader. When the remap and architecture are correct, a quant-disabled model is *numerically identical* to `timm` (both MobileNets now match the reference to 4 decimals: V2 0.7271, V1 0.7514 on full ImageNet val). Anything short of a near-exact match means one of the four failure modes above is present. `Loaded N/N tensors` is necessary but nowhere near sufficient.
+
+## 14. Quantizer Diagnostics OOM on Activation Tensors — `torch.unique` Sorts the Whole Batch
+
+**When this happens:** QAT with activation quantizers at a large batch (e.g. ImageNet batch 1024) crashes with `torch.OutOfMemoryError: Tried to allocate 9.19 GiB` deep inside `utils/quantizer_diagnostics._compute_metrics`, triggered from `BaseQuantizer.forward → _maybe_run_diagnostics`. Weight-only runs never hit it; it appears only once activation quantizers start calibrating/annealing, and often not on the *first* activation event but a few epochs in (fragmentation tips the borderline allocation over).
+
+**The Problem:** Diagnostics fire per quantizer on calibration and post-annealing. `_compute_metrics` ran every reduction over the **full** tensor. The first post-stem activation is `1024×32×112×112 = 411M` elements (1.64 GB), and `torch.unique(q_f.ravel())` **sorts the entire input** — a ~9 GiB workspace in one allocation — even though the *output* is ≤ `2^bit_width` values. A code comment ("unique_vals has at most 2^bit_width entries — safe to transfer to CPU") reasoned about output size and missed that the *computation* scales with input size. `err = x_f - q_f`, `err**2`, and the clip masks pile several more full-size temporaries on top of an already-near-full training step.
+
+**How to Prevent It:** Bound diagnostics memory independently of batch size. `_compute_metrics` now reduces over at most `MAX_METRIC_SAMPLES` (4M) elements via `torch.take` with random indices (works on non-contiguous tensors, allocates only index-sized output); tensors at/below the cap are still exact. Peak extra memory at the 411M-element size dropped from ~9,190 MB attempted to **116 MB measured**, with MSE/SQNR/clip-% statistically unchanged and all ≤256 grid codes still captured. Percentages are relative to the sampled count; `n_elements` still reports the true size. Regression tests in `tests/test_diagnostics_memory.py` assert peak GPU memory does **not** scale with batch and that subsampled metrics match the full tensor. General rule: never run `torch.unique` / `argsort` / full-tensor reductions on activation tensors in a hot or memory-tight path — subsample, or use a bounded-range `bincount` on integer codes.
+
+## 15. Per-Tensor Weight Quantization Collapses MobileNetV1 — the Weight k Is Model-Specific
+
+**When this happens:** You reuse the MobileNetV2-tuned weight calibration
+(`ROBUST_SIGMA_K_WEIGHT = 12`) for MobileNetV1 (or any depthwise-heavy net) and
+the PTQ checkpoint evaluates at ~1% top-1 — near random — even though the float
+model is fine. QAT then crawls up from ~1% and looks stuck.
+
+**The Problem:** MobileNetV1's depthwise convolutions have extreme per-channel
+weight range variation, and a single **per-tensor** scale cannot represent them.
+The robust-σ k that works for MobileNetV2/ResNets (k=12) is far too small for
+MobileNetV1 — it clips the depthwise layers into oblivion. Measured on the
+pretrained float model (val subset), weights-only 8-bit per-tensor:
+
+| model | float | W(k12) | W(k16) | W(k20) | W(k24) |
+|-------|------:|-------:|-------:|-------:|-------:|
+| mobilenetv1 | 81.0% | **2.1%** | 14.1% | **26.9%** | 1.1% |
+| resnet18    | 78.2% | 50.3%  |   —    |   —    |   —    |
+
+Two lessons: (1) the collapse is **weights**, not biases (MobileNetV1 biases-only
+= 60%); (2) accuracy vs k is a **step function** (k=20 ≫ k=24) — each layer's LSB
+flips at its own k, so pick a k on a plateau, and it is **per-model**. ResNets
+and MobileNetV2 are per-tensor-friendly (ResNet18 W(k12)+B = 59.5%, a fine QAT
+start); MobileNetV1 is the outlier.
+
+**How to Prevent It:**
+- Never assume one model's calibration k transfers. Before committing a model to
+  the pipeline, run a quick weights-only PTQ accuracy sweep over k and pick the
+  best plateau. MobileNetV1 wants ~20, not 12.
+- Override per model via `--weight-sigma-k` (wired into
+  `examples/create_ptq_checkpoint.py`, `examples/train_imagenet_qat.py`, and
+  threaded through `run_int8_pipeline.sh` → `run_mnv2_qat_chain.sh` as `WSIGMA` /
+  `WEIGHT_SIGMA_K`; `scripts/schedule_other_models.sh` sets it per model in PLAN).
+- The *proper* fix for depthwise nets is **per-channel weight quantization** (one
+  scale per output channel). Even the best per-tensor k for MobileNetV1 (~27%
+  weights-only) starts well below float; per-channel is the path to near-float and
+  is the parked feature in `docs/llm/FEATURE_IDEAS.md`.
+- Always sanity-check a new model with the quant-DISABLED float eval first: if the
+  float number is right (MobileNetV1 = 81% on the subset here) but the quantized
+  number is ~random, the bug is calibration, not the model/weight-loading.

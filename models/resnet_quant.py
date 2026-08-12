@@ -37,17 +37,21 @@ class QuantBasicBlock(nn.Module):
     expansion = 1
 
     def __init__(self, in_planes, planes, stride=1,
-                 weight_quant=None, act_quant=None, downsample=None):
+                 weight_quant=None, act_quant=None, downsample=None,
+                 bias_quant=None):
         super().__init__()
+        # bias=False + bias_quant: BN fusion later assigns conv.bias, and
+        # Brevitas wires a bias quantizer for the folded bias at that point.
+        bq = {"bias_quant": bias_quant} if bias_quant is not None else {}
         self.conv1 = qnn.QuantConv2d(
             in_planes, planes, 3, stride=stride, padding=1, bias=False,
-            weight_quant=weight_quant,
+            weight_quant=weight_quant, **bq,
         )
         self.bn1 = nn.BatchNorm2d(planes)
         self.relu1 = _relu(act_quant)
         self.conv2 = qnn.QuantConv2d(
             planes, planes, 3, stride=1, padding=1, bias=False,
-            weight_quant=weight_quant,
+            weight_quant=weight_quant, **bq,
         )
         self.bn2 = nn.BatchNorm2d(planes)
         self.pre_add_quant = _quant_identity(act_quant)
@@ -70,19 +74,23 @@ class QuantBottleneck(nn.Module):
     expansion = 4
 
     def __init__(self, in_planes, planes, stride=1,
-                 weight_quant=None, act_quant=None, downsample=None):
+                 weight_quant=None, act_quant=None, downsample=None,
+                 bias_quant=None):
         super().__init__()
-        self.conv1 = qnn.QuantConv2d(in_planes, planes, 1, bias=False, weight_quant=weight_quant)
+        bq = {"bias_quant": bias_quant} if bias_quant is not None else {}
+        self.conv1 = qnn.QuantConv2d(in_planes, planes, 1, bias=False,
+                                     weight_quant=weight_quant, **bq)
         self.bn1 = nn.BatchNorm2d(planes)
         self.relu1 = _relu(act_quant)
         self.conv2 = qnn.QuantConv2d(
             planes, planes, 3, stride=stride, padding=1, bias=False,
-            weight_quant=weight_quant,
+            weight_quant=weight_quant, **bq,
         )
         self.bn2 = nn.BatchNorm2d(planes)
         self.relu2 = _relu(act_quant)
         self.conv3 = qnn.QuantConv2d(
-            planes, planes * self.expansion, 1, bias=False, weight_quant=weight_quant,
+            planes, planes * self.expansion, 1, bias=False,
+            weight_quant=weight_quant, **bq,
         )
         self.bn3 = nn.BatchNorm2d(planes * self.expansion)
         self.pre_add_quant = _quant_identity(act_quant)
@@ -116,8 +124,10 @@ class QuantResNet(nn.Module):
         num_classes:  Output logits. Default 1000 for ImageNet.
         weight_quant: Brevitas injector class for weight quantization.
         act_quant:    Brevitas injector class for activation quantization.
-        bias_quant:   Brevitas injector class for bias quantization (fc only;
-                      conv layers use bias=False because BN follows).
+        bias_quant:   Brevitas injector class for bias quantization. Threaded to
+                      every conv (stem, blocks, downsample) and the fc; after BN
+                      fusion assigns each conv.bias, Brevitas wires a bias
+                      quantizer per folded bias.
     """
 
     def __init__(self, block, layers, num_classes=1000,
@@ -126,10 +136,12 @@ class QuantResNet(nn.Module):
         self._in_planes = 64
         self._weight_quant = weight_quant
         self._act_quant = act_quant
+        self._bias_quant = bias_quant
+        bq = {"bias_quant": bias_quant} if bias_quant is not None else {}
 
         # Stem — names match torchvision exactly for weight mapping
         self.conv1 = qnn.QuantConv2d(
-            3, 64, 7, stride=2, padding=3, bias=False, weight_quant=weight_quant,
+            3, 64, 7, stride=2, padding=3, bias=False, weight_quant=weight_quant, **bq,
         )
         self.bn1 = nn.BatchNorm2d(64)
         self.relu = _relu(act_quant)
@@ -154,10 +166,11 @@ class QuantResNet(nn.Module):
     def _make_layer(self, block, planes, num_blocks, stride=1):
         downsample = None
         if stride != 1 or self._in_planes != planes * block.expansion:
+            ds_bq = {"bias_quant": self._bias_quant} if self._bias_quant is not None else {}
             ds_modules = [
                 qnn.QuantConv2d(
                     self._in_planes, planes * block.expansion, 1,
-                    stride=stride, bias=False, weight_quant=self._weight_quant,
+                    stride=stride, bias=False, weight_quant=self._weight_quant, **ds_bq,
                 ),
                 nn.BatchNorm2d(planes * block.expansion),
             ]
@@ -168,13 +181,14 @@ class QuantResNet(nn.Module):
         layers = [block(
             self._in_planes, planes, stride=stride,
             weight_quant=self._weight_quant, act_quant=self._act_quant,
-            downsample=downsample,
+            downsample=downsample, bias_quant=self._bias_quant,
         )]
         self._in_planes = planes * block.expansion
         for _ in range(1, num_blocks):
             layers.append(block(
                 self._in_planes, planes,
                 weight_quant=self._weight_quant, act_quant=self._act_quant,
+                bias_quant=self._bias_quant,
             ))
         return nn.Sequential(*layers)
 

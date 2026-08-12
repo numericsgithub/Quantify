@@ -9,12 +9,23 @@ class QuantInvertedResidual(nn.Module):
     
     Mirrors torchvision.models.mobilenetv2._InvertedResidual.
     """
-    def __init__(self, inp, oup, stride, expand_ratio, weight_bit_width, act_bit_width, weight_quant, act_quant=None):
+    def __init__(self, inp, oup, stride, expand_ratio, weight_bit_width, act_bit_width,
+                 weight_quant, act_quant=None, bias_quant=None):
         super().__init__()
         self.stride = stride
         self.use_res_connect = stride == 1 and inp == oup
 
         hidden_dim = int(round(inp * expand_ratio))
+
+        # bias=False + bias_quant is deliberate and required, not a contradiction.
+        # Every conv here feeds a BatchNorm, so it needs no bias of its own — but
+        # fuse_bn_into_conv() folds BN away and CREATES conv.bias. Brevitas hooks
+        # __setattr__ on 'bias' (nn/mixin/parameter.py) and calls
+        # bias_quant.init_tensor_quant() at that moment, so declaring bias_quant
+        # here is what makes the post-fusion bias actually get quantized. Without
+        # it, fusion leaves behind a raw nn.Parameter that no quantizer owns and
+        # the biases ship in float.
+        bq = {"bias_quant": bias_quant} if bias_quant is not None else {}
 
         # Mirrors torchvision: the leading pointwise-expand conv is omitted when
         # expand_ratio == 1 (hidden_dim == inp), otherwise the pretrained checkpoint
@@ -25,19 +36,22 @@ class QuantInvertedResidual(nn.Module):
             # pw-expand
             layers += [
                 qnn.QuantConv2d(inp, hidden_dim, 1, 1, 0, bias=False,
-                                weight_bit_width=weight_bit_width, weight_quant=weight_quant),
+                                weight_bit_width=weight_bit_width, weight_quant=weight_quant,
+                                **bq),
                 nn.BatchNorm2d(hidden_dim),
                 QuantReLU6(bit_width=act_bit_width, act_quant=act_quant),
             ]
         layers += [
             # dw
             qnn.QuantConv2d(hidden_dim, hidden_dim, 3, stride, 1, groups=hidden_dim, bias=False,
-                            weight_bit_width=weight_bit_width, weight_quant=weight_quant),
+                            weight_bit_width=weight_bit_width, weight_quant=weight_quant,
+                            **bq),
             nn.BatchNorm2d(hidden_dim),
             QuantReLU6(bit_width=act_bit_width, act_quant=act_quant),
             # pw-linear
             qnn.QuantConv2d(hidden_dim, oup, 1, 1, 0, bias=False,
-                            weight_bit_width=weight_bit_width, weight_quant=weight_quant),
+                            weight_bit_width=weight_bit_width, weight_quant=weight_quant,
+                            **bq),
             nn.BatchNorm2d(oup),
         ]
         # Resulting 'conv' Sequential indices:
@@ -66,7 +80,12 @@ class QuantMobileNetV2(nn.Module):
                          None (default), a FixedPointPerTensorWeightQuant
                          subclass with weight_bit_width is created automatically.
         act_quant:       Brevitas injector class for activation quantization.
-        bias_quant:      Brevitas injector class for bias quantization (fc only).
+        bias_quant:      Brevitas injector class for bias quantization. Applied to
+                         the classifier AND to every conv. The convs are built
+                         bias=False because each feeds a BatchNorm, but
+                         fuse_bn_into_conv() later folds BN away and creates
+                         conv.bias — declaring bias_quant here is what makes those
+                         folded biases quantized rather than raw float parameters.
     """
     def __init__(self, num_classes=1000, weight_bit_width=8, act_bit_width=8,
                  weight_quant=None, act_quant=None, bias_quant=None):
@@ -75,6 +94,8 @@ class QuantMobileNetV2(nn.Module):
         if weight_quant is None:
             class weight_quant(FixedPointPerTensorWeightQuant):
                 bit_width = weight_bit_width
+
+        bq = {"bias_quant": bias_quant} if bias_quant is not None else {}
 
         # Official MobileNetV2 Config: (expand_ratio, channels, num_blocks, stride)
         self.config = [
@@ -91,7 +112,8 @@ class QuantMobileNetV2(nn.Module):
         self.features = []
         self.features.append(
             qnn.QuantConv2d(3, 32, 3, 2, 1, bias=False,
-                            weight_bit_width=weight_bit_width, weight_quant=weight_quant)
+                            weight_bit_width=weight_bit_width, weight_quant=weight_quant,
+                            **bq)
         )
         self.features.append(nn.BatchNorm2d(32))
         self.features.append(QuantReLU6(bit_width=act_bit_width, act_quant=act_quant))
@@ -104,14 +126,16 @@ class QuantMobileNetV2(nn.Module):
                 stride = s if i == 0 else 1
                 self.features.append(
                     QuantInvertedResidual(in_channels, c, stride, t,
-                                         weight_bit_width, act_bit_width, weight_quant, act_quant)
+                                         weight_bit_width, act_bit_width, weight_quant,
+                                         act_quant, bias_quant)
                 )
                 in_channels = c
 
         # Final Conv layer
         self.features.append(
             qnn.QuantConv2d(in_channels, 1280, 1, 1, 0, bias=False,
-                            weight_bit_width=weight_bit_width, weight_quant=weight_quant)
+                            weight_bit_width=weight_bit_width, weight_quant=weight_quant,
+                            **bq)
         )
         self.features.append(nn.BatchNorm2d(1280))
         self.features.append(QuantReLU6(bit_width=act_bit_width, act_quant=act_quant))
@@ -120,12 +144,11 @@ class QuantMobileNetV2(nn.Module):
 
         # Classifier
         self.avgpool = nn.AdaptiveAvgPool2d(1)
-        fc_kw = {"bias_quant": bias_quant} if bias_quant is not None else {}
         self.classifier = nn.Sequential(
             nn.Flatten(),
             qnn.QuantLinear(1280, num_classes, bias=True,
                             weight_bit_width=weight_bit_width, weight_quant=weight_quant,
-                            output_quant=None, **fc_kw)
+                            output_quant=None, **bq)
         )
 
     def forward(self, x):

@@ -27,16 +27,23 @@ def _relu(act_quant):
 class QuantDWSepBlock(nn.Module):
     """Depthwise-separable block: DW 3×3 → BN → ReLU → PW 1×1 → BN → ReLU."""
 
-    def __init__(self, in_ch, out_ch, stride, weight_quant=None, act_quant=None):
+    def __init__(self, in_ch, out_ch, stride, weight_quant=None, act_quant=None,
+                 bias_quant=None):
         super().__init__()
+        # bias=False + bias_quant is deliberate (mirrors mobilenetv2_quant.py):
+        # the conv has no bias until BN fusion assigns conv.bias, and Brevitas's
+        # __setattr__ hook runs bias_quant.init_tensor_quant() at that moment —
+        # so declaring bias_quant here is what makes the folded bias quantized.
+        bq = {"bias_quant": bias_quant} if bias_quant is not None else {}
         self.dw = qnn.QuantConv2d(
             in_ch, in_ch, 3, stride=stride, padding=1,
-            groups=in_ch, bias=False, weight_quant=weight_quant,
+            groups=in_ch, bias=False, weight_quant=weight_quant, **bq,
         )
         self.bn_dw = nn.BatchNorm2d(in_ch)
         self.relu_dw = _relu(act_quant)
 
-        self.pw = qnn.QuantConv2d(in_ch, out_ch, 1, bias=False, weight_quant=weight_quant)
+        self.pw = qnn.QuantConv2d(in_ch, out_ch, 1, bias=False,
+                                  weight_quant=weight_quant, **bq)
         self.bn_pw = nn.BatchNorm2d(out_ch)
         self.relu_pw = _relu(act_quant)
 
@@ -53,7 +60,9 @@ class QuantMobileNetV1(nn.Module):
         num_classes:  Output logits. Default 1000.
         weight_quant: Brevitas injector class for weight quantization.
         act_quant:    Brevitas injector class for activation quantization.
-        bias_quant:   Brevitas injector class for bias quantization (fc only).
+        bias_quant:   Brevitas injector class for bias quantization. Threaded to
+                      every conv (and the fc); after BN fusion assigns each
+                      conv.bias, Brevitas wires a bias quantizer per folded bias.
     """
 
     # (out_channels, stride) for the 13 depthwise-separable blocks
@@ -69,8 +78,10 @@ class QuantMobileNetV1(nn.Module):
     def __init__(self, num_classes=1000, weight_quant=None, act_quant=None, bias_quant=None):
         super().__init__()
 
+        bq = {"bias_quant": bias_quant} if bias_quant is not None else {}
         self.stem = nn.Sequential(
-            qnn.QuantConv2d(3, 32, 3, stride=2, padding=1, bias=False, weight_quant=weight_quant),
+            qnn.QuantConv2d(3, 32, 3, stride=2, padding=1, bias=False,
+                            weight_quant=weight_quant, **bq),
             nn.BatchNorm2d(32),
             _relu(act_quant),
         )
@@ -78,7 +89,8 @@ class QuantMobileNetV1(nn.Module):
         blocks = []
         in_ch = 32
         for out_ch, stride in self._CFG:
-            blocks.append(QuantDWSepBlock(in_ch, out_ch, stride, weight_quant, act_quant))
+            blocks.append(QuantDWSepBlock(in_ch, out_ch, stride, weight_quant,
+                                          act_quant, bias_quant))
             in_ch = out_ch
         self.blocks = nn.Sequential(*blocks)
 

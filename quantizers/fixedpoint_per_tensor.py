@@ -149,6 +149,111 @@ def quantize_fixed_point(inputs: torch.Tensor, lsb: int, bit_width: int, signed:
 # Optimal LSB search
 # ---------------------------------------------------------------------------
 
+# Robust-sigma selection constants. The LSB is really a choice of clipping
+# threshold (range = 2^lsb * integer_max), and these set where that threshold
+# lands, in units of a robust (outlier-immune) estimate of the distribution's
+# spread.
+#
+# Activations (k=16): much wider than the weights, so most of the tail stays
+# representable. Post-ReLU distributions carry real information in a long right
+# tail, and a clipped activation corrupts the signal directly.
+#
+# Weights (k=12). Deliberately trims outliers: a tighter range costs PTQ accuracy
+# up front but gives the bulk of the distribution finer resolution, which QAT can
+# then adapt to (it can pull the clipped outliers back inside). Measured
+# weight-only top-1 across k (examples/sweep_weight_k.py, 40 val batches):
+#
+#   k=4: 0.00%   k=8: 2.25%   k=12: 45.90%   k=13: 48.24%   k=16: 39.96%
+#   k=18: 58.91% k=24: 31.06% k=32: 12.31%   k=64: 0.35%    float: 70.08%
+#
+# Note that curve is a STEP function, not a smooth optimum: the LSB is an integer,
+# so each layer flips at its own k and accuracy only moves where flips happen (4
+# layers flipping between k=17 and k=18 moves the model 24 points). k=18 scores
+# highest but only because those flips happen to align — a single global k cannot
+# express what is really a per-layer choice. k=12 sits in a stable band (43-48%
+# across k=12..15) rather than on a spike.
+ROBUST_SIGMA_K_WEIGHT = 12.0
+ROBUST_SIGMA_K_ACTIVATION = 16.0
+
+# Biases use a COVERAGE target instead of a sigma multiple: pick the finest LSB
+# whose range holds at least this percent of the bias values, so at most
+# (100 - this) percent are clipped.
+#
+# A sigma rule is the wrong tool here. It measures how WIDE a cluster is, which
+# says nothing about WHERE it sits, and folded biases are
+# beta - gamma*mu/sqrt(var+eps) — no reason to be zero-mean, while the grid is
+# symmetric about zero with no zero-point. features.20's biases sit at -5.43 with
+# sigma=0.69: a 4-sigma window is the right width in entirely the wrong place, and
+# clipped 92.5% of the tensor. A percentile of |bias| asks the question that
+# actually matters — "does the range reach the data?" — and gets the centring
+# right for free.
+#
+# 99.9 is measured, not chosen by feel. Biases tolerate almost no clipping: a
+# clipped weight's error is averaged across a whole filter, but a clipped bias is
+# a constant offset on EVERY activation of its channel, with nothing to average it
+# away. With weights fixed at k=12 (40 val batches, weight-only top-1):
+#
+#   cover  80% -> 0.00%    cover 99%   -> 33.13%    biases float -> 50.12%
+#   cover  90% -> 0.00%    cover 99.9% -> 47.72%
+#   cover  95% -> 4.18%    cover 100%  -> 44.06%
+#
+# Note 99.9 beats 100: trimming the last 0.1% IS worth it, because covering the
+# absolute max forces a coarser step on everything else. The useful trim for a
+# bias is 0.1%, not 20%.
+BIAS_COVERAGE_PCT = 99.9
+
+
+def integer_range(bit_width: int, signed: bool, narrow_range: bool = False) -> Tuple[int, int]:
+    """The integer codes available at this bit width — the exact values
+    quantize_fixed_point_with_integers clamps against."""
+    if signed:
+        integer_min = -(2 ** (bit_width - 1))
+        if narrow_range:
+            integer_min += 1
+        integer_max = 2 ** (bit_width - 1) - 1
+    else:
+        integer_min = 0
+        integer_max = 2 ** bit_width - 1
+    return integer_min, integer_max
+
+
+def robust_center_and_sigma(inputs: torch.Tensor,
+                            ignore_zeros: bool = False) -> Tuple[float, float]:
+    """Outlier-immune (center, spread) of a distribution: (median, 1.4826 * MAD).
+
+    1.4826 makes the spread equal the standard deviation for Gaussian data. Unlike
+    std, MAD is computed from the middle of the distribution, so no outlier —
+    however extreme — can move it.
+
+    The CENTER matters because the fixed-point grid is symmetric about zero and has
+    no zero-point: it can only represent [integer_min*step, integer_max*step]. A
+    spread of 0.69 tells you how wide a cluster is, but not where it sits. Weights
+    are centered on zero (median measured at exactly 0.0000 across all 53
+    MobileNetV2 tensors), so the distinction never surfaces for them — but folded
+    biases are beta - gamma*mu/sqrt(var+eps), which has no reason to be zero-mean,
+    and features.20's biases sit at -5.43 with a spread of only 0.69.
+
+    ignore_zeros: compute over non-zero elements only. REQUIRED for post-ReLU
+    activations: they are typically 40-70% exact zeros, which drags the median to
+    0 and collapses MAD to exactly 0 (a degenerate range). It is already unstable
+    before that — at 45% zeros MAD swings ~2x while the true spread is unchanged.
+    Weights do not need it (float weights are essentially never exactly zero).
+    """
+    x = inputs.detach().flatten().float()
+    if ignore_zeros:
+        x = x[x != 0]
+    if x.numel() == 0:
+        return 0.0, 0.0
+    med = x.median()
+    mad = (x - med).abs().median()
+    return float(med.item()), float(1.4826 * mad.item())
+
+
+def robust_sigma(inputs: torch.Tensor, ignore_zeros: bool = False) -> float:
+    """Spread only — see robust_center_and_sigma."""
+    return robust_center_and_sigma(inputs, ignore_zeros=ignore_zeros)[1]
+
+
 def find_optimal_lsb(
     inputs: torch.Tensor,
     bit_width: int,
@@ -156,24 +261,43 @@ def find_optimal_lsb(
     rounding_mode: "RoundingMode",
     narrow_range: bool = False,
     prefer_high_lsb: bool = False,
+    robust_sigma_k: Optional[float] = None,
+    robust_ignore_zeros: bool = False,
+    coverage_pct: Optional[float] = None,
 ) -> Tuple[int, int, list]:
     """
-    Search over LSB positions to find the one that maximises unique quantised values.
+    Search over LSB positions and select one.
 
-    Two selection rules:
-      prefer_high_lsb=False (weights): ties broken by smallest SAD — prefers a
-        finer grid when multiple LSBs reach the same unique count.
-      prefer_high_lsb=True (activations): among all LSBs that reach the maximum
-        unique count, pick the HIGHEST one.  A higher LSB means a coarser step
-        but a wider representable range, which reduces clipping of the activation
-        distribution.  The iteration runs high→low, so the first LSB that reaches
-        the global maximum is also the highest one — no SAD tie-break is applied.
+    coverage_pct (biases): choose the FINEST lsb whose representable range holds
+      at least this percent of |inputs|, so at most (100 - coverage_pct) percent
+      is clipped. Takes precedence over robust_sigma_k. Because it works on
+      |inputs| directly it needs no centring term — see BIAS_COVERAGE_PCT.
+
+    robust_sigma_k: choose the FINEST lsb whose representable range still covers
+      +/- (|center| + robust_sigma_k * sigma), where (center, sigma) is the
+      outlier-immune (median, 1.4826*MAD) of the distribution. This sizes the
+      range from the core and deliberately clips the tail beyond it. See
+      ROBUST_SIGMA_K_WEIGHT / ROBUST_SIGMA_K_ACTIVATION.
+
+    robust_sigma_k=None (legacy): maximise the number of unique quantised values.
+      Kept for backward compatibility. Note this objective is a grid-UTILISATION
+      metric, not an error metric, and it is anti-correlated with accuracy: the
+      only way to score higher is to put a finer grid on the dense centre and
+      clip the tails off. Measured over the 53 MobileNetV2 weight tensors it
+      picked a finer lsb than every error-based rule on 53/53 layers and clipped
+      12.9% of weights. Do not use it for new work.
+      Its two sub-rules are, in practice, one rule: prefer_high_lsb=True
+      (activations, widest range among the winners) and prefer_high_lsb=False
+      (weights, lowest SAD among the winners) selected an identical lsb on all
+      53 tensors — the max-unique constraint leaves the tie-break nothing to
+      decide.
 
     Returns
     -------
     (best_lsb, best_unique, search_records)
         search_records is a list of (lsb, n_unique, sad) for every position tested,
-        ordered high→low, used by the diagnostic plot.
+        ordered high→low, used by the diagnostic plot. best_unique is the unique
+        count AT best_lsb (callers gate search_done on it being > 1).
     """
     w_min = inputs.min().item()
     w_max = inputs.max().item()
@@ -197,12 +321,14 @@ def find_optimal_lsb(
     best_unique = -1
     best_sad = float("inf")
     search_records: list = []  # (lsb, n_unique, sad) — high to low
+    unique_by_lsb: dict = {}
 
     for lsb in reversed(range(search_lo, search_hi + 1)):
         q = quantize_fixed_point(inputs, lsb, bit_width, signed, rounding_mode, narrow_range)
         n_unique = int(torch.unique(q).numel())
         sad = float(torch.sum(torch.abs(inputs - q)).item())
         search_records.append((lsb, n_unique, sad))
+        unique_by_lsb[lsb] = n_unique
 
         if prefer_high_lsb:
             # Strict improvement only: first (highest) LSB with global max unique wins
@@ -216,6 +342,45 @@ def find_optimal_lsb(
                 best_lsb = lsb
                 best_unique = n_unique
                 best_sad = sad
+
+    if coverage_pct is not None:
+        # Finest lsb holding >= coverage_pct of |inputs|. Note the lsb is a power
+        # of two, so the range can only halve between candidates: actual coverage
+        # will usually EXCEED the target rather than hit it.
+        flat = inputs.detach().flatten().float().abs()
+        threshold = float(torch.quantile(flat, coverage_pct / 100.0).item())
+        _, integer_max = integer_range(bit_width, signed, narrow_range)
+        covering = [lsb for lsb in unique_by_lsb
+                    if integer_max * (2.0 ** lsb) >= threshold]
+        chosen = min(covering) if covering else max(unique_by_lsb)
+        return chosen, unique_by_lsb[chosen], search_records
+
+    if robust_sigma_k is not None:
+        center, sigma = robust_center_and_sigma(inputs, ignore_zeros=robust_ignore_zeros)
+        # sigma == 0 means the middle of the distribution is a single repeated
+        # value (e.g. an activation that is >50% zeros when ignore_zeros was not
+        # set). No core to size the range from, so fall back to covering the
+        # 99.9th percentile rather than emitting a degenerate range.
+        if sigma > 0.0:
+            # The core spans [center - k*sigma, center + k*sigma]. The grid is
+            # symmetric about zero with no zero-point, so to represent that span
+            # the range must reach |center| + k*sigma — the far edge of the core,
+            # not merely its half-width. Omitting |center| asks for a window the
+            # right WIDTH in the wrong PLACE: features.20's biases sit at -5.43
+            # with sigma=0.69, so k*sigma alone gave a +/-4 grid and clipped 92.5%
+            # of the tensor. Weights are centered on zero (median 0.0000 on all 53
+            # MobileNetV2 tensors), so this term is a no-op for them.
+            threshold = abs(center) + robust_sigma_k * sigma
+        else:
+            threshold = float(torch.quantile(inputs.detach().flatten().float().abs(),
+                                             0.999).item())
+        _, integer_max = integer_range(bit_width, signed, narrow_range)
+        # Finest (smallest) lsb whose range still covers +/-threshold. |integer_min|
+        # >= integer_max, so integer_max is the binding side.
+        covering = [lsb for lsb in unique_by_lsb
+                    if integer_max * (2.0 ** lsb) >= threshold]
+        robust_lsb = min(covering) if covering else max(unique_by_lsb)
+        return robust_lsb, unique_by_lsb[robust_lsb], search_records
 
     return best_lsb, best_unique, search_records
 
@@ -379,13 +544,27 @@ class FixedPointPerTensorQuantizer(BaseQuantizer):
             self.signed = False
         else:
             self.signed = True
+        is_act = self.quantizer_role == "activation"
+        is_bias = self.quantizer_role == "bias"
+        # The three roles get three rules; their distributions are not alike.
+        #   bias       -> coverage target (see BIAS_COVERAGE_PCT): the folded bias
+        #                 carries a DC offset, so what matters is whether the range
+        #                 reaches the data, not how wide the cluster is.
+        #   activation -> sigma rule, wide k, and must ignore the ReLU zero-spike
+        #                 (>50% zeros collapses MAD to exactly 0).
+        #   weight     -> sigma rule.
         lsb, num_unique, search_records = find_optimal_lsb(
             x,
             self.bit_width,
             self.signed,
             self.rounding_mode,
             self.narrow_range,
-            prefer_high_lsb=(self.quantizer_role == "activation"),
+            prefer_high_lsb=is_act,
+            coverage_pct=(BIAS_COVERAGE_PCT if is_bias else None),
+            robust_sigma_k=(None if is_bias else
+                            (ROBUST_SIGMA_K_ACTIVATION if is_act
+                             else ROBUST_SIGMA_K_WEIGHT)),
+            robust_ignore_zeros=is_act,
         )
         return {
             'lsb': lsb,
@@ -435,29 +614,35 @@ class FixedPointPerTensorQuantizer(BaseQuantizer):
             self.narrow_range
         )
 
+    def representable_range(self, params: Any = None) -> Optional[Tuple[float, float]]:
+        """(lower, upper) float bounds of this quantizer's fixed-point grid.
+
+        These are the exact values torch.clamp() saturates against in
+        quantize_fixed_point_with_integers: integer_min*step and integer_max*step
+        with step = 2**lsb. Anything outside cannot be represented at all — it is
+        pinned to a bound, and (under plain STE) keeps receiving gradient that can
+        never change its quantized value.
+
+        params: a calibration dict; defaults to the stored calibration.
+        Returns None if this quantizer has not been calibrated yet.
+        """
+        if params is None:
+            if not bool(self.search_done.item()):
+                return None
+            params = self._load_calibration()
+        step = 2.0 ** int(params['lsb'])
+        integer_min, integer_max = integer_range(
+            self.bit_width, params['signed'], self.narrow_range)
+        return integer_min * step, integer_max * step
+
     def _in_range_mask(self, x: torch.Tensor, params: Any) -> torch.Tensor:
         """Clipped-STE support: True where x lands inside the fixed-point grid's
         representable range, False where the forward clamp saturated it.
 
-        The range limits in float units are integer_min*step and
-        integer_max*step (step = 2**lsb) — the exact bounds torch.clamp()
-        saturated against in quantize_fixed_point_with_integers. Boundary
-        convention is inclusive (>= lower AND <= upper): a weight sitting
+        Boundary convention is inclusive (>= lower AND <= upper): a weight sitting
         exactly on the bottom or top code counts as in-range and keeps slope 1.
         """
-        lsb = int(params['lsb'])
-        signed = params['signed']
-        step = 2.0 ** lsb
-        if signed:
-            integer_min = -(2 ** (self.bit_width - 1))
-            if self.narrow_range:
-                integer_min += 1  # exclude most-negative integer
-            integer_max = 2 ** (self.bit_width - 1) - 1
-        else:
-            integer_min = 0
-            integer_max = 2 ** self.bit_width - 1
-        lower = integer_min * step
-        upper = integer_max * step
+        lower, upper = self.representable_range(params)
         return (x >= lower) & (x <= upper)
 
     def _get_metadata(self, params: Any, x: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:

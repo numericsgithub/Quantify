@@ -51,8 +51,9 @@ TOL = 1e-4
 
 # ---- grid / weights ----
 BIT_WIDTH = 3                     # unsigned 3-bit -> codes 0..7
-CALIB_DATA = [0.0, 0.5, 1.0, 1.5, 2.0, 2.5, 3.0, 3.5]  # lsb=-1, step=0.5
-GRID_MAX = 3.5                    # top representable value
+CALIB_DATA = [0.0, 0.5, 1.0, 1.5, 2.0, 2.5, 3.0, 3.5]
+CALIB_LSB = -1                    # pinned by the fixture; step = 2^-1 = 0.5
+GRID_MAX = 3.5                    # top representable value = 7 * 0.5
 IN_RANGE_W = 2.0                 # on-grid, inside range
 OUT_RANGE_W = 5.0                # above range max, clamps to 3.5
 BOUNDARY_W = GRID_MAX            # exactly the max grid value
@@ -93,6 +94,18 @@ def _make_calibrated_quantizer(clipped_ste: bool) -> FixedPointPerTensorQuantize
     with torch.no_grad():
         q(torch.tensor(CALIB_DATA))  # triggers _calibrate() -> search_done=True
     assert q.search_done.item(), "calibration did not set search_done=True"
+
+    # Pin the grid instead of depending on whichever rule find_optimal_lsb
+    # currently uses to pick it. This module tests STE gradient flow through a
+    # SATURATED clamp, so all it needs is a grid on which OUT_RANGE_W saturates
+    # -- which LSB-selection rule produced that grid is irrelevant here, and
+    # letting it leak in makes these tests fail for unrelated reasons whenever
+    # calibration changes. Six other test modules pin the LSB the same way.
+    q.search_result_lsb.fill_(CALIB_LSB)
+    assert q.search_result_is_signed.item() is False, (
+        "CALIB_DATA is all >= 0, so _calibrate() should have flipped signed=False; "
+        "GRID_MAX below assumes the unsigned integer range"
+    )
     q.quantizer_manager.enable_quantization()  # alpha=1 -> STE backward is live
     assert q.annealing_alpha.item() == 1.0
     return q

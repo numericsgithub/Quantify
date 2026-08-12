@@ -152,6 +152,7 @@ class CheckpointManager:
         config_dict: Optional[dict] = None,
         extra: Optional[dict] = None,
         dummy_input: Optional[torch.Tensor] = None,
+        eligible_for_best: bool = True,
     ) -> Optional[str]:
         """
         Evaluate whether this epoch should be checkpointed and save if so.
@@ -167,6 +168,10 @@ class CheckpointManager:
             extra:         Any extra data to bundle into the checkpoint.
             dummy_input:   Optional tensor for ONNX export. If None, a random
                            tensor of shape (1, 3, 32, 32) is generated.
+            eligible_for_best: If False, this epoch can never overwrite best.pt
+                           (nor advance the best threshold), regardless of its
+                           metric. 'last.pt' and the top-K pool are unaffected.
+                           Used to keep partially-quantized epochs out of best.pt.
 
         Returns:
             Path to the saved checkpoint file, or None if not saved.
@@ -197,7 +202,7 @@ class CheckpointManager:
         # strictly better metric than the current threshold overwrites them; the
         # threshold is seeded from the starting checkpoint via seed_best(), so a
         # run that ends worse than it started leaves the previous best intact.
-        if self._is_better_than_best(metric_value):
+        if eligible_for_best and self._is_better_than_best(metric_value):
             prev = self._best_metric
             self._best_metric = metric_value
             best_path = os.path.join(self.save_dir, "best.pt")

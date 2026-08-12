@@ -334,7 +334,7 @@ class QATTrainerV2:
             # monotonic — the next run picks up this checkpoint, not a
             # regression).
             _seed_metric = baseline.get(self.config.checkpoint.monitor_metric)
-            if _seed_metric is not None:
+            if _seed_metric is not None and self.config.seed_best_from_start:
                 self.checkpoint_mgr.seed_best(
                     metric_value=_seed_metric,
                     model=self.model,
@@ -447,6 +447,13 @@ class QATTrainerV2:
                     **({"ema_state_dict": self._ema.state_dict()} if self._ema else {}),
                     **self._extra_checkpoint_fields,
                 }
+                # Keep partially-quantized epochs out of best.pt when the run
+                # asks for it (activation-introduction curriculum). quant_pct is
+                # only present once QAT is active; absent → treat as eligible.
+                eligible_for_best = (
+                    not self.config.require_full_quant_for_best
+                    or all_metrics.get("quant_pct", 1.0) >= 1.0
+                )
                 self.checkpoint_mgr.save(
                     epoch=epoch,
                     metric_value=monitor_val,
@@ -457,6 +464,7 @@ class QATTrainerV2:
                     config_dict=self.config.to_dict(),
                     extra=_ckpt_extra or None,
                     dummy_input=self._onnx_dummy_input,
+                    eligible_for_best=eligible_for_best,
                 )
 
                 # Breakdown detection: check for catastrophic accuracy collapse
