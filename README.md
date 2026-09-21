@@ -92,6 +92,27 @@ export_onnx_with_io(
 )
 ```
 
+## 🔍 Importance Analysis & Viewer
+
+`importance/` computes, for every Conv/Linear layer (plain PyTorch,
+Brevitas, or Quantify quantized), how important each weight/kernel/filter
+is for each output feature, averaged over a dataset, and ships an
+interactive local web viewer to explore the result:
+
+```python
+from importance import analyze, view
+
+result = analyze(model, dataloader)   # everything auto-detected
+result.save("runs/imp_mymodel")
+view("runs/imp_mymodel")              # starts the offline viewer, opens the browser
+```
+
+or from the CLI: `python -m importance.serve runs/imp_mymodel [--port 8000]`.
+
+See `docs/llm/importance_analysis.md` for the metrics (including the
+BatchNorm scale-invariance caveat and how `act_filter` fixes it), the
+on-disk format, and known v1 limitations.
+
 ## 📖 Documentation & Skills
 
 - **Conventions**: See `docs/llm/CONVENTIONS.md` for dependency and skill management rules.

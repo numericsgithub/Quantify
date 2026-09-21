@@ -47,6 +47,36 @@ def reset_quantizer_states() -> None:
         pass
 
 
+def _freeze_annealing(model: torch.nn.Module) -> dict:
+    """Force every quantizer's annealing_alpha to 1.0 (fully quantized, no
+    blend) and return a {quantizer: original_alpha_tensor} snapshot so it can
+    be restored with `_restore_annealing`.
+
+    Why this is needed: `BaseQuantizer.forward()` only emits a clean
+    quantize-only graph when `annealing_alpha == 1.0`. Any alpha < 1.0 (mid
+    QAT-anneal) traces through `AnnealingBlendFn.forward`'s
+    `(1-alpha)*x + alpha*quantized` arithmetic instead (it has no `symbolic`
+    method), which shows up in the exported ONNX graph as a `Mul` (by alpha)
+    then an `Add` (of `(1-alpha)*original_float_weight`) right after the
+    `FixedPointQuant` node -- i.e. the exported "quantized" weight is
+    actually a float/quantized blend, not the real quantized value. See
+    docs/llm/pitfalls/brevitas_pitfalls.md.
+    """
+    from quantizers.base_quantizer import BaseQuantizer
+
+    saved = {}
+    for module in model.modules():
+        if isinstance(module, BaseQuantizer):
+            saved[module] = module.annealing_alpha.clone()
+            module.annealing_alpha.fill_(1.0)
+    return saved
+
+
+def _restore_annealing(saved: dict) -> None:
+    for module, alpha in saved.items():
+        module.annealing_alpha.copy_(alpha)
+
+
 def export_onnx_with_io(
     model: torch.nn.Module,
     dummy_input: torch.Tensor,
@@ -56,6 +86,7 @@ def export_onnx_with_io(
     custom_opsets: Optional[dict] = None,
     dynamo: bool = False,
     reset_states: bool = True,
+    freeze_annealing: bool = True,
     **export_kwargs,
 ) -> onnx.ModelProto:
     """
@@ -86,6 +117,15 @@ def export_onnx_with_io(
     reset_states : bool
         If True, calls ``reset_quantizer_states()`` before export to clear
         FIFO deque buffers used by custom quantizer functions.
+    freeze_annealing : bool
+        If True (default), every quantizer's ``annealing_alpha`` is forced to
+        1.0 for the duration of the export (and the reference forward pass
+        used for the embedded dummy I/O), then restored to its original
+        value afterward -- even if export raises. Without this, a quantizer
+        mid-QAT-anneal (``0.0 < annealing_alpha < 1.0``) exports a
+        `FixedPointQuant -> Mul -> Add` blend of the float and quantized
+        weight instead of a clean quantized value; see `_freeze_annealing`'s
+        docstring and docs/llm/pitfalls/brevitas_pitfalls.md.
     **export_kwargs
         Extra keyword arguments forwarded verbatim to ``torch.onnx.export``.
 
@@ -113,21 +153,27 @@ def export_onnx_with_io(
 
     inject_zero_biases(model)
 
-    # 1. Export via torch.onnx.export
-    torch.onnx.export(
-        model,
-        dummy_input,
-        filepath,
-        opset_version=opset_version,
-        do_constant_folding=True,
-        custom_opsets=custom_opsets,
-        dynamo=dynamo,
-        **export_kwargs,
-    )
+    # 1+2. Export via torch.onnx.export, then compute the reference output
+    # used for the embedded dummy I/O -- both done with annealing frozen off
+    # (see freeze_annealing docs above) so the graph and the reference output
+    # agree and neither leaks a Mul/Add blend of the float weight.
+    saved_annealing = _freeze_annealing(model) if freeze_annealing else {}
+    try:
+        torch.onnx.export(
+            model,
+            dummy_input,
+            filepath,
+            opset_version=opset_version,
+            do_constant_folding=True,
+            custom_opsets=custom_opsets,
+            dynamo=dynamo,
+            **export_kwargs,
+        )
 
-    # 2. Compute reference output
-    with torch.no_grad():
-        dummy_output = model(dummy_input)
+        with torch.no_grad():
+            dummy_output = model(dummy_input)
+    finally:
+        _restore_annealing(saved_annealing)
 
     # Unwrap QuantTensor (Brevitas) if needed
     if hasattr(dummy_output, "value"):

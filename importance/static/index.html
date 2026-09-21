@@ -1,0 +1,69 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <title>Importance Viewer</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <link rel="stylesheet" href="/static/style.css" />
+</head>
+<body>
+  <header id="app-header">
+    <h1>Importance Viewer</h1>
+    <div id="model-summary" class="muted"></div>
+    <div class="controls">
+      <label>Metric
+        <select id="metric-select">
+          <option value="auto" selected>auto (act_filter after BN, else mean |s|)</option>
+          <option value="mean_abs_s">mean |s| (Taylor, abs)</option>
+          <option value="mean_s">mean s (Taylor, signed)</option>
+          <option value="act_filter">act_filter (activation-based)</option>
+        </select>
+      </label>
+      <label>Normalize
+        <select id="normalize-select">
+          <option value="raw">raw</option>
+          <option value="per-layer" selected>per-layer</option>
+          <option value="global">global</option>
+          <option value="rank">rank</option>
+        </select>
+      </label>
+      <label>Weight values
+        <select id="weight-normalize-select">
+          <option value="raw" selected>raw</option>
+          <option value="max100">normalize to max=100</option>
+        </select>
+      </label>
+      <label>Sort
+        <select id="sort-select">
+          <option value="original">original order</option>
+          <option value="importance">by importance</option>
+        </select>
+      </label>
+      <label>Top-k <input id="topk-slider" type="range" min="0" max="100" value="100" /> <span id="topk-label">100%</span></label>
+      <label>Search <input id="layer-search" type="text" placeholder="layer name..." /></label>
+      <button id="export-csv">Export CSV</button>
+    </div>
+    <div id="topk-summary" class="muted"></div>
+  </header>
+
+  <main>
+    <section id="input-panel" class="panel">
+      <h2>Input <select id="sample-select"></select></h2>
+      <div id="input-render"></div>
+    </section>
+
+    <section id="layers-panel" class="panel">
+      <h2>Layers</h2>
+      <div id="layers-list"></div>
+    </section>
+
+    <section id="output-panel" class="panel">
+      <h2>Output</h2>
+      <div id="output-chips"></div>
+      <div id="output-values"></div>
+    </section>
+  </main>
+
+  <script src="/static/app.js"></script>
+</body>
+</html>

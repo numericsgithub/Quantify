@@ -8,6 +8,8 @@ import numpy as np
 import pytest
 
 from quantizers import FixedPointPerTensorWeightQuant, FixedPointPerTensorQuantizer, RoundingMode
+from quantizers.base_quantizer import BaseQuantizer
+from utils.onnx_export import export_onnx_with_io
 
 
 class SimpleFixedPointCNN(nn.Module):
@@ -187,3 +189,107 @@ class TestFixedPointOnnxExport:
         assert onnx_model.graph.input[0].name == "input"
         assert onnx_model.graph.output[0].name == "output"
         assert len(onnx_model.graph.node) > 0
+
+
+def _forbidden_blend_nodes(onnx_model, after_op_type="FixedPointQuant", after_domain="Quantify"):
+    """Return any Mul/Add node that directly consumes a FixedPointQuant
+    node's output -- the signature of an un-annealed (mid-blend) export."""
+    quant_outputs = {
+        out for n in onnx_model.graph.node
+        if n.op_type == after_op_type and n.domain == after_domain
+        for out in n.output
+    }
+    return [
+        n for n in onnx_model.graph.node
+        if n.op_type in ("Mul", "Add") and any(i in quant_outputs for i in n.input)
+    ]
+
+
+class TestAnnealingFrozenForExport:
+    """Regression tests for export_onnx_with_io's freeze_annealing behavior.
+
+    A quantizer mid-anneal (0 < annealing_alpha < 1) runs its output through
+    AnnealingBlendFn ((1-alpha)*float_weight + alpha*quantized), which has no
+    ONNX `symbolic` method, so it traces as plain Mul/Add ops right after the
+    FixedPointQuant node -- leaking a blend of the *unquantized* weight into
+    the exported graph instead of the real quantized value. See
+    docs/llm/pitfalls/brevitas_pitfalls.md.
+    """
+
+    def _calibrated_model(self):
+        torch.manual_seed(0)
+        model = nn.Sequential(
+            qnn.QuantConv2d(3, 4, 3, padding=1, weight_quant=FixedPointPerTensorWeightQuant),
+        )
+        model.train()
+        with torch.no_grad():
+            model(torch.randn(2, 3, 8, 8))
+        model.eval()
+        return model
+
+    def test_mid_anneal_export_has_no_blend_nodes(self, tmp_path):
+        model = self._calibrated_model()
+        quantizer = next(m for m in model.modules() if isinstance(m, BaseQuantizer))
+        quantizer.annealing_alpha.fill_(0.5)  # simulate mid-QAT-anneal
+
+        onnx_path = tmp_path / "mid_anneal.onnx"
+        export_onnx_with_io(
+            model, torch.randn(1, 3, 8, 8), str(onnx_path),
+            opset_version=13, custom_opsets={"Quantify": 1}, dynamo=False,
+        )
+
+        onnx_model = get_onnx_model(str(onnx_path))
+        assert count_custom_nodes(onnx_model) > 0
+        blends = _forbidden_blend_nodes(onnx_model)
+        assert not blends, (
+            f"exported graph leaks an annealing blend: {[n.op_type for n in blends]} "
+            f"node(s) consume the FixedPointQuant output directly"
+        )
+
+    def test_annealing_alpha_restored_after_export(self, tmp_path):
+        model = self._calibrated_model()
+        quantizer = next(m for m in model.modules() if isinstance(m, BaseQuantizer))
+        quantizer.annealing_alpha.fill_(0.3)
+
+        export_onnx_with_io(
+            model, torch.randn(1, 3, 8, 8), str(tmp_path / "m.onnx"),
+            opset_version=13, custom_opsets={"Quantify": 1}, dynamo=False,
+        )
+
+        assert quantizer.annealing_alpha.item() == pytest.approx(0.3), (
+            "annealing_alpha must be restored to its pre-export value after export"
+        )
+
+    def test_annealing_restored_even_if_export_raises(self, tmp_path):
+        """If the reference forward pass (or the export itself) raises, the
+        finally block must still restore annealing_alpha."""
+        model = self._calibrated_model()
+        quantizer = next(m for m in model.modules() if isinstance(m, BaseQuantizer))
+        quantizer.annealing_alpha.fill_(0.7)
+        quantizer.search_done.fill_(False)  # forces the "not calibrated" RuntimeError
+
+        with pytest.raises(RuntimeError, match="not been calibrated"):
+            export_onnx_with_io(
+                model, torch.randn(1, 3, 8, 8), str(tmp_path / "m.onnx"),
+                opset_version=13, custom_opsets={"Quantify": 1}, dynamo=False,
+            )
+
+        assert quantizer.annealing_alpha.item() == pytest.approx(0.7)
+
+    def test_freeze_annealing_false_reproduces_the_bug(self, tmp_path):
+        """freeze_annealing=False is an explicit escape hatch; confirms the
+        default (True) is actually doing something, not a no-op."""
+        model = self._calibrated_model()
+        quantizer = next(m for m in model.modules() if isinstance(m, BaseQuantizer))
+        quantizer.annealing_alpha.fill_(0.5)
+
+        onnx_path = tmp_path / "unfrozen.onnx"
+        export_onnx_with_io(
+            model, torch.randn(1, 3, 8, 8), str(onnx_path),
+            opset_version=13, custom_opsets={"Quantify": 1}, dynamo=False,
+            freeze_annealing=False,
+        )
+        onnx_model = get_onnx_model(str(onnx_path))
+        assert _forbidden_blend_nodes(onnx_model), (
+            "expected freeze_annealing=False to reproduce the Mul/Add blend leak"
+        )
