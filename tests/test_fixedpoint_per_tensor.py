@@ -302,6 +302,49 @@ class TestFindOptimalLsb:
         lsb, _, _ = find_optimal_lsb(weights, 4, False, RoundingMode.ROUND_TO_NEAREST_EVEN)
         assert isinstance(lsb, int)
 
+    def test_prefer_high_lsb_covers_outliers_without_clipping(self):
+        """Activation mode (prefer_high_lsb=True) must never clip the observed
+        abs_max, unlike weight mode which optimizes for unique-value count and
+        can clip rare outliers to finely resolve the dense bulk instead."""
+        torch.manual_seed(0)
+        bulk = torch.randn(10_000) * 0.1
+        outliers = torch.tensor([5.0, -5.0])
+        x = torch.cat([bulk, outliers])
+        bw = 8
+        mode = RoundingMode.ROUND
+
+        lsb, _, _ = find_optimal_lsb(x, bw, True, mode, prefer_high_lsb=True)
+        q = quantize_fixed_point(x, lsb, bw, True, mode)
+
+        assert torch.allclose(q[-2:], outliers, atol=2.0 ** lsb), (
+            f"outliers were clipped: quantized={q[-2:].tolist()} vs {outliers.tolist()}"
+        )
+
+        # And it must be the finest (lowest) LSB that still achieves full coverage.
+        integer_max = 2 ** (bw - 1) - 1
+        abs_max = x.abs().max().item()
+        assert integer_max * (2.0 ** lsb) >= abs_max
+        assert integer_max * (2.0 ** (lsb - 1)) < abs_max
+
+    def test_prefer_high_lsb_differs_from_unique_count_objective(self):
+        """Sanity check that the two selection rules actually diverge on a
+        distribution with a dense bulk + rare outliers -- otherwise this test
+        suite wouldn't be exercising the fix at all."""
+        torch.manual_seed(0)
+        bulk = torch.randn(10_000) * 0.1
+        outliers = torch.tensor([5.0, -5.0])
+        x = torch.cat([bulk, outliers])
+        bw = 8
+        mode = RoundingMode.ROUND
+
+        weight_lsb, _, _ = find_optimal_lsb(x, bw, True, mode, prefer_high_lsb=False)
+        act_lsb, _, _ = find_optimal_lsb(x, bw, True, mode, prefer_high_lsb=True)
+
+        assert act_lsb > weight_lsb, (
+            "expected coverage-first activation LSB to be coarser (higher) than "
+            "the unique-count-maximizing weight LSB on an outlier-heavy distribution"
+        )
+
     def test_positive_weights_choose_unsigned_range(self):
         """For purely positive weights, unsigned representation should cover
         the range better (more codes dedicated to positive side)."""

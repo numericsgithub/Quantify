@@ -158,16 +158,22 @@ def find_optimal_lsb(
     prefer_high_lsb: bool = False,
 ) -> Tuple[int, int, list]:
     """
-    Search over LSB positions to find the one that maximises unique quantised values.
+    Search over LSB positions to find the best fixed-point step size.
 
     Two selection rules:
-      prefer_high_lsb=False (weights): ties broken by smallest SAD — prefers a
+      prefer_high_lsb=False (weights): maximise the number of unique
+        quantised output values, ties broken by smallest SAD — prefers a
         finer grid when multiple LSBs reach the same unique count.
-      prefer_high_lsb=True (activations): among all LSBs that reach the maximum
-        unique count, pick the HIGHEST one.  A higher LSB means a coarser step
-        but a wider representable range, which reduces clipping of the activation
-        distribution.  The iteration runs high→low, so the first LSB that reaches
-        the global maximum is also the highest one — no SAD tie-break is applied.
+      prefer_high_lsb=True (activations): COVERAGE-FIRST. Maximising unique
+        quantised values (the weight-mode objective) systematically clips
+        outliers: a narrow grid packs many more distinct codes into a dense
+        bulk-of-distribution cluster than a wide grid does, so it always wins
+        the "maximise unique count" objective even though it saturates rare
+        extreme values. Instead, pick the FINEST (lowest) LSB whose
+        representable range still covers abs_max without clipping it — this
+        guarantees the full observed range (including outliers) survives
+        calibration, and is the finest resolution possible subject to that
+        constraint.
 
     Returns
     -------
@@ -189,10 +195,19 @@ def find_optimal_lsb(
             n_positive_codes = 1
     else:
         n_positive_codes = 2 ** bit_width - 1
+    integer_max = n_positive_codes
 
     ideal_lsb = math.log2(abs_max / n_positive_codes) if n_positive_codes > 0 else 0
     search_lo = math.floor(ideal_lsb) - 12
     search_hi = math.ceil(ideal_lsb) + 12
+
+    if prefer_high_lsb:
+        # Coverage-first: smallest step whose range still contains abs_max.
+        coverage_lsb = math.ceil(ideal_lsb)
+        while integer_max * (2.0 ** (coverage_lsb - 1)) >= abs_max:
+            coverage_lsb -= 1  # a finer step still covers abs_max -- keep sharpening
+        while integer_max * (2.0 ** coverage_lsb) < abs_max:
+            coverage_lsb += 1  # float rounding left us a hair too fine -- back off
 
     best_lsb = search_lo
     best_unique = -1
@@ -206,8 +221,7 @@ def find_optimal_lsb(
         search_records.append((lsb, n_unique, sad))
 
         if prefer_high_lsb:
-            # Strict improvement only: first (highest) LSB with global max unique wins
-            if n_unique > best_unique:
+            if lsb == coverage_lsb:
                 best_lsb = lsb
                 best_unique = n_unique
                 best_sad = sad
