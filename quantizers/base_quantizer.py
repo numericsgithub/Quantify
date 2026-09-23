@@ -8,12 +8,15 @@ Provides shared boilerplate for per-tensor quantizers, including:
 - Configurable inference gating (decoupled from global state)
 """
 
+import logging
 import torch
 import torch.nn as nn
 from abc import ABC, abstractmethod
 from typing import Tuple, Any, Optional
 
 from quantizers.manager import QuantizerManager
+
+logger = logging.getLogger("quantizers")
 
 
 class AnnealingBlendFn(torch.autograd.Function):
@@ -110,6 +113,17 @@ class BaseQuantizer(nn.Module, ABC):
         self._post_annealing_fired: bool = False
         self._last_snapshot_seen: int = 0
 
+        # Lifecycle-event logging state (not buffers — ephemeral, one-shot per
+        # quantizer *object*; a `load_state_dict()` call recreates the proxy
+        # and therefore this object, see pitfall #12 in
+        # docs/llm/pitfalls/brevitas_pitfalls.md, so events will be logged
+        # again -- once -- for the new object even if the "real" milestone
+        # happened earlier, before the checkpoint was saved).
+        self._log_gate_opened: bool = False
+        self._log_calibration_count: int = 0
+        self._log_annealing_started: bool = False
+        self._log_annealing_complete: bool = False
+
     def forward(self, x: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
         if self.inference_sequence_id == -1:
             self.inference_sequence_id = self.quantizer_manager.get_inference_sequence_id()
@@ -120,11 +134,21 @@ class BaseQuantizer(nn.Module, ABC):
             if self.training:
                 self.inference_counter += 1
             perform_quantization = False
-            
+
         if not perform_quantization:
             return x, torch.tensor(1.0, dtype=x.dtype, device=x.device), \
                    torch.tensor(0.0, dtype=x.dtype, device=x.device), \
                    torch.tensor(float(self.bit_width), dtype=x.dtype, device=x.device)
+
+        if not self._log_gate_opened:
+            self._log_gate_opened = True
+            qid = getattr(self, "quant_id", repr(id(self)))
+            gap = self.inference_sequence_id * self.quantizer_manager.quantization_start_gap
+            logger.info(
+                "Quantizer %r: gate opened, starting to quantize (inference_sequence_id=%d, "
+                "quantization_start_gap=%d, waited %d gated-off forward call(s)).",
+                qid, self.inference_sequence_id, self.quantizer_manager.quantization_start_gap, gap,
+            )
 
         # 2. Calibration check
         is_exporting = torch.onnx.is_in_onnx_export()
@@ -145,6 +169,13 @@ class BaseQuantizer(nn.Module, ABC):
                 )
             params = self._calibrate(x)
             self._save_calibration(params)
+            self._log_calibration_count += 1
+            qid = getattr(self, "quant_id", repr(id(self)))
+            logger.info(
+                "Quantizer %r: calibration %s (search_done -> True).",
+                qid, "completed" if self._log_calibration_count == 1 else
+                f"re-run (#{self._log_calibration_count}, force_recalibration)",
+            )
             # Reset global flag after triggering recalibration to avoid forcing it on every forward
             self.quantizer_manager.reset_global_flag()
         else:
@@ -168,12 +199,28 @@ class BaseQuantizer(nn.Module, ABC):
 
         alpha_before = self.annealing_alpha.item()
         if alpha_before < 1.0:
+            if not self._log_annealing_started:
+                self._log_annealing_started = True
+                qid = getattr(self, "quant_id", repr(id(self)))
+                logger.info(
+                    "Quantizer %r: annealing started (annealing_alpha=%.3f, step=%.4f) -- "
+                    "output is a (1-alpha)*float + alpha*quantized blend until alpha reaches 1.0.",
+                    qid, alpha_before, self.annealing_alpha_step,
+                )
             result = AnnealingBlendFn.apply(x, quantized, alpha_before)
             if self.training:
                 new_alpha = min(alpha_before + self.annealing_alpha_step, 1.0)
                 self.annealing_alpha.data.fill_(new_alpha)
         else:
             result = quantized
+
+        if self.annealing_alpha.item() >= 1.0 and not self._log_annealing_complete:
+            self._log_annealing_complete = True
+            qid = getattr(self, "quant_id", repr(id(self)))
+            logger.info(
+                "Quantizer %r: annealing complete (annealing_alpha=1.0) -- output is now fully quantized.",
+                qid,
+            )
 
         # 4. Diagnostics (runs only when diagnostics_dir is set; never in ONNX export)
         if not is_exporting and self.quantizer_manager.diagnostics_dir is not None:

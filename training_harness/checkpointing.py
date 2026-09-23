@@ -9,6 +9,7 @@ each saved checkpoint.
 
 from __future__ import annotations
 
+import collections
 import json
 import os
 import shutil
@@ -39,6 +40,73 @@ class CheckpointRecord:
 # ---------------------------------------------------------------------------
 # Checkpoint payload helpers
 # -----------------------------------------------------------------------------------
+
+def _plain_state_dict_path(pt_path: str) -> str:
+    """`checkpoints/last.pt` -> `checkpoints/last_state_dict.pt`, mirroring
+    the `.pt` -> `.onnx` companion-file naming already used for ONNX export."""
+    if pt_path.endswith(".pt"):
+        return pt_path[: -len(".pt")] + "_state_dict.pt"
+    return pt_path + "_state_dict.pt"
+
+
+def _is_quantizer_proxy_key(key: str) -> bool:
+    """True if `key` lives under a Brevitas quantizer proxy submodule.
+
+    Brevitas always nests quantization state under a submodule whose
+    *attribute name* ends in `_quant` -- `weight_quant`, `bias_quant`,
+    `input_quant`, `output_quant`, `act_quant`, ... (`QuantWeightMixin` /
+    `QuantBiasMixin` / `QuantInputMixin` / `QuantOutputMixin` all follow this
+    convention). This is true for stock Brevitas quantizers too, not just
+    Quantify's -- e.g. `conv1.weight_quant.tensor_quant.annealing_alpha` or
+    `conv1.weight_quant.tensor_quant.search_done`. The actual weight/bias
+    tensor itself (`conv1.weight`) lives one level up, outside this prefix,
+    so filtering these out keeps exactly the tensors a plain, non-quantized
+    equivalent model would have and drops only the quantizer bookkeeping.
+    A pure string check on the saved key names -- no live model needed.
+    """
+    return any(part.endswith("_quant") for part in key.split("."))
+
+
+def strip_quantizer_state(state_dict: dict) -> "collections.OrderedDict":
+    """Drop every Brevitas/Quantify quantizer-proxy entry from a state_dict,
+    leaving exactly what a plain, non-quantized equivalent model's
+    `state_dict()` would contain. See `_is_quantizer_proxy_key`.
+
+    Returns an `OrderedDict` (not a plain `dict`) to match the exact type
+    `nn.Module.state_dict()` itself returns.
+    """
+    return collections.OrderedDict(
+        (k, v) for k, v in state_dict.items() if not _is_quantizer_proxy_key(k)
+    )
+
+
+def export_plain_state_dict(checkpoint_path: str, output_path: Optional[str] = None) -> str:
+    """Convert an existing training_harness checkpoint (the wrapper dict with
+    `model_state_dict`/`optimizer_state_dict`/`metrics`/... keys) into a
+    plain PyTorch state_dict file -- exactly what `torch.save(model.state_dict(),
+    path)` would have produced for a non-quantized equivalent model, with
+    none of this repo's checkpoint schema *and* none of the Brevitas/Quantify
+    quantizer bookkeeping (annealing_alpha, search_done, ...) stripped via
+    `strip_quantizer_state`. Loadable in any vanilla PyTorch script with just::
+
+        model.load_state_dict(torch.load(output_path))
+
+    Args:
+        checkpoint_path: Path to a harness checkpoint (e.g. "checkpoints/last.pt").
+        output_path:     Where to write the plain state_dict. Defaults to
+                          `_plain_state_dict_path(checkpoint_path)`.
+
+    Returns:
+        The path the plain state_dict was written to.
+    """
+    payload = torch.load(checkpoint_path, map_location="cpu", weights_only=False)
+    state_dict = payload["model_state_dict"] if isinstance(payload, dict) and "model_state_dict" in payload else payload
+    state_dict = strip_quantizer_state(state_dict)
+    if output_path is None:
+        output_path = _plain_state_dict_path(checkpoint_path)
+    torch.save(state_dict, output_path)
+    return output_path
+
 
 def _build_payload(
     epoch: int,
@@ -77,6 +145,13 @@ class CheckpointManager:
     - Keeps only the top-K checkpoints ranked by a monitored metric.
     - Optionally keeps a 'last.pt' checkpoint separate from the top-K.
     - Automatically exports the model to ONNX alongside each saved checkpoint.
+    - Automatically saves a plain `<name>_state_dict.pt` companion alongside
+      every checkpoint -- exactly what `torch.save(model.state_dict(), path)`
+      would produce, with none of this class's own wrapper-dict schema, so
+      it's loadable in any vanilla PyTorch script via
+      `model.load_state_dict(torch.load(path))`. Use the module-level
+      `export_plain_state_dict()` to convert any *existing* harness
+      checkpoint the same way.
     - Provides a simple resume() method to restore a full training_harness state.
     - Gracefully handles Brevitas scale/buffer mismatches during load.
 
@@ -174,6 +249,7 @@ class CheckpointManager:
             )
             torch.save(payload, last_path)
             self._export_onnx(model, last_path.replace('.pt', '.onnx'), dummy_input)
+            self._export_plain_state_dict(model, _plain_state_dict_path(last_path))
 
         # Save every-N if configured
         if self.save_every_n_epochs and (epoch + 1) % self.save_every_n_epochs == 0:
@@ -185,6 +261,7 @@ class CheckpointManager:
                 epoch, model, optimizer, scheduler, metrics_dict or {}, config_dict, extra
             )
             torch.save(payload, periodic_path)
+            self._export_plain_state_dict(model, _plain_state_dict_path(periodic_path))
 
         # Top-K logic
         if self._should_save(metric_value):
@@ -194,6 +271,7 @@ class CheckpointManager:
                 epoch, model, optimizer, scheduler, metrics_dict or {}, config_dict, extra
             )
             torch.save(payload, path)
+            self._export_plain_state_dict(model, _plain_state_dict_path(path))
 
             record = CheckpointRecord(epoch=epoch, metric_value=metric_value, path=path)
             self._add_record(record)
@@ -321,6 +399,8 @@ class CheckpointManager:
 
     def _should_save(self, metric_value: float) -> bool:
         """Return True if this metric value should enter the top-K pool."""
+        if self.top_k <= 0:
+            return False  # top-k pool disabled entirely
         if len(self._records) < self.top_k:
             return True
         # Compare against the worst in the current pool
@@ -341,6 +421,9 @@ class CheckpointManager:
             if os.path.exists(evicted.path):
                 os.remove(evicted.path)
                 print(f"  [ckpt] Evicted {os.path.basename(evicted.path)}")
+            plain_path = _plain_state_dict_path(evicted.path)
+            if os.path.exists(plain_path):
+                os.remove(plain_path)
 
     def _index_path(self) -> str:
         return os.path.join(self.save_dir, self.INDEX_FILE)
@@ -396,3 +479,18 @@ class CheckpointManager:
             print(f"  [ckpt] Exported ONNX → {os.path.basename(onnx_path)}")
         except Exception as e:
             print(f"  [ckpt] ONNX export skipped: {e}")
+
+    def _export_plain_state_dict(self, model: nn.Module, path: str) -> None:
+        """Save a companion file containing *just* the non-quantizer entries
+        of `model.state_dict()` -- exactly what plain
+        `torch.save(model.state_dict(), path)` would produce for a
+        non-quantized equivalent model, with none of this repo's checkpoint
+        wrapper dict and none of the Brevitas/Quantify quantizer bookkeeping
+        (see `strip_quantizer_state`). Loadable in any vanilla PyTorch script
+        with `model.load_state_dict(torch.load(path))`.
+        """
+        try:
+            torch.save(strip_quantizer_state(model.state_dict()), path)
+            print(f"  [ckpt] Exported plain state_dict → {os.path.basename(path)}")
+        except Exception as e:
+            print(f"  [ckpt] plain state_dict export skipped: {e}")

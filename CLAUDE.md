@@ -41,6 +41,8 @@ All custom quantizers inherit from `quantizers/base_quantizer.py:BaseQuantizer`.
 
 `QuantizerManager` (`quantizers/manager.py`) is a **singleton** that coordinates all quantizer instances: global recalibration, quantization annealing, and inference gating. Subclasses plug in via `base_injector.py`, which wires `QuantConv2d`/`QuantLinear` layers to a quantizer at construction time.
 
+Each quantizer logs its own lifecycle milestones once, via `logging.getLogger("quantizers")` at `INFO` level: gate opened (gap-staggered start), calibration completed/re-run, annealing started, annealing complete. Useful for explaining after the fact exactly when a given layer started quantizing — enable with `logging.basicConfig(level=logging.INFO)` (or attach a handler to the `"quantizers"` logger specifically) in your own script/notebook; the harness itself only uses `print()` for its own console output, it doesn't configure logging for you.
+
 Public quantizers (re-exported from `quantizers/__init__.py`):
 - `FixedPointPerTensorWeightQuant` / `FixedPointPerTensorActivationQuant` / `FixedPointPerTensorBiasQuant`
 - `CoefficientPerTensorWeightQuant`
@@ -62,6 +64,11 @@ Use `TrainerConfig` + `QuantScheduleConfig` to control timing. Do **not** write 
 - Always pass `dynamo=False` — custom quantizers use `torch.autograd.Function.symbolic`, which the dynamo exporter does not support (pitfall #3 in `docs/llm/pitfalls/brevitas_pitfalls.md`).
 - Call `reset_quantizer_states()` before every export to flush FIFO deque capture state.
 - Custom ONNX nodes land in the `Quantify` domain (e.g., `Quantify::FixedPointQuant`). They are for graph inspection, not ORT inference.
+- `freeze_annealing=True` (default) is required if a checkpoint might be mid-QAT-anneal, or the exported graph leaks a `Mul`/`Add` float-weight blend after the quantize node (pitfall #16 in `docs/llm/pitfalls/brevitas_pitfalls.md`).
+
+### Checkpoints
+
+`training_harness/checkpointing.py:CheckpointManager` saves its own wrapper dict (`model_state_dict`/`optimizer_state_dict`/`metrics`/...), not a plain PyTorch checkpoint. It also auto-saves a plain `<name>_state_dict.pt` companion next to every checkpoint (`last.pt` -> `last_state_dict.pt`, etc.) — a bare `OrderedDict[str, Tensor]` with the Brevitas/Quantify quantizer bookkeeping (`*_quant.*` submodule entries: `annealing_alpha`, `search_done`, ...) stripped out via `strip_quantizer_state`, leaving exactly the tensors a non-quantized equivalent model's `state_dict()` would have. Loadable in any vanilla PyTorch script with `model.load_state_dict(torch.load(path))`, no knowledge of this repo's schema or Brevitas required. Use the module-level `export_plain_state_dict(checkpoint_path, output_path=None)` to convert an existing harness checkpoint the same way on demand.
 
 ## Key Conventions (`docs/llm/CONVENTIONS.md`)
 

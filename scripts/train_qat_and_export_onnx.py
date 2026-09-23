@@ -66,7 +66,13 @@ def main():
     dummy_input, _ = train_ds[0]
     dummy_input = dummy_input.unsqueeze(0).to(device)
 
-    ckpt_paths = sorted(glob.glob(os.path.join(config.checkpoint_dir, "*.pt")))
+    # exclude the plain "*_state_dict.pt" companions CheckpointManager also
+    # writes now -- those are bare state_dicts (no "model_state_dict" wrapper
+    # key), not harness checkpoints.
+    ckpt_paths = sorted(
+        p for p in glob.glob(os.path.join(config.checkpoint_dir, "*.pt"))
+        if not p.endswith("_state_dict.pt")
+    )
     print(f"found {len(ckpt_paths)} checkpoint(s): {[os.path.basename(p) for p in ckpt_paths]}")
 
     exported = []
