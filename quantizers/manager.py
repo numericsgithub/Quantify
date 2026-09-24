@@ -20,6 +20,18 @@ class QuantizerManager:
         # Global flag to force all quantizers to re-run their search/calibration
         self.force_recalibration = False
         self.quantization_start_gap = 0
+        # Set by disable_quantization()/enable_quantization(): when True,
+        # BaseQuantizer.forward() short-circuits to a float passthrough
+        # *before* running any calibration/quantize compute, instead of
+        # running the full fake-quantization pipeline and discarding the
+        # result via annealing_alpha=0's blend (the old disable_quantization()
+        # only zeroed alpha, which still computed and threw away a full
+        # quantized tensor on every single forward call -- see pitfall
+        # "disable_quantization() computes and discards" in
+        # docs/llm/pitfalls/brevitas_pitfalls.md; measured in a real project
+        # as the dominant cost for a tiny model, far more than any .item()
+        # sync).
+        self.quantization_globally_disabled = False
         # Registry to keep track of all active quantizer instances {id: quantizer}
         self.quantizers = {}
         # Counter to generate unique identifiers
@@ -35,6 +47,7 @@ class QuantizerManager:
         """
         self.force_recalibration = False
         self.quantization_start_gap = 0
+        self.quantization_globally_disabled = False
         self.quantizers.clear()
         self._id_counter = 0
         self._inference_sequence_id_counter = 0
@@ -68,7 +81,15 @@ class QuantizerManager:
                 straight to annealing_alpha=1.0 with no further annealing,
                 instead of being reset to annealing_alpha=0.0 and made to
                 ramp up again like a freshly-calibrated quantizer.
+
+        This is the real "start QAT" entry point used by the training
+        harness (`trainer_v2.py::_activate_qat`), which never calls
+        `enable_quantization()` -- so it must clear
+        `quantization_globally_disabled` itself, or a model that began with
+        `disable_quantization()` (float warmup) would stay hard-disabled
+        forever, silently never actually quantizing.
         """
+        self.quantization_globally_disabled = False
         if n < 1:
             n = 1
         alpha_step = 1.0/n
@@ -106,13 +127,24 @@ class QuantizerManager:
                 q.inference_counter = q.inference_sequence_id * self.quantization_start_gap
 
     def disable_quantization(self):
-        """Disable quantization by setting annealing_alpha and annealing_alpha_step to zero for all registered quantizers."""
+        """Disable quantization globally: BaseQuantizer.forward() now skips
+        calibration and quantize compute entirely (see
+        quantization_globally_disabled's docstring in __init__), not just
+        the annealing_alpha=0 blend-away this used to rely on alone. Also
+        zeroes annealing_alpha/annealing_alpha_step on every registered
+        quantizer so a subsequent read (or a stale cached copy) still sees
+        the "disabled" state consistently.
+        """
+        self.quantization_globally_disabled = True
         for quant in self.quantizers.values():
             quant.set_annealing_alpha(0.0)
             quant.annealing_alpha_step = 0.0
 
     def enable_quantization(self):
-        """Enable quantization by setting annealing_alpha to one and annealing_alpha_step to 0.1 for all registered quantizers."""
+        """Re-enable quantization globally (see disable_quantization) and set
+        annealing_alpha to one and annealing_alpha_step to 0.1 for all
+        registered quantizers."""
+        self.quantization_globally_disabled = False
         for quant in self.quantizers.values():
             quant.set_annealing_alpha(1.0)
             quant.annealing_alpha_step = 0.1

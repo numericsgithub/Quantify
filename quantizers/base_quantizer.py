@@ -125,6 +125,15 @@ class BaseQuantizer(nn.Module, ABC):
         self._search_done_cached: bool = False
         self._search_done_version: int = -1
 
+        # Cache of the (scale=1, zero_point=0, bit_width) constant-tensor
+        # triple returned on every passthrough (gated-off or globally
+        # disabled) forward call, keyed by (dtype, device). Building these
+        # with a fresh `torch.tensor(...)` on every such call is a real,
+        # measured cost (each is a small allocation + kernel launch, not
+        # just Python overhead) -- see the note on quantization_globally_disabled
+        # in QuantizerManager.__init__.
+        self._passthrough_cache: dict = {}
+
         # Use provided manager or create a local instance to avoid global state
         self.quantizer_manager = quantizer_manager if quantizer_manager is not None else QuantizerManager()
         
@@ -206,9 +215,36 @@ class BaseQuantizer(nn.Module, ABC):
         -- see `annealing_alpha_value` for why that distinction matters."""
         self.annealing_alpha.fill_(value)
 
+    def _passthrough_metadata(self, x: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        """(scale=1, zero_point=0, bit_width) for the passthrough return
+        path, cached per (dtype, device) instead of allocated fresh on every
+        gated-off/disabled call -- see `_passthrough_cache`'s docstring."""
+        key = (x.dtype, x.device)
+        cached = self._passthrough_cache.get(key)
+        if cached is None:
+            cached = (
+                torch.tensor(1.0, dtype=x.dtype, device=x.device),
+                torch.tensor(0.0, dtype=x.dtype, device=x.device),
+                torch.tensor(float(self.bit_width), dtype=x.dtype, device=x.device),
+            )
+            self._passthrough_cache[key] = cached
+        return cached
+
     def forward(self, x: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
         if self.inference_sequence_id == -1:
             self.inference_sequence_id = self.quantizer_manager.get_inference_sequence_id()
+
+        # 0. Global hard-disable: skip calibration AND quantize compute
+        # entirely, rather than running the full fake-quantization pipeline
+        # and discarding the result via annealing_alpha=0's blend. This is
+        # the fix for a real, measured issue: disable_quantization() used to
+        # only zero alpha, so _calibrate()/_quantize() still ran (and were
+        # thrown away) on every forward call while "disabled" -- in a
+        # real-world tiny model this dwarfed any .item()-sync cost. See
+        # quantization_globally_disabled's docstring in QuantizerManager.
+        if self.quantizer_manager.quantization_globally_disabled:
+            scale, zero_point, bit_width = self._passthrough_metadata(x)
+            return x, scale, zero_point, bit_width
 
         # 1. Inference gating
         perform_quantization = True
@@ -218,9 +254,8 @@ class BaseQuantizer(nn.Module, ABC):
             perform_quantization = False
 
         if not perform_quantization:
-            return x, torch.tensor(1.0, dtype=x.dtype, device=x.device), \
-                   torch.tensor(0.0, dtype=x.dtype, device=x.device), \
-                   torch.tensor(float(self.bit_width), dtype=x.dtype, device=x.device)
+            scale, zero_point, bit_width = self._passthrough_metadata(x)
+            return x, scale, zero_point, bit_width
 
         if not self._log_gate_opened:
             self._log_gate_opened = True
