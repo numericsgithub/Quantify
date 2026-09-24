@@ -36,6 +36,7 @@ from .metrics import MetricsTracker
 from .plotting import TrainingPlotter
 from .schedulers import collect_scale_factors, freeze_bn, _set_quant_enabled
 from .engine_utils import BreakdownDetector, EarlyStopping, EpochTimer, LossPlateauDetector, log_hardware_info, set_seed
+from quantizers.base_quantizer import reset_calibration_state
 from quantizers.manager import QuantizerManager
 
 
@@ -528,12 +529,7 @@ class QATTrainerV2:
         # weights. Skip quantizers that are already calibrated (search_done=True)
         # when preserve_calibrated_quantizers is set, e.g. because the model was
         # initialized from a PTQ checkpoint and its LSBs should be kept as-is.
-        for m in self.model.modules():
-            for name, buf in m.named_buffers():
-                if "search_done" in name or "calibration_done" in name:
-                    if preserve and buf.item():
-                        continue
-                    buf.fill_(False)
+        reset_calibration_state(self.model, preserve_calibrated=preserve)
 
         # Re-enable Brevitas proxy layers (disabled during float warmup by
         # _set_quant_enabled). The custom quantizers' own gating/annealing then
@@ -819,7 +815,7 @@ class QATTrainerV2:
         """Return (n_fully_quantized, n_total) from the active QuantizerManager."""
         mgr = QuantizerManager()
         total  = len(mgr.quantizers)
-        fully  = sum(1 for q in mgr.quantizers.values() if q.annealing_alpha >= 1.0)
+        fully  = sum(1 for q in mgr.quantizers.values() if q.annealing_alpha_value >= 1.0)
         return fully, total
 
     def _print_epoch_summary(
@@ -907,7 +903,7 @@ def _reset_and_register(model: nn.Module) -> None:
             # Reset per-quantizer run state so sequence IDs are fresh
             module.inference_counter = 0
             module.inference_sequence_id = -1
-            module.annealing_alpha.data.fill_(1.0)
+            module.set_annealing_alpha(1.0)
             module.annealing_alpha_step = 0.1
 
     # Assign descriptive location-based names.

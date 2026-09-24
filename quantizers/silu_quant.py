@@ -70,6 +70,15 @@ class SiLUTensorQuant(BaseQuantizer):
         self.signed = signed
         self.rounding_mode = rounding_mode
         self.register_buffer('search_result_lsb', torch.tensor(0, dtype=torch.long))
+        # Python-side mirror -- see BaseQuantizer._cached_scalar / the note in
+        # BaseQuantizer.__init__.
+        self._search_result_lsb_cached: int = 0
+        self._search_result_lsb_version: int = -1
+
+    @property
+    def _lsb_value(self) -> int:
+        return self._cached_scalar(
+            self.search_result_lsb, "_search_result_lsb_cached", "_search_result_lsb_version", int)
 
     def _calibrate(self, x: torch.Tensor) -> Any:
         """Calibrate by finding the optimal LSB for the SiLU output."""
@@ -80,13 +89,16 @@ class SiLUTensorQuant(BaseQuantizer):
         return {'lsb': lsb}
 
     def _save_calibration(self, params: Any) -> None:
-        """Save calibration results to buffers."""
+        """Save calibration results to buffers (and their Python-side mirrors)."""
         self.search_result_lsb.fill_(params['lsb'])
-        self.search_done.fill_(True)
+        self._search_result_lsb_cached = int(params['lsb'])
+        self._search_result_lsb_version = self.search_result_lsb._version
+        self.set_search_done(True)
 
     def _load_calibration(self) -> Any:
-        """Load calibration results from buffers."""
-        return {'lsb': self.search_result_lsb.item()}
+        """Load calibration results, reading the cache when the buffer hasn't
+        changed since the last read -- see BaseQuantizer._cached_scalar."""
+        return {'lsb': self._lsb_value}
 
     def _quantize(self, x: torch.Tensor, params: Any) -> torch.Tensor:
         """Apply SiLU and quantization."""

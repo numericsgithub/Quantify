@@ -388,6 +388,28 @@ class FixedPointPerTensorQuantizer(BaseQuantizer):
         # Register search results as buffers to ensure they are serialized in state_dict
         self.register_buffer('search_result_is_signed', torch.tensor(signed, dtype=torch.bool))
         self.register_buffer('search_result_lsb', torch.tensor(0, dtype=torch.long))
+        # Python-side mirrors -- see BaseQuantizer._cached_scalar / the note
+        # in BaseQuantizer.__init__. _load_calibration() runs on every
+        # quantizing forward call once calibrated, so without this every
+        # single forward pass would force two GPU syncs just to re-read two
+        # numbers that rarely change after calibration (self-invalidates via
+        # each buffer's `._version`, so an external override -- e.g. PTQ LSB
+        # override scripts -- is still picked up correctly).
+        self._search_result_lsb_cached: int = 0
+        self._search_result_lsb_version: int = -1
+        self._search_result_is_signed_cached: bool = bool(signed)
+        self._search_result_is_signed_version: int = -1
+
+    @property
+    def _lsb_value(self) -> int:
+        return self._cached_scalar(
+            self.search_result_lsb, "_search_result_lsb_cached", "_search_result_lsb_version", int)
+
+    @property
+    def _signed_value(self) -> bool:
+        return self._cached_scalar(
+            self.search_result_is_signed, "_search_result_is_signed_cached",
+            "_search_result_is_signed_version", bool)
 
     def _calibrate(self, x: torch.Tensor) -> Any:
         """Run calibration/search logic and return a params dict."""
@@ -411,19 +433,21 @@ class FixedPointPerTensorQuantizer(BaseQuantizer):
         }
 
     def _save_calibration(self, params: Any) -> None:
-        """Save calibration results to buffers."""
+        """Save calibration results to buffers (and their Python-side mirrors)."""
         self.search_result_is_signed.fill_(params['signed'])
         self.search_result_lsb.fill_(params['lsb'])
-        if params['num_unique'] > 1:
-            self.search_done.fill_(True)
-        else:
-            self.search_done.fill_(False)
+        self._search_result_is_signed_cached = bool(params['signed'])
+        self._search_result_is_signed_version = self.search_result_is_signed._version
+        self._search_result_lsb_cached = int(params['lsb'])
+        self._search_result_lsb_version = self.search_result_lsb._version
+        self.set_search_done(params['num_unique'] > 1)
 
     def _load_calibration(self) -> Any:
-        """Load calibration results from buffers."""
+        """Load calibration results, reading the cache when the buffers
+        haven't changed since the last read -- see BaseQuantizer._cached_scalar."""
         return {
-            'lsb': self.search_result_lsb.item(),
-            'signed': self.search_result_is_signed.item()
+            'lsb': self._lsb_value,
+            'signed': self._signed_value,
         }
 
     def _quantize(self, x: torch.Tensor, params: Any) -> torch.Tensor:

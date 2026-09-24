@@ -19,6 +19,7 @@ from typing import Any, Dict, List, Optional
 import torch
 import torch.nn as nn
 
+from quantizers.base_quantizer import reset_calibration_state
 from utils.onnx_export import export_onnx_with_io
 
 
@@ -450,13 +451,8 @@ class CheckpointManager:
         ]
 
     def _reset_calibration_buffers(self, model: nn.Module) -> None:
-        """Reset lazy calibration flags (e.g., `search_done`) in Brevitas quantizers."""
-        reset_count = 0
-        for module in model.modules():
-            for name, buffer in module.named_buffers():
-                if "search_done" in name or "calibration_done" in name:
-                    buffer.fill_(False)
-                    reset_count += 1
+        """Reset lazy calibration flags (`search_done`) in Brevitas quantizers."""
+        reset_count = reset_calibration_state(model)
         if reset_count > 0:
             print(f"  [ckpt] Reset {reset_count} calibration buffer(s) to force re-calibration.")
 

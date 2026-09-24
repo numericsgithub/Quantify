@@ -112,38 +112,71 @@ class CoefficientPerTensorWeightQuantizer(BaseQuantizer):
         # Register search results as buffers (handled by base class for state-dict)
         self.register_buffer('best_set_idx', torch.tensor(0, dtype=torch.long))
         self.register_buffer('best_bit_shift_scale', torch.tensor(0, dtype=torch.long))
+        # Python-side mirrors -- see BaseQuantizer._cached_scalar / the note
+        # in BaseQuantizer.__init__. _load_calibration() runs on every
+        # quantizing forward call once calibrated.
+        self._best_set_idx_cached: int = 0
+        self._best_set_idx_version: int = -1
+        self._best_bit_shift_scale_cached: int = 0
+        self._best_bit_shift_scale_version: int = -1
+
+    @property
+    def _set_idx_value(self) -> int:
+        return self._cached_scalar(
+            self.best_set_idx, "_best_set_idx_cached", "_best_set_idx_version", int)
+
+    @property
+    def _bit_shift_scale_value(self) -> int:
+        return self._cached_scalar(
+            self.best_bit_shift_scale, "_best_bit_shift_scale_cached", "_best_bit_shift_scale_version", int)
 
     def _calibrate(self, x: torch.Tensor) -> Any:
-        """Run calibration/search logic and return a params dict."""
+        """Run calibration/search logic and return a params dict.
+
+        Unlike find_optimal_lsb's search (which already syncs every
+        iteration via torch.unique()'s data-dependent output shape, so there
+        is nothing to gain there), this search is pure elementwise math with
+        no structural reason to sync per candidate. Every (coefficient_set,
+        bit_shift_scale) candidate's SAD is kept as a 0-dim tensor -- no
+        `.item()` -- and only compared on-device (`torch.stack` + one
+        `argmin`); the loop itself still runs in Python (each candidate's SAD
+        computation depends on `x`'s full size, so batching all candidates
+        into one tensor op would multiply peak memory by len(coefficient_sets)*25,
+        which isn't worth it here), but the GPU queue is never drained until
+        the very end, one sync total instead of one per candidate.
+        """
         device = x.device
-        best_sad = float("inf")
-        best_set_idx = 0
-        best_bit_shift_scale = 0
+        sads = []
+        combos = []
 
         for idx, coeffs in enumerate(self.coefficient_sets):
             coeffs_dev = coeffs.to(device)
             for bit_shift_scale in range(-12, 13):
                 quantized_temp, scale, _ = apply_non_uniform_quantization(x, coeffs_dev, bit_shift_scale)
-                sad = torch.sum(torch.abs(x - quantized_temp)).item()
-                
-                if sad < best_sad:
-                    best_sad = sad
-                    best_set_idx = idx
-                    best_bit_shift_scale = bit_shift_scale
+                sads.append(torch.sum(torch.abs(x - quantized_temp)))  # stays a 0-dim tensor
+                combos.append((idx, bit_shift_scale))
+
+        best_flat_idx = int(torch.stack(sads).argmin().item())  # the one sync
+        best_set_idx, best_bit_shift_scale = combos[best_flat_idx]
 
         return {'set_idx': best_set_idx, 'bit_shift_scale': best_bit_shift_scale}
 
     def _save_calibration(self, params: Any) -> None:
-        """Save calibration results to buffers."""
+        """Save calibration results to buffers (and their Python-side mirrors)."""
         self.best_set_idx.fill_(params['set_idx'])
         self.best_bit_shift_scale.fill_(params['bit_shift_scale'])
-        self.search_done.fill_(True)
+        self._best_set_idx_cached = int(params['set_idx'])
+        self._best_set_idx_version = self.best_set_idx._version
+        self._best_bit_shift_scale_cached = int(params['bit_shift_scale'])
+        self._best_bit_shift_scale_version = self.best_bit_shift_scale._version
+        self.set_search_done(True)
 
     def _load_calibration(self) -> Any:
-        """Load calibration results from buffers."""
+        """Load calibration results, reading the cache when the buffers
+        haven't changed since the last read -- see BaseQuantizer._cached_scalar."""
         return {
-            'set_idx': self.best_set_idx.item(),
-            'bit_shift_scale': self.best_bit_shift_scale.item()
+            'set_idx': self._set_idx_value,
+            'bit_shift_scale': self._bit_shift_scale_value,
         }
 
     def _quantize(self, x: torch.Tensor, params: Any) -> torch.Tensor:

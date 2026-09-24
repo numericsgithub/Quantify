@@ -44,14 +44,14 @@ class QuantizerManager:
     @property
     def is_quantizing_everything_fully(self):
         for quant in self.quantizers.values():
-            if quant.annealing_alpha != 1.0:
+            if quant.annealing_alpha_value != 1.0:
                 return False
         return True
 
     @property
     def is_not_quantizing_at_all(self):
         for quant in self.quantizers.values():
-            if quant.annealing_alpha != 0.0:
+            if quant.annealing_alpha_value != 0.0:
                 return False
         return True
 
@@ -73,11 +73,11 @@ class QuantizerManager:
             n = 1
         alpha_step = 1.0/n
         for quant in self.quantizers.values():
-            if skip_calibrated and quant.search_done.item():
-                quant.annealing_alpha.data.fill_(1.0)
+            if skip_calibrated and quant.search_done_value:
+                quant.set_annealing_alpha(1.0)
                 quant.annealing_alpha_step = 0.0
                 continue
-            quant.annealing_alpha.data.fill_(0)
+            quant.set_annealing_alpha(0.0)
             quant.annealing_alpha_step = alpha_step
 
     def skip_gating_for_calibrated_quantizers(self) -> None:
@@ -102,19 +102,19 @@ class QuantizerManager:
         before.
         """
         for q in self.quantizers.values():
-            if q.search_done.item() and q.inference_sequence_id != -1:
+            if q.search_done_value and q.inference_sequence_id != -1:
                 q.inference_counter = q.inference_sequence_id * self.quantization_start_gap
 
     def disable_quantization(self):
         """Disable quantization by setting annealing_alpha and annealing_alpha_step to zero for all registered quantizers."""
         for quant in self.quantizers.values():
-            quant.annealing_alpha.data.fill_(0.0)
+            quant.set_annealing_alpha(0.0)
             quant.annealing_alpha_step = 0.0
 
     def enable_quantization(self):
         """Enable quantization by setting annealing_alpha to one and annealing_alpha_step to 0.1 for all registered quantizers."""
         for quant in self.quantizers.values():
-            quant.annealing_alpha.data.fill_(1.0)
+            quant.set_annealing_alpha(1.0)
             quant.annealing_alpha_step = 0.1
 
     def register_quantizer(self, quantizer):
