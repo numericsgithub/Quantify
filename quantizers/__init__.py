@@ -9,6 +9,17 @@ from quantizers.fixedpoint_per_tensor import RoundingMode, quantize_fixed_point,
 
 from quantizers.silu_quant import SiLUTensorQuant, QuantSiLUActivationQuant
 
+from quantizers.activations import (
+    QuantReLU,
+    QuantReLU6,
+    QuantSigmoid,
+    QuantTanh,
+    QuantSiLU,
+    QuantGELU,
+    QuantLeakyReLU,
+    QuantSoftmax,
+)
+
 __all__ = [
     "CoefficientPerTensorWeightQuant",
     "FixedPointPerTensorWeightQuant",
@@ -21,4 +32,12 @@ __all__ = [
     "find_optimal_lsb",
     "SiLUTensorQuant",
     "QuantSiLUActivationQuant",
+    "QuantReLU",
+    "QuantReLU6",
+    "QuantSigmoid",
+    "QuantTanh",
+    "QuantSiLU",
+    "QuantGELU",
+    "QuantLeakyReLU",
+    "QuantSoftmax",
 ]
