@@ -1,21 +1,42 @@
 """
 Quantizer diagnostics: per-event metrics, text log, and matplotlib plot.
 
-Called from BaseQuantizer at three trigger points:
-  - calibration_N : first time (or Nth forced recalibration) search_done becomes True
-  - post_annealing: alpha first reaches 1.0 after having been < 1.0
-  - snapshot_NNNN : on-demand via QuantizerManager.request_snapshot()
+Two consumers share the same `compute_metrics()` call:
+
+  1. Lifecycle-event logging (`BaseQuantizer._log_lifecycle_event`, called
+     from `forward()`): a rich metrics dict is attached to the
+     "calibration_completed"/"calibration_rerun" and "annealing_complete"
+     log records (`record.metrics`), via the standard `logging` module --
+     no file I/O, nothing written to disk. This always runs (cheap,
+     one-shot; never on the per-forward-call hot path) whenever the
+     quantizer subclass supports it (`_get_diagnostics_params()` returns
+     non-None).
+  2. The file-writing path below (`run_diagnostics`, gated behind
+     `QuantizerManager.diagnostics_dir`): a text log line + a two-panel SVG/PNG
+     plot per event, at three trigger points:
+       - calibration_N : first time (or Nth forced recalibration) search_done becomes True
+       - post_annealing: alpha first reaches 1.0 after having been < 1.0
+       - snapshot_NNNN : on-demand via QuantizerManager.request_snapshot()
 
 All diagnostics measure the *ideal* quantized tensor (no annealing blend), so
 they reflect the real quantizer error at full strength.
 
 Activation tensors during ImageNet training can reach hundreds of millions of
 elements (batch=1024 × spatial × channels). To avoid moving huge tensors to
-CPU and passing them to numpy/matplotlib:
-  - All scalar metrics are computed via PyTorch on the original device.
-  - Only a random subsample of at most MAX_PLOT_SAMPLES elements is moved to
-    CPU for the histogram and bar chart.
-  - Metrics in the log and info box always reflect the FULL tensor.
+CPU:
+  - All scalar reductions (including the clip counts and the float-input
+    histogram, via `torch.histc`) run on the tensor's original device.
+  - Only the resulting small arrays move to CPU: the histogram (`n_hist_bins`
+    entries, default 256) and the EXACT per-code quantized-value counts
+    (`torch.unique(..., return_counts=True)`, at most `2**bit_width` entries
+    -- small enough to transfer in full, so the quantized-value bar chart is
+    exact, not an approximation from a random subsample like this module
+    used to produce).
+
+Use `plot_quantizer_metrics(metrics)` to turn any metrics dict (from a log
+record's `record.metrics`, or a direct `compute_metrics()` call) into a
+matplotlib figure yourself -- e.g. from a custom logging.Handler, a
+notebook, or after loading metrics you saved some other way.
 """
 
 from __future__ import annotations
@@ -23,30 +44,50 @@ from __future__ import annotations
 import math
 from datetime import datetime
 from pathlib import Path
-from typing import Dict, Any, Tuple
+from typing import Dict, Any, Optional, Tuple
 
 import torch
 import numpy as np
-
-# Maximum number of individual values sent to numpy/matplotlib for plotting.
-# Metrics are always computed on the full tensor regardless of this limit.
-MAX_PLOT_SAMPLES = 100_000
 
 
 # ---------------------------------------------------------------------------
 # Metric computation  (runs on original device — no large CPU transfer)
 # ---------------------------------------------------------------------------
 
-def _compute_metrics(
+def compute_metrics(
     x: torch.Tensor,
     quantized: torch.Tensor,
     lsb: int,
     bit_width: int,
     signed: bool,
-    input_shape: Tuple[int, ...],
-    quantizer_role: str,
+    quantizer_role: str = "unknown",
+    input_shape: Optional[Tuple[int, ...]] = None,
+    n_hist_bins: int = 256,
 ) -> Dict[str, Any]:
-    """All heavy reductions stay on the tensor's original device."""
+    """Compute a rich, self-contained metrics dict for one quantizer event
+    (calibration, annealing-complete, or an on-demand snapshot).
+
+    Safe to call on arbitrarily large tensors -- every reduction (including
+    the histogram) runs on `x`'s original device; only the small resulting
+    arrays (histogram bins, and the quantized tensor's exact per-code value
+    counts -- at most `2**bit_width` entries) are moved to CPU/numpy.
+
+    Returns a plain dict (json/pickle-friendly except for the two numpy
+    array pairs `hist_counts`/`hist_edges` and `quant_values`/`quant_counts`),
+    including:
+      - Grid/scale info: `bit_width`, `lsb`, `step`, `signed`, `q_min`, `q_max`,
+        `n_representable`.
+      - Clipping: `n_clipped`, `n_unclipped` (exact counts) plus
+        `clip_low_pct`/`clip_high_pct`/`total_clip_pct`.
+      - Coverage: `n_unique` (distinct quantized codes actually used) and
+        `coverage_pct` (`n_unique / n_representable`).
+      - Range: `input_min`/`input_max` (unquantized) vs `q_min`/`q_max`
+        (representable grid).
+      - Error: `mae`, `max_ae`, `mse`, `sqnr_db`.
+      - Plot data: `hist_counts`/`hist_edges` (float-input histogram,
+        `n_hist_bins` bins over `[min(input_min, q_min), max(input_max, q_max)]`)
+        and `quant_values`/`quant_counts` (exact quantized-output histogram).
+    """
     x_f = x.float()
     q_f = quantized.float()
 
@@ -61,13 +102,17 @@ def _compute_metrics(
     n_representable = 2 ** bit_width
 
     n_elements = x_f.numel()
+    if input_shape is None:
+        input_shape = tuple(x.shape)
 
-    # unique_vals has at most 2^bit_width entries — safe to transfer to CPU
-    unique_vals = torch.unique(q_f.ravel())
-    n_unique = unique_vals.numel()
+    # Exact per-code quantized value counts -- at most 2**bit_width entries,
+    # always safe to move to CPU in full (no subsampling/approximation).
+    quant_values, quant_counts = torch.unique(q_f.ravel(), return_counts=True)
+    n_unique = quant_values.numel()
 
     clip_low  = int((x_f < q_min).sum().item())
     clip_high = int((x_f > q_max).sum().item())
+    n_clipped = clip_low + clip_high
     clip_low_pct  = 100.0 * clip_low  / max(n_elements, 1)
     clip_high_pct = 100.0 * clip_high / max(n_elements, 1)
 
@@ -84,6 +129,30 @@ def _compute_metrics(
     else:
         sqnr_db = float("-inf")
 
+    input_min = x_f.min().item()
+    input_max = x_f.max().item()
+
+    # Histogram of the (unquantized) float input, computed on-device via
+    # torch.histc where possible (works directly on CUDA -- no CPU transfer
+    # of raw data). torch.histc has no deterministic CUDA kernel, though, so
+    # it raises under `torch.use_deterministic_algorithms(True)` (common in
+    # reproducibility-focused training runs/tests) -- fall back to a CPU
+    # numpy histogram in that case. This is a rare, one-shot event (at most
+    # a couple of times per quantizer over an entire run), so the fallback's
+    # CPU transfer is an acceptable, infrequent cost -- not a hot-path one.
+    hist_lo = min(input_min, q_min)
+    hist_hi = max(input_max, q_max)
+    if hist_hi <= hist_lo:
+        hist_hi = hist_lo + max(abs(step), 1e-12)
+    try:
+        hist_counts_t = torch.histc(x_f, bins=n_hist_bins, min=hist_lo, max=hist_hi)
+        hist_counts = hist_counts_t.cpu().numpy()
+    except RuntimeError:
+        hist_counts, _ = np.histogram(
+            x_f.detach().cpu().numpy(), bins=n_hist_bins, range=(hist_lo, hist_hi)
+        )
+    hist_edges = np.linspace(hist_lo, hist_hi, n_hist_bins + 1)
+
     return {
         "bit_width":       bit_width,
         "lsb":             lsb,
@@ -97,6 +166,8 @@ def _compute_metrics(
         "quantizer_role":  quantizer_role,
         "n_unique":        n_unique,
         "coverage_pct":    100.0 * n_unique / n_representable,
+        "n_clipped":       n_clipped,
+        "n_unclipped":     n_elements - n_clipped,
         "clip_low_pct":    clip_low_pct,
         "clip_high_pct":   clip_high_pct,
         "total_clip_pct":  clip_low_pct + clip_high_pct,
@@ -106,9 +177,12 @@ def _compute_metrics(
         "sqnr_db":         sqnr_db,
         "input_mean":      x_f.mean().item(),
         "input_std":       x_f.std().item(),
-        "input_min":       x_f.min().item(),
-        "input_max":       x_f.max().item(),
-        "unique_vals":     unique_vals.cpu(),  # small: ≤ 2^bit_width entries
+        "input_min":       input_min,
+        "input_max":       input_max,
+        "hist_counts":     hist_counts,
+        "hist_edges":      hist_edges,
+        "quant_values":    quant_values.cpu().numpy(),
+        "quant_counts":    quant_counts.cpu().numpy(),
     }
 
 
@@ -121,10 +195,6 @@ def _append_log(log_path: Path, quant_id: str, trigger: str, m: Dict[str, Any]) 
     sqnr_str = f"{m['sqnr_db']:.2f} dB" if math.isfinite(m["sqnr_db"]) else str(m["sqnr_db"])
 
     n_total = m["n_elements"]
-    n_plot  = m.get("n_plot_samples", n_total)
-    sample_line = (f"  Plot sample        : {n_plot:,} / {n_total:,} (random subsample)\n"
-                   if n_plot < n_total else "")
-
     shape_str = "×".join(str(d) for d in m["input_shape"])
 
     lines = [
@@ -134,16 +204,15 @@ def _append_log(log_path: Path, quant_id: str, trigger: str, m: Dict[str, Any]) 
         f"{'='*60}",
         f"  Role               : {m['quantizer_role']}",
         f"  Input shape        : ({shape_str})   elements: {n_total:,}",
-        sample_line +
         f"  Bit width          : {m['bit_width']}b  ({'signed' if m['signed'] else 'unsigned'})",
         f"  LSB position       : {m['lsb']}   step = {m['step']:.6e}",
         f"  Representable range: [{m['q_min']:.6e}, {m['q_max']:.6e}]",
         f"  Representable codes: {m['n_representable']}",
         f"  Unique quant vals  : {m['n_unique']} / {m['n_representable']}"
         f"  ({m['coverage_pct']:.1f}% coverage)",
-        f"  Clipping (low)     : {m['clip_low_pct']:.2f}%",
-        f"  Clipping (high)    : {m['clip_high_pct']:.2f}%",
-        f"  Total clipping     : {m['total_clip_pct']:.2f}%",
+        f"  Clipped values     : {m['n_clipped']:,} / {n_total:,}  ({m['total_clip_pct']:.2f}%)"
+        f"  [low: {m['clip_low_pct']:.2f}%  high: {m['clip_high_pct']:.2f}%]",
+        f"  Unclipped values   : {m['n_unclipped']:,} / {n_total:,}",
         f"  MAE                : {m['mae']:.6e}",
         f"  Max AE             : {m['max_ae']:.6e}",
         f"  MSE                : {m['mse']:.6e}",
@@ -161,141 +230,173 @@ def _append_log(log_path: Path, quant_id: str, trigger: str, m: Dict[str, Any]) 
 # Plot
 # ---------------------------------------------------------------------------
 
-def _draw_axes(
-    ax,
-    centers: np.ndarray,
-    counts: np.ndarray,
-    bw: float,
-    q_pos: np.ndarray,
-    q_heights: np.ndarray,
-    bar_w: float,
-    m: Dict[str, Any],
-    log_scale: bool,
-) -> None:
-    """Draw histogram + quantized bars + range markers onto one axes.
-
-    For log scale: yscale is set BEFORE drawing and zero-count bins are
-    filtered out. Drawing bars with count=0 and then switching to log scale
-    causes matplotlib to render them as mirrored floor-stubs.
-    """
-    n_plot = m.get("n_plot_samples", int(counts.sum()))
-    float_label = (f"Float input  ({n_plot:,} sampled)" if n_plot < m["n_elements"]
-                   else f"Float input  ({n_plot:,} values)")
-    q_label = f"Quantized  ({m['n_unique']} unique / {m['n_representable']} representable)"
-
-    if log_scale:
-        # Set scale FIRST so bars are drawn into the correct coordinate system.
-        # Also set explicit ylim top so the axis doesn't auto-expand to the
-        # matplotlib default (which can add several extra decades of empty space).
-        hist_mask = counts > 0
-        q_mask    = q_heights > 0
-        y_max = max(
-            int(counts[hist_mask].max()) if hist_mask.any() else 1,
-            int(q_heights[q_mask].max()) if q_mask.any()   else 1,
-        )
-        ax.set_yscale("log")
-        ax.set_ylim(bottom=0.5, top=y_max * 3)
-        # Filter zero counts — log(0) = -inf renders as downward stubs
-        ax.bar(centers[hist_mask], counts[hist_mask], width=bw,
-               color="steelblue", alpha=0.55, label=float_label)
-        ax.bar(q_pos[q_mask], q_heights[q_mask], width=bar_w,
-               color="orangered", alpha=0.80, label=q_label)
-    else:
-        ax.bar(centers, counts, width=bw,
-               color="steelblue", alpha=0.55, label=float_label)
-        ax.bar(q_pos, q_heights, width=bar_w,
-               color="orangered", alpha=0.80, label=q_label)
-
-    ax.axvline(m["q_min"], color="crimson", linestyle="--", linewidth=1.2,
-               alpha=0.75, label="Quant range")
-    ax.axvline(m["q_max"], color="crimson", linestyle="--", linewidth=1.2,
-               alpha=0.75)
-
-    ax.set_xlabel("Value")
-    ax.set_ylabel("Count (log)" if log_scale else "Count")
-    ax.set_title("Log Y axis" if log_scale else "Linear Y axis")
-    ax.legend(loc="upper right", fontsize=8)
-
-
-def _save_plot(
-    plot_path: Path,
-    x_cpu: torch.Tensor,
-    q_cpu: torch.Tensor,
-    quant_id: str,
-    trigger: str,
-    m: Dict[str, Any],
-) -> None:
-    """x_cpu and q_cpu are already on CPU and already subsampled."""
-    import matplotlib
-    matplotlib.use("Agg")
-    import matplotlib.pyplot as plt
-
-    x_np = x_cpu.float().numpy().ravel()
-    q_np = q_cpu.float().numpy().ravel()
-    step = m["step"]
-
-    n_bins = 2 ** (m["bit_width"] + 2)
-    x_lo = min(float(x_np.min()), m["q_min"])
-    x_hi = max(float(x_np.max()), m["q_max"])
-    pad  = (x_hi - x_lo) * 0.05 if x_hi > x_lo else abs(step)
-    plot_range = (x_lo - pad, x_hi + pad)
-
-    counts, edges = np.histogram(x_np, bins=n_bins, range=plot_range)
-    centers = 0.5 * (edges[:-1] + edges[1:])
-    bw = edges[1] - edges[0]
-
-    # q_counts: iterate over the sampled q_np (≤ MAX_PLOT_SAMPLES entries)
-    q_counts: Dict[float, int] = {}
-    for v in q_np:
-        q_counts[float(v)] = q_counts.get(float(v), 0) + 1
-    q_pos     = np.array(sorted(q_counts.keys()))
-    q_heights = np.array([q_counts[v] for v in q_pos])
-    bar_w = max(step * 0.55, bw * 0.5)
-
-    fig, (ax_lin, ax_log) = plt.subplots(1, 2, figsize=(20, 6))
-    _draw_axes(ax_lin, centers, counts, bw, q_pos, q_heights, bar_w, m, log_scale=False)
-    _draw_axes(ax_log, centers, counts, bw, q_pos, q_heights, bar_w, m, log_scale=True)
-
-    # Info box on the left subplot only — metrics are always from the FULL tensor
+def _info_box_text(m: Dict[str, Any], quant_id: str, trigger: str) -> str:
     sqnr_str = f"{m['sqnr_db']:.1f} dB" if math.isfinite(m["sqnr_db"]) else str(m["sqnr_db"])
     n_total = m["n_elements"]
-    n_plot  = m.get("n_plot_samples", n_total)
-    sample_line = (f"\nPlot sample: {n_plot:,} / {n_total:,} (random)"
-                   if n_plot < n_total else "")
     shape_str = "×".join(str(d) for d in m["input_shape"])
-
-    info = (
+    return (
         f"ID: {quant_id}  |  Role: {m['quantizer_role']}  |  Event: {trigger}\n"
-        f"Input shape: ({shape_str})   elements: {n_total:,}{sample_line}\n"
+        f"Input shape: ({shape_str})   elements: {n_total:,}\n"
         f"Bit width : {m['bit_width']}b {'S' if m['signed'] else 'U'}  "
         f"LSB={m['lsb']}  step={m['step']:.3e}\n"
         f"Range     : [{m['q_min']:.3e}, {m['q_max']:.3e}]  "
         f"({m['n_representable']} codes)\n"
         f"Unique    : {m['n_unique']} / {m['n_representable']}"
         f"  ({m['coverage_pct']:.1f}% coverage)\n"
-        f"Clipping  : {m['total_clip_pct']:.2f}%"
+        f"Clipped   : {m['n_clipped']:,} / {n_total:,}  ({m['total_clip_pct']:.2f}%)"
         f"  (↓{m['clip_low_pct']:.2f}%  ↑{m['clip_high_pct']:.2f}%)\n"
+        f"Unclipped : {m['n_unclipped']:,} / {n_total:,}\n"
         f"MAE={m['mae']:.2e}  MaxAE={m['max_ae']:.2e}  SQNR={sqnr_str}\n"
         f"Input  μ={m['input_mean']:.2e}  σ={m['input_std']:.2e}"
         f"  [{m['input_min']:.2e}, {m['input_max']:.2e}]"
     )
-    ax_lin.text(
-        0.01, 0.98, info,
-        transform=ax_lin.transAxes, fontsize=8, verticalalignment="top",
-        fontfamily="monospace",
-        bbox=dict(boxstyle="round,pad=0.4", facecolor="lightyellow", alpha=0.90),
-    )
 
-    role = m.get("quantizer_role", "unknown")
-    fig.suptitle(
-        f"Quantizer Diagnostics — {quant_id}  [{role}]  [{trigger}]",
-        fontsize=11,
-    )
+
+def plot_quantizer_metrics(
+    metrics: Dict[str, Any],
+    *,
+    ax=None,
+    log_scale: bool = False,
+    title: Optional[str] = None,
+    quant_id: str = "",
+    trigger: str = "",
+    info_box: bool = True,
+):
+    """Plot one quantizer metrics dict (from `compute_metrics()`, or
+    `record.metrics` off a "calibration_completed"/"calibration_rerun"/
+    "annealing_complete" log record) as a histogram of the float input with
+    the quantized output's exact value counts overlaid, plus the
+    representable range as vertical markers.
+
+    This is the "helper function" to turn a metrics dict into a figure
+    yourself -- e.g. from a custom `logging.Handler`, a notebook, or a
+    metrics dict loaded back from wherever you saved it:
+
+        import logging
+        from utils.quantizer_diagnostics import plot_quantizer_metrics
+
+        class PlotOnCalibration(logging.Handler):
+            def emit(self, record):
+                if getattr(record, "event", None) == "calibration_completed":
+                    fig = plot_quantizer_metrics(record.metrics, quant_id=record.quant_id)
+                    fig.savefig(f"{record.quant_id}_calibration.png")
+
+        logging.getLogger("quantizers").addHandler(PlotOnCalibration())
+
+    Parameters
+    ----------
+    metrics : the dict returned by `compute_metrics()`.
+    ax : an existing `matplotlib.axes.Axes` to draw into; a new figure (with
+        one axes) is created if omitted.
+    log_scale : log-scale the Y axis (useful when a few codes dominate the
+        count and rare-but-important codes would otherwise be invisible).
+    title : overrides the default `"{quant_id} [{trigger}]"` title.
+    quant_id, trigger : only used for the default title/info-box text.
+    info_box : draw the metrics summary (LSB, clipping, SQNR, ...) as a text
+        box in the corner.
+
+    Returns
+    -------
+    The `matplotlib.figure.Figure` the axes belongs to.
+    """
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+
+    if ax is None:
+        fig, ax = plt.subplots(figsize=(10, 6))
+    else:
+        fig = ax.figure
+
+    m = metrics
+    hist_counts = np.asarray(m["hist_counts"])
+    hist_edges  = np.asarray(m["hist_edges"])
+    centers = 0.5 * (hist_edges[:-1] + hist_edges[1:])
+    bw = hist_edges[1] - hist_edges[0]
+
+    q_pos     = np.asarray(m["quant_values"])
+    q_heights = np.asarray(m["quant_counts"])
+    bar_w = max(abs(m["step"]) * 0.55, bw * 0.5)
+
+    float_label = f"Float input  ({m['n_elements']:,} values)"
+    q_label = f"Quantized  ({m['n_unique']} unique / {m['n_representable']} representable)"
+
+    if log_scale:
+        hist_mask = hist_counts > 0
+        q_mask    = q_heights > 0
+        y_max = max(
+            int(hist_counts[hist_mask].max()) if hist_mask.any() else 1,
+            int(q_heights[q_mask].max()) if q_mask.any() else 1,
+        )
+        ax.set_yscale("log")
+        ax.set_ylim(bottom=0.5, top=y_max * 3)
+        ax.bar(centers[hist_mask], hist_counts[hist_mask], width=bw,
+               color="steelblue", alpha=0.55, label=float_label)
+        ax.bar(q_pos[q_mask], q_heights[q_mask], width=bar_w,
+               color="orangered", alpha=0.80, label=q_label)
+    else:
+        ax.bar(centers, hist_counts, width=bw,
+               color="steelblue", alpha=0.55, label=float_label)
+        ax.bar(q_pos, q_heights, width=bar_w,
+               color="orangered", alpha=0.80, label=q_label)
+
+    ax.axvline(m["q_min"], color="crimson", linestyle="--", linewidth=1.2,
+               alpha=0.75, label="Quant range")
+    ax.axvline(m["q_max"], color="crimson", linestyle="--", linewidth=1.2, alpha=0.75)
+
+    ax.set_xlabel("Value")
+    ax.set_ylabel("Count (log)" if log_scale else "Count")
+    ax.legend(loc="upper right", fontsize=8)
+    if title is not None:
+        ax.set_title(title)
+    elif quant_id or trigger:
+        ax.set_title(f"{quant_id} [{trigger}]")
+
+    if info_box:
+        ax.text(
+            0.01, 0.98, _info_box_text(m, quant_id, trigger),
+            transform=ax.transAxes, fontsize=8, verticalalignment="top",
+            fontfamily="monospace",
+            bbox=dict(boxstyle="round,pad=0.4", facecolor="lightyellow", alpha=0.90),
+        )
+
+    return fig
+
+
+def plot_quantizer_metrics_grid(metrics: Dict[str, Any], quant_id: str = "", trigger: str = ""):
+    """Side-by-side linear + log-scale version of `plot_quantizer_metrics()`
+    -- the two-panel view used for the on-disk diagnostics plots
+    (`run_diagnostics`), also handy directly: rare, saturated, or
+    near-empty codes are easy to miss on a linear axis alone."""
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+
+    fig, (ax_lin, ax_log) = plt.subplots(1, 2, figsize=(20, 6))
+    plot_quantizer_metrics(metrics, ax=ax_lin, log_scale=False, quant_id=quant_id,
+                           trigger=trigger, info_box=True)
+    plot_quantizer_metrics(metrics, ax=ax_log, log_scale=True, quant_id=quant_id,
+                           trigger=trigger, info_box=False)
+    ax_lin.set_title("Linear Y axis")
+    ax_log.set_title("Log Y axis")
+
+    role = metrics.get("quantizer_role", "unknown")
+    fig.suptitle(f"Quantizer Diagnostics — {quant_id}  [{role}]  [{trigger}]", fontsize=11)
     plt.tight_layout()
+    return fig
 
+
+def _save_plot(
+    plot_path: Path,
+    quant_id: str,
+    trigger: str,
+    m: Dict[str, Any],
+) -> None:
+    fig = plot_quantizer_metrics_grid(m, quant_id=quant_id, trigger=trigger)
     plot_path.parent.mkdir(parents=True, exist_ok=True)
     fig.savefig(plot_path, format="svg", bbox_inches="tight")
     fig.savefig(plot_path.with_suffix(".png"), dpi=400, bbox_inches="tight")
+    import matplotlib.pyplot as plt
     plt.close(fig)
 
 
@@ -463,34 +564,23 @@ def run_diagnostics(
     search_records: list = None,
 ) -> None:
     """
-    Compute metrics on the full tensor (on its original device), then
-    subsample down to MAX_PLOT_SAMPLES before touching numpy/matplotlib.
+    Compute metrics on the full tensor (on its original device -- see
+    `compute_metrics()`), then write the text log line and the two-panel
+    plot. No raw tensor data ever reaches CPU/numpy; only the histogram and
+    the exact per-code quantized-value counts do.
     """
     x_d = x.detach()
     q_d = quantized.detach()
-    input_shape = tuple(x_d.shape)
 
     with torch.no_grad():
-        m = _compute_metrics(x_d, q_d, lsb, bit_width, signed, input_shape, quantizer_role)
-
-    # Subsample for plotting — the only large CPU transfer
-    n_total = x_d.numel()
-    n_plot  = min(n_total, MAX_PLOT_SAMPLES)
-    m["n_plot_samples"] = n_plot
-
-    if n_total > MAX_PLOT_SAMPLES:
-        x_cpu = x_d.ravel()[:MAX_PLOT_SAMPLES].cpu()
-        q_cpu = q_d.ravel()[:MAX_PLOT_SAMPLES].cpu()
-    else:
-        x_cpu = x_d.ravel().cpu()
-        q_cpu = q_d.ravel().cpu()
+        m = compute_metrics(x_d, q_d, lsb, bit_width, signed, quantizer_role)
 
     log_path  = Path(out_dir) / f"quantizer_{quant_id}.txt"
     safe      = trigger.replace(" ", "_")
     plot_path = Path(out_dir) / f"quantizer_{quant_id}_{safe}.svg"
 
     _append_log(log_path, quant_id, trigger, m)
-    _save_plot(plot_path, x_cpu, q_cpu, quant_id, trigger, m)
+    _save_plot(plot_path, quant_id, trigger, m)
 
     if search_records:
         _append_search_log(log_path, quant_id, trigger, search_records, lsb, quantizer_role)

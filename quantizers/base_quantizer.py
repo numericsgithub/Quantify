@@ -186,12 +186,24 @@ class BaseQuantizer(nn.Module, ABC):
         self.force_passthrough_for_export: bool = False
         self.suppress_lifecycle_logging: bool = False
 
-    def _log_lifecycle_event(self, event: str, message: str, *args) -> None:
+    def _log_lifecycle_event(self, event: str, message: str, *args, metrics: Optional[dict] = None) -> None:
         """Emit one lifecycle log record (gate opened, calibration, annealing
         started/complete), stamped with this quantizer's id, the event name,
         and the current (epoch, step, global_step) from `self.quantizer_manager`
         -- so a user grepping/filtering the log can pin any event to exactly
         when it happened in training, not just that it happened.
+
+        `metrics`, when given (only for "calibration_completed"/
+        "calibration_rerun" and "annealing_complete" -- see
+        `_compute_event_metrics`), is attached as `record.metrics`: a dict
+        from `utils/quantizer_diagnostics.py::compute_metrics()` with a
+        histogram of the float input, the EXACT per-code quantized-value
+        counts, clipped/unclipped counts, LSB/scale, min/max of both the
+        quantized grid and the raw input, SQNR, and more. Pass it to
+        `utils.quantizer_diagnostics.plot_quantizer_metrics()` for a ready
+        -made plot. `None` for every other event (and whenever the
+        quantizer subclass doesn't support it, i.e.
+        `_get_diagnostics_params()` returns `None`).
 
         Callers only ever reach this from a one-shot `if not self._log_*:`
         branch (see `forward()` below), so this never runs on the hot path --
@@ -228,8 +240,31 @@ class BaseQuantizer(nn.Module, ABC):
                 "epoch": epoch,
                 "step": step,
                 "global_step": global_step,
+                "metrics": metrics,
             },
         )
+
+    def _compute_event_metrics(self, x: torch.Tensor, quantized: torch.Tensor, params: Any) -> Optional[dict]:
+        """Build the rich metrics dict (histogram, clip counts, LSB/scale,
+        SQNR, ...) for a "calibration_completed"/"calibration_rerun"/
+        "annealing_complete" log event, or `None` if this quantizer
+        subclass doesn't support it (`_get_diagnostics_params()` returns
+        `None` -- the base default).
+
+        One-shot cost only (called at most a couple of times per quantizer
+        over an entire training run, never on the per-forward-call hot
+        path): a handful of device-side reductions plus a small
+        (`n_hist_bins`-entry) histogram and the quantized tensor's exact
+        per-code counts (at most `2**bit_width` entries) moved to CPU.
+        """
+        diag_params = self._get_diagnostics_params(params)
+        if diag_params is None:
+            return None
+        diag_params = dict(diag_params)
+        diag_params.pop("search_records", None)  # LSB-search-only, unrelated to compute_metrics
+        from utils.quantizer_diagnostics import compute_metrics
+        with torch.no_grad():
+            return compute_metrics(x.detach(), quantized.detach(), **diag_params)
 
     def _cached_scalar(self, buffer: torch.Tensor, cache_attr: str, version_attr: str, cast):
         """Read a 0-dim buffer as a Python scalar, paying the `.item()` GPU
@@ -369,22 +404,29 @@ class BaseQuantizer(nn.Module, ABC):
             params = self._calibrate(x)
             self._save_calibration(params)
             self._log_calibration_count += 1
-            is_first = self._log_calibration_count == 1
-            if not self.suppress_lifecycle_logging:
-                self._log_lifecycle_event(
-                    "calibration_completed" if is_first else "calibration_rerun",
-                    "calibration %s (search_done -> True).",
-                    "completed" if is_first else
-                    f"re-run (#{self._log_calibration_count}, force_recalibration)",
-                )
+            # Logging is deferred until after `quantized` is computed below
+            # (step 3) -- the calibration-completed event's metrics need the
+            # actual quantized tensor, not just the calibration params.
+            _just_calibrated = True
             # Reset global flag after triggering recalibration to avoid forcing it on every forward
             self.quantizer_manager.reset_global_flag()
         else:
             params = self._load_calibration()
+            _just_calibrated = False
 
         # 3. Quantize & format output
         quantized = self._quantize(x, params)
         scale, zero_point, bit_width = self._get_metadata(params, x)
+
+        if _just_calibrated and not self.suppress_lifecycle_logging:
+            is_first = self._log_calibration_count == 1
+            self._log_lifecycle_event(
+                "calibration_completed" if is_first else "calibration_rerun",
+                "calibration %s (search_done -> True).",
+                "completed" if is_first else
+                f"re-run (#{self._log_calibration_count}, force_recalibration)",
+                metrics=self._compute_event_metrics(x, quantized, params),
+            )
 
         # 3b. Clipped STE (optional, shared by all quantizers): zero the
         # gradient for inputs the forward clamp saturated. The mask is derived
@@ -424,6 +466,7 @@ class BaseQuantizer(nn.Module, ABC):
             self._log_lifecycle_event(
                 "annealing_complete",
                 "annealing complete (annealing_alpha=1.0) -- output is now fully quantized.",
+                metrics=self._compute_event_metrics(x, quantized, params),
             )
 
         # 4. Diagnostics (runs only when diagnostics_dir is set; never in ONNX export)
