@@ -260,15 +260,25 @@ class TestAnnealingFrozenForExport:
             "annealing_alpha must be restored to its pre-export value after export"
         )
 
-    def test_annealing_restored_even_if_export_raises(self, tmp_path):
+    def test_annealing_restored_even_if_export_raises(self, tmp_path, monkeypatch):
         """If the reference forward pass (or the export itself) raises, the
-        finally block must still restore annealing_alpha."""
+        finally block must still restore annealing_alpha.
+
+        Forces the exception via a patched `torch.onnx.export` (not via an
+        uncalibrated quantizer -- `export_onnx_with_io` now exports those as
+        a float passthrough instead of raising; see
+        `_freeze_uncalibrated`/pitfall #19 in
+        docs/llm/pitfalls/brevitas_pitfalls.md)."""
         model = self._calibrated_model()
         quantizer = next(m for m in model.modules() if isinstance(m, BaseQuantizer))
         quantizer.annealing_alpha.fill_(0.7)
-        quantizer.search_done.fill_(False)  # forces the "not calibrated" RuntimeError
 
-        with pytest.raises(RuntimeError, match="not been calibrated"):
+        def _boom(*args, **kwargs):
+            raise RuntimeError("synthetic export failure")
+
+        monkeypatch.setattr(torch.onnx, "export", _boom)
+
+        with pytest.raises(RuntimeError, match="synthetic export failure"):
             export_onnx_with_io(
                 model, torch.randn(1, 3, 8, 8), str(tmp_path / "m.onnx"),
                 opset_version=13, custom_opsets={"Quantify": 1}, dynamo=False,

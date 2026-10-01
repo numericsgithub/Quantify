@@ -77,6 +77,78 @@ def _restore_annealing(saved: dict) -> None:
         module.annealing_alpha.copy_(alpha)
 
 
+def _freeze_uncalibrated(model: torch.nn.Module) -> list:
+    """Force every NOT-YET-CALIBRATED quantizer (`search_done=False`) to a
+    plain float passthrough for the duration of the export, and return the
+    list of quantizers touched so `_unfreeze_uncalibrated` can restore them.
+
+    Why this is needed: `export_onnx_with_io` runs the model through two real
+    forward passes outside training -- the `torch.onnx.export()` trace, and a
+    `model(dummy_input)` call afterward to embed a reference input/output pair
+    (see below). Without this guard, either of those forward passes is
+    indistinguishable from a real one to `BaseQuantizer.forward()`: a
+    quantizer that hasn't been reached by training yet would run its very
+    first calibration search against `dummy_input` -- a meaningless,
+    arbitrary tensor (a hardcoded `torch.randn(1, 3, 32, 32)` when
+    `training_harness/checkpointing.py::CheckpointManager` doesn't have a
+    real batch handy) -- and would also have its gating/annealing state
+    advanced as if real training had happened. Since checkpoints are commonly
+    saved (with an ONNX export alongside) every epoch, this can trigger a
+    quantizer's actual production calibration from export noise the very
+    first time an export happens to run after that quantizer's gate would
+    otherwise have opened -- see pitfall #19 in
+    docs/llm/pitfalls/brevitas_pitfalls.md.
+
+    A plain float passthrough is also the MOST ACCURATE representation of
+    such a quantizer in the exported graph: it hasn't started quantizing in
+    the real (live) model either, so showing a `Quantify::FixedPointQuant`
+    node with a bogus, uncalibrated LSB would be actively misleading.
+    """
+    from quantizers.base_quantizer import BaseQuantizer
+
+    frozen = []
+    for module in model.modules():
+        if isinstance(module, BaseQuantizer) and not module.search_done_value:
+            module.force_passthrough_for_export = True
+            frozen.append(module)
+    return frozen
+
+
+def _unfreeze_uncalibrated(frozen: list) -> None:
+    for module in frozen:
+        module.force_passthrough_for_export = False
+
+
+def _suppress_lifecycle_logging(model: torch.nn.Module) -> list:
+    """Set `suppress_lifecycle_logging=True` on every quantizer for the
+    duration of the export, and return the list touched so
+    `_unsuppress_lifecycle_logging` can restore them.
+
+    Why this is needed: even an ALREADY-calibrated quantizer that's still
+    mid-anneal gets its `annealing_alpha` temporarily forced to 1.0 by
+    `_freeze_annealing` above (needed so the exported graph shows a clean
+    quantized value instead of a float/quantized blend). Without this guard,
+    that forced alpha=1.0 would trip `BaseQuantizer`'s one-shot
+    `annealing complete` log flag during the export's forward pass(es) --
+    permanently suppressing the real log message once annealing genuinely
+    finishes later in training. See pitfall #19 in
+    docs/llm/pitfalls/brevitas_pitfalls.md.
+    """
+    from quantizers.base_quantizer import BaseQuantizer
+
+    touched = []
+    for module in model.modules():
+        if isinstance(module, BaseQuantizer):
+            module.suppress_lifecycle_logging = True
+            touched.append(module)
+    return touched
+
+
+def _unsuppress_lifecycle_logging(touched: list) -> None:
+    for module in touched:
+        module.suppress_lifecycle_logging = False
+
+
 def export_onnx_with_io(
     model: torch.nn.Module,
     dummy_input: torch.Tensor,
@@ -126,6 +198,14 @@ def export_onnx_with_io(
         `FixedPointQuant -> Mul -> Add` blend of the float and quantized
         weight instead of a clean quantized value; see `_freeze_annealing`'s
         docstring and docs/llm/pitfalls/brevitas_pitfalls.md.
+
+        Regardless of this flag, every export also always (a) exports a
+        not-yet-calibrated quantizer as a plain float passthrough instead of
+        calibrating it against `dummy_input`, and (b) isolates the one-shot
+        lifecycle log flags (gate opened / calibration / annealing
+        started-complete) from the export's own forward passes -- see
+        `_freeze_uncalibrated`/`_suppress_lifecycle_logging` and pitfall #19
+        in docs/llm/pitfalls/brevitas_pitfalls.md.
     **export_kwargs
         Extra keyword arguments forwarded verbatim to ``torch.onnx.export``.
 
@@ -141,6 +221,16 @@ def export_onnx_with_io(
     if reset_states:
         reset_quantizer_states()
 
+    # Export requires eval mode (stable BN stats, no annealing-step advance --
+    # see the `if self.training:` guard in BaseQuantizer.forward()), but the
+    # caller's train/eval mode is restored afterward (even if export raises)
+    # so a manual `export_onnx_with_io(...)` call mid-training doesn't leave
+    # the model silently running in eval mode for whatever forward pass the
+    # caller makes next. Harmless when called from the training harness
+    # (every epoch starts with `model.train(is_train)` regardless), but a
+    # real footgun for any other caller -- see pitfall #19 in
+    # docs/llm/pitfalls/brevitas_pitfalls.md.
+    was_training = model.training
     model.eval()
 
     def inject_zero_biases(model: torch.nn.Module) -> None:
@@ -157,7 +247,27 @@ def export_onnx_with_io(
     # used for the embedded dummy I/O -- both done with annealing frozen off
     # (see freeze_annealing docs above) so the graph and the reference output
     # agree and neither leaks a Mul/Add blend of the float weight.
+    #
+    # Both forward passes below (the trace inside torch.onnx.export, and the
+    # dummy_output call) are isolated from training: _freeze_uncalibrated
+    # stops either one from calibrating a not-yet-reached quantizer against
+    # meaningless dummy data, and _suppress_lifecycle_logging stops the
+    # forced annealing_alpha=1.0 above from tripping a premature "annealing
+    # complete" log for a quantizer that's really still mid-anneal. See
+    # pitfall #19 in docs/llm/pitfalls/brevitas_pitfalls.md.
     saved_annealing = _freeze_annealing(model) if freeze_annealing else {}
+    frozen_uncalibrated = _freeze_uncalibrated(model)
+    suppressed_logging = _suppress_lifecycle_logging(model)
+    if frozen_uncalibrated:
+        names = [
+            getattr(q, "display_name", getattr(q, "quant_id", repr(id(q))))
+            for q in frozen_uncalibrated
+        ]
+        print(
+            f"[onnx_export] {len(frozen_uncalibrated)} quantizer(s) not yet calibrated in "
+            f"the live model -- exported as a plain float passthrough (no quantize node) "
+            f"rather than calibrating them against dummy_input: {names}"
+        )
     try:
         torch.onnx.export(
             model,
@@ -174,6 +284,9 @@ def export_onnx_with_io(
             dummy_output = model(dummy_input)
     finally:
         _restore_annealing(saved_annealing)
+        _unfreeze_uncalibrated(frozen_uncalibrated)
+        _unsuppress_lifecycle_logging(suppressed_logging)
+        model.train(was_training)
 
     # Unwrap QuantTensor (Brevitas) if needed
     if hasattr(dummy_output, "value"):

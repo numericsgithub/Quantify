@@ -223,7 +223,27 @@ def collect_scale_factors(model: nn.Module) -> dict[str, float]:
     Returns a dict mapping layer_name → scale (as a Python float).
     Handles both per-tensor and per-channel scales (returns the mean for
     per-channel to keep things scalar).
+
+    Only reads scales from quantizers that have already calibrated
+    (`search_done=True`); see pitfall #19 in
+    docs/llm/pitfalls/brevitas_pitfalls.md. A Brevitas `WeightQuantProxyFromInjector`
+    whose weight hasn't been quantized yet (`proxy._cached_weight is None`)
+    computes `.scale()` by calling `self.__call__(weight)` -- i.e. it runs a
+    REAL forward pass through our `BaseQuantizer.forward()` on the model's
+    live weight tensor, right here, as a side effect of merely reading the
+    scale. Since this is called once per epoch as soon as QAT is active
+    (`Trainer`/`QATTrainerV2`, in eval mode, outside the normal gated
+    training loop), it used to make ANY quantizer whose staggered gate
+    threshold happens to be 0 (the first one reached in forward order)
+    calibrate, open its gate, and start annealing on the very first epoch
+    QAT activates -- regardless of `quantization_start_gap` -- because this
+    call reaches it before any real training batch does. Skipping
+    uncalibrated quantizers here instead leaves them to calibrate exactly
+    when their own gate legitimately opens during real training, and they
+    simply don't contribute a scale entry until then.
     """
+    from quantizers.base_quantizer import BaseQuantizer
+
     scales: dict[str, float] = {}
     for name, module in model.named_modules():
         # Weight quantizer
@@ -231,10 +251,12 @@ def collect_scale_factors(model: nn.Module) -> dict[str, float]:
             proxy = getattr(module, attr, None)
             if proxy is None:
                 continue
+            tensor_quant = getattr(proxy, "tensor_quant", None)
+            if isinstance(tensor_quant, BaseQuantizer) and not tensor_quant.search_done_value:
+                continue
             try:
                 scale = proxy.scale()
                 if scale is not None:
-                    import torch
                     val = float(scale.abs().mean().item())
                     key = f"{name}.{attr}.scale"
                     scales[key] = val

@@ -157,6 +157,35 @@ class BaseQuantizer(nn.Module, ABC):
         self._log_annealing_started: bool = False
         self._log_annealing_complete: bool = False
 
+        # Export-isolation flags (not buffers -- ephemeral, toggled only by
+        # utils/onnx_export.py::export_onnx_with_io for the duration of a
+        # single export call, then restored). See pitfall #19 in
+        # docs/llm/pitfalls/brevitas_pitfalls.md: an ONNX export's reference
+        # forward pass (used to embed a dummy input/output pair, and the
+        # `torch.onnx.export()` trace itself) is NOT part of training and
+        # must never be allowed to (a) calibrate an uncalibrated quantizer
+        # against meaningless dummy input data, or (b) permanently flip a
+        # one-shot lifecycle log flag (gate opened / calibration / annealing
+        # started-complete) for an event that didn't really happen yet in
+        # training.
+        #
+        # `force_passthrough_for_export`: when True, forward() short-circuits
+        # to a plain float passthrough immediately (like
+        # quantization_globally_disabled, but scoped to this one quantizer
+        # instance) -- set only for quantizers that are NOT YET calibrated,
+        # so export never triggers their first calibration.
+        #
+        # `suppress_lifecycle_logging`: when True, the one-shot log blocks
+        # below are skipped entirely (neither logged NOR marked as fired),
+        # so the real event still logs normally on a later genuine training
+        # forward pass. Applied to EVERY quantizer during export (not just
+        # uncalibrated ones) because `_freeze_annealing()` in onnx_export.py
+        # temporarily forces `annealing_alpha=1.0` even for an already-
+        # calibrated, still-annealing quantizer, which would otherwise make
+        # this block log a premature "annealing complete".
+        self.force_passthrough_for_export: bool = False
+        self.suppress_lifecycle_logging: bool = False
+
     def _log_lifecycle_event(self, event: str, message: str, *args) -> None:
         """Emit one lifecycle log record (gate opened, calibration, annealing
         started/complete), stamped with this quantizer's id, the event name,
@@ -291,6 +320,14 @@ class BaseQuantizer(nn.Module, ABC):
             scale, zero_point, bit_width = self._passthrough_metadata(x)
             return x, scale, zero_point, bit_width
 
+        # 0b. Export-time passthrough for a not-yet-calibrated quantizer --
+        # see `force_passthrough_for_export`'s docstring in __init__. Checked
+        # before gating/calibration so an export attempt can never trigger
+        # this quantizer's first calibration on dummy input data.
+        if self.force_passthrough_for_export:
+            scale, zero_point, bit_width = self._passthrough_metadata(x)
+            return x, scale, zero_point, bit_width
+
         # 1. Inference gating
         perform_quantization = True
         if self.inference_counter < self.inference_sequence_id * self.quantizer_manager.quantization_start_gap:
@@ -302,7 +339,7 @@ class BaseQuantizer(nn.Module, ABC):
             scale, zero_point, bit_width = self._passthrough_metadata(x)
             return x, scale, zero_point, bit_width
 
-        if not self._log_gate_opened:
+        if not self._log_gate_opened and not self.suppress_lifecycle_logging:
             self._log_gate_opened = True
             gap = self.inference_sequence_id * self.quantizer_manager.quantization_start_gap
             self._log_lifecycle_event(
@@ -333,12 +370,13 @@ class BaseQuantizer(nn.Module, ABC):
             self._save_calibration(params)
             self._log_calibration_count += 1
             is_first = self._log_calibration_count == 1
-            self._log_lifecycle_event(
-                "calibration_completed" if is_first else "calibration_rerun",
-                "calibration %s (search_done -> True).",
-                "completed" if is_first else
-                f"re-run (#{self._log_calibration_count}, force_recalibration)",
-            )
+            if not self.suppress_lifecycle_logging:
+                self._log_lifecycle_event(
+                    "calibration_completed" if is_first else "calibration_rerun",
+                    "calibration %s (search_done -> True).",
+                    "completed" if is_first else
+                    f"re-run (#{self._log_calibration_count}, force_recalibration)",
+                )
             # Reset global flag after triggering recalibration to avoid forcing it on every forward
             self.quantizer_manager.reset_global_flag()
         else:
@@ -366,7 +404,7 @@ class BaseQuantizer(nn.Module, ABC):
         alpha_before = self.annealing_alpha_value
         current_alpha = alpha_before
         if alpha_before < 1.0:
-            if not self._log_annealing_started:
+            if not self._log_annealing_started and not self.suppress_lifecycle_logging:
                 self._log_annealing_started = True
                 self._log_lifecycle_event(
                     "annealing_started",
@@ -381,7 +419,7 @@ class BaseQuantizer(nn.Module, ABC):
         else:
             result = quantized
 
-        if current_alpha >= 1.0 and not self._log_annealing_complete:
+        if current_alpha >= 1.0 and not self._log_annealing_complete and not self.suppress_lifecycle_logging:
             self._log_annealing_complete = True
             self._log_lifecycle_event(
                 "annealing_complete",
