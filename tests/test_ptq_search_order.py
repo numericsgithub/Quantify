@@ -19,7 +19,7 @@ from quantizers.manager import QuantizerManager
 from quantizers.base_quantizer import BaseQuantizer
 from quantizers.fixedpoint_per_tensor import FixedPointPerTensorActivationQuant
 from models.resnet_quant import QuantResNet18
-from examples.find_perfect_lsbs_imagenet_ptq import _assign_descriptive_ids
+from quantizers.naming import assign_descriptive_quant_ids
 
 
 class _AQ(FixedPointPerTensorActivationQuant):
@@ -29,7 +29,7 @@ class _AQ(FixedPointPerTensorActivationQuant):
 def _build_and_run_forward():
     QuantizerManager().reset()
     model = QuantResNet18(num_classes=10, weight_quant=None, act_quant=_AQ)
-    _assign_descriptive_ids(model)
+    assign_descriptive_quant_ids(model)
     # Quantizers are freshly built (search_done=False); disable quantization
     # so eval-mode forward doesn't trip the uncalibrated-quantizer guard. The
     # forward pass itself still assigns inference_sequence_id to every
@@ -82,6 +82,6 @@ def test_quantizers_in_execution_order_is_monotonic_in_sequence_id():
 def test_quantizers_in_execution_order_raises_before_any_forward_pass():
     QuantizerManager().reset()
     model = QuantResNet18(num_classes=10, weight_quant=None, act_quant=_AQ)
-    _assign_descriptive_ids(model)
+    assign_descriptive_quant_ids(model)
     with pytest.raises(RuntimeError, match="no quantizer has been reached"):
         QuantizerManager().quantizers_in_execution_order()

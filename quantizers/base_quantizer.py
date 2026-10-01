@@ -172,20 +172,29 @@ class BaseQuantizer(nn.Module, ABC):
         e.g. using a quantizer standalone outside the training harness.
 
         `extra=` attaches the same fields as structured LogRecord attributes
-        (`record.quant_id`, `record.event`, `record.epoch`, `record.step`,
-        `record.global_step`) for anyone using a custom Formatter/Filter to
-        emit structured (e.g. JSON) logs, in addition to the plain-text
-        epoch/step prefix already baked into the message so the default
-        logging format is useful with zero configuration.
+        (`record.quant_id`, `record.display_name`, `record.event`,
+        `record.epoch`, `record.step`, `record.global_step`) for anyone using
+        a custom Formatter/Filter to emit structured (e.g. JSON) logs, in
+        addition to the plain-text epoch/step prefix already baked into the
+        message so the default logging format is useful with zero
+        configuration.
+
+        The message shows `display_name` when one has been assigned (see
+        `quantizers/naming.py::assign_descriptive_quant_ids` -- a
+        location-based name like `"features.3.conv.0 [weight]"` instead of
+        the generic `"quant_25"` every quantizer starts out with), falling
+        back to the plain `quant_id` otherwise.
         """
         qid = getattr(self, "quant_id", repr(id(self)))
+        name = getattr(self, "display_name", qid)
         mgr = self.quantizer_manager
         epoch, step, global_step = mgr.current_epoch, mgr.current_step, mgr.current_global_step
         logger.info(
             "Quantizer %r [epoch=%s step=%s global_step=%s]: " + message,
-            qid, epoch, step, global_step, *args,
+            name, epoch, step, global_step, *args,
             extra={
                 "quant_id": qid,
+                "display_name": name,
                 "event": event,
                 "epoch": epoch,
                 "step": step,

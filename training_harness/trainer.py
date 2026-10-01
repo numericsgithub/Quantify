@@ -23,6 +23,7 @@ from .plotting import TrainingPlotter
 from .schedulers import QATWarmupScheduler, collect_scale_factors
 from .engine_utils import EarlyStopping, EpochTimer, log_hardware_info, set_seed, LossPlateauDetector
 from quantizers.manager import QuantizerManager
+from quantizers.naming import assign_descriptive_quant_ids
 
 
 class Trainer:
@@ -168,6 +169,15 @@ class Trainer:
 
         # LR history (for plotting)
         self._lr_history: List[float] = []
+
+        # Replace every quantizer's generic quant_N id (assigned at
+        # registration time, quantizers/manager.py) with a location-based one
+        # derived from this model's module tree (e.g. "quant_25" ->
+        # "features_3_conv_0_weight") -- see quantizers/naming.py. Purely a
+        # renaming pass: it does not reset calibration/annealing state, so
+        # it's safe here even if `model` already has calibrated quantizers
+        # (e.g. loaded from a checkpoint before constructing this Trainer).
+        assign_descriptive_quant_ids(self.model)
 
     # ------------------------------------------------------------------
     # Primary entry point

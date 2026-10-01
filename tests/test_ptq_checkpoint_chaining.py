@@ -32,11 +32,11 @@ from quantizers.fixedpoint_per_tensor import (
     FixedPointPerTensorActivationQuant,
     FixedPointPerTensorWeightQuant,
 )
+from quantizers.naming import assign_descriptive_quant_ids
 from models.resnet_quant import QuantResNet18
 from examples.find_perfect_lsbs_imagenet_ptq import (
     _build_quantized_model,
     _disable_target_role_keep_others_active,
-    _assign_descriptive_ids,
 )
 
 
@@ -315,7 +315,7 @@ class TestDisableTargetRoleKeepOthersActive:
             bit_width = 8
 
         model = QuantResNet18(num_classes=10, weight_quant=_WQ, act_quant=_AQ)
-        _assign_descriptive_ids(model)
+        assign_descriptive_quant_ids(model)
         mgr = QuantizerManager()
 
         _disable_target_role_keep_others_active(mgr, target_role="weight")

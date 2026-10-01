@@ -66,6 +66,7 @@ from quantizers.fixedpoint_per_tensor import (
 )
 from quantizers.base_quantizer import BaseQuantizer
 from quantizers.manager import QuantizerManager
+from quantizers.naming import assign_descriptive_quant_ids
 from utils.weight_mapping import load_pretrained_weights
 from utils.bn_fusion import fuse_bn_into_conv
 
@@ -301,63 +302,8 @@ def _evaluate(
 
 
 # ---------------------------------------------------------------------------
-# Descriptive quantizer naming
+# Descriptive quantizer naming -- see quantizers/naming.py
 # ---------------------------------------------------------------------------
-
-_PROXY_SUFFIXES: list[tuple[str, str]] = [
-    (".weight_quant.tensor_quant",                            "_weight"),
-    (".bias_quant.tensor_quant",                              "_bias"),
-    (".act_quant.fused_activation_quant_proxy.tensor_quant",  "_act"),
-    (".act_quant.tensor_quant",                               "_act"),
-    (".input_quant.tensor_quant",                             "_act_in"),
-    (".output_quant.tensor_quant",                            "_act_out"),
-]
-
-
-def _assign_descriptive_ids(model: nn.Module) -> None:
-    """
-    Replace generic quant_N ids with location-based names derived from
-    model.named_modules() paths, then sync the QuantizerManager registry.
-
-    Each quantizer gets two names:
-      quant_id     — filesystem-safe (underscores, no spaces), used for filenames
-      display_name — human-readable with original dots and role in brackets,
-                     e.g. "layer1.0.conv1 [weight]"
-    """
-    mgr  = QuantizerManager()
-    seen: dict[str, int] = {}
-    for path, module in model.named_modules():
-        if not isinstance(module, BaseQuantizer):
-            continue
-        for suffix, role in _PROXY_SUFFIXES:
-            if path.endswith(suffix):
-                parent_dots = path[: -len(suffix)]
-                parent_us   = parent_dots.replace(".", "_")
-                role_label  = role.lstrip("_")
-                qid          = f"{parent_us}_{role_label}" if parent_us else f"root_{role_label}"
-                display_name = (f"{parent_dots} [{role_label}]"
-                                if parent_dots else f"[{role_label}]")
-                break
-        else:
-            qid          = path.replace(".", "_")
-            display_name = path
-        # Deduplicate with a counter suffix
-        if qid in seen:
-            seen[qid] += 1
-            suffix_n      = f"_{seen[qid]}"
-            qid          += suffix_n
-            display_name += suffix_n
-        else:
-            seen[qid] = 0
-        module.quant_id     = qid
-        module.display_name = display_name
-    mgr.quantizers = {q.quant_id: q for q in mgr.quantizers.values()}
-    # Any quantizer registered in the manager but not reachable via named_modules()
-    # (e.g. Brevitas internal proxy objects) gets a plain quant_id as its display name.
-    for q in mgr.quantizers.values():
-        if not hasattr(q, "display_name"):
-            q.display_name = q.quant_id
-
 
 # ---------------------------------------------------------------------------
 # Per-quantizer PTQ search plot
@@ -793,7 +739,7 @@ def _build_quantized_model(
               f"  unexpected keys: {len(incompatible.unexpected_keys)}")
         if incompatible.unexpected_keys:
             print(f"  {incompatible.unexpected_keys}")
-    _assign_descriptive_ids(model)
+    assign_descriptive_quant_ids(model)
 
     return model, target_role, bw, prev_extra, prev_role_bit_widths
 
@@ -879,7 +825,7 @@ def search_role_lsbs(
     Greedy per-quantizer LSB search for every quantizer of `target_role`, in
     forward-pass order, on an already-built model whose quantizers are
     registered with the singleton QuantizerManager and have already been given
-    descriptive ids (_assign_descriptive_ids).
+    descriptive ids (assign_descriptive_quant_ids).
 
     A forward pass must have run over the model before this is called so that
     inference_sequence_id — hence forward-execution order — is defined; the
