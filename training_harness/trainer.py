@@ -324,6 +324,10 @@ class Trainer:
             if batch_idx >= max_batches:
                 break
 
+            QuantizerManager().update_progress(
+                epoch=epoch, step=batch_idx, global_step=self._global_step
+            )
+
             inputs, targets = self._unpack_batch(batch)
             inputs  = inputs.to(self.device)
             targets = targets.to(self.device)

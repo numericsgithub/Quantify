@@ -43,6 +43,8 @@ All custom quantizers inherit from `quantizers/base_quantizer.py:BaseQuantizer`.
 
 Each quantizer logs its own lifecycle milestones once, via `logging.getLogger("quantizers")` at `INFO` level: gate opened (gap-staggered start), calibration completed/re-run, annealing started, annealing complete. Useful for explaining after the fact exactly when a given layer started quantizing — enable with `logging.basicConfig(level=logging.INFO)` (or attach a handler to the `"quantizers"` logger specifically) in your own script/notebook; the harness itself only uses `print()` for its own console output, it doesn't configure logging for you.
 
+`Trainer`/`QATTrainerV2` call `QuantizerManager().update_progress(epoch=..., step=..., global_step=...)` once per batch (three cheap attribute writes, not a quantizer walk), so every lifecycle message above is stamped `[epoch=.. step=.. global_step=..]` — pinpointing exactly when a quantizer's gate opened, calibrated, or finished annealing. The fields are also attached via `extra=` (`record.epoch`/`record.step`/`record.global_step`/`record.event`/`record.quant_id`) for a custom `Formatter`/`Filter` doing structured (e.g. JSON) logging. Outside the harness (standalone quantizer use), these show as `epoch=None step=None global_step=None` unless you call `update_progress()` yourself. None of this touches the per-forward-call hot path — the log call only ever fires from a one-shot `if not self._log_*:` branch per quantizer per event.
+
 Public quantizers (re-exported from `quantizers/__init__.py`):
 - `FixedPointPerTensorWeightQuant` / `FixedPointPerTensorActivationQuant` / `FixedPointPerTensorBiasQuant`
 - `CoefficientPerTensorWeightQuant`

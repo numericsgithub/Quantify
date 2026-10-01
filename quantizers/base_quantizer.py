@@ -157,6 +157,42 @@ class BaseQuantizer(nn.Module, ABC):
         self._log_annealing_started: bool = False
         self._log_annealing_complete: bool = False
 
+    def _log_lifecycle_event(self, event: str, message: str, *args) -> None:
+        """Emit one lifecycle log record (gate opened, calibration, annealing
+        started/complete), stamped with this quantizer's id, the event name,
+        and the current (epoch, step, global_step) from `self.quantizer_manager`
+        -- so a user grepping/filtering the log can pin any event to exactly
+        when it happened in training, not just that it happened.
+
+        Callers only ever reach this from a one-shot `if not self._log_*:`
+        branch (see `forward()` below), so this never runs on the hot path --
+        it is not a per-forward-call cost, just a per-*event* one. `epoch`/
+        `step`/`global_step` default to None (printed as `epoch=? step=? global_step=?`)
+        when nothing has ever called `QuantizerManager.update_progress()` --
+        e.g. using a quantizer standalone outside the training harness.
+
+        `extra=` attaches the same fields as structured LogRecord attributes
+        (`record.quant_id`, `record.event`, `record.epoch`, `record.step`,
+        `record.global_step`) for anyone using a custom Formatter/Filter to
+        emit structured (e.g. JSON) logs, in addition to the plain-text
+        epoch/step prefix already baked into the message so the default
+        logging format is useful with zero configuration.
+        """
+        qid = getattr(self, "quant_id", repr(id(self)))
+        mgr = self.quantizer_manager
+        epoch, step, global_step = mgr.current_epoch, mgr.current_step, mgr.current_global_step
+        logger.info(
+            "Quantizer %r [epoch=%s step=%s global_step=%s]: " + message,
+            qid, epoch, step, global_step, *args,
+            extra={
+                "quant_id": qid,
+                "event": event,
+                "epoch": epoch,
+                "step": step,
+                "global_step": global_step,
+            },
+        )
+
     def _cached_scalar(self, buffer: torch.Tensor, cache_attr: str, version_attr: str, cast):
         """Read a 0-dim buffer as a Python scalar, paying the `.item()` GPU
         sync only if `buffer` was mutated (its `._version` differs from the
@@ -259,12 +295,12 @@ class BaseQuantizer(nn.Module, ABC):
 
         if not self._log_gate_opened:
             self._log_gate_opened = True
-            qid = getattr(self, "quant_id", repr(id(self)))
             gap = self.inference_sequence_id * self.quantizer_manager.quantization_start_gap
-            logger.info(
-                "Quantizer %r: gate opened, starting to quantize (inference_sequence_id=%d, "
+            self._log_lifecycle_event(
+                "gate_opened",
+                "gate opened, starting to quantize (inference_sequence_id=%d, "
                 "quantization_start_gap=%d, waited %d gated-off forward call(s)).",
-                qid, self.inference_sequence_id, self.quantizer_manager.quantization_start_gap, gap,
+                self.inference_sequence_id, self.quantizer_manager.quantization_start_gap, gap,
             )
 
         # 2. Calibration check
@@ -287,10 +323,11 @@ class BaseQuantizer(nn.Module, ABC):
             params = self._calibrate(x)
             self._save_calibration(params)
             self._log_calibration_count += 1
-            qid = getattr(self, "quant_id", repr(id(self)))
-            logger.info(
-                "Quantizer %r: calibration %s (search_done -> True).",
-                qid, "completed" if self._log_calibration_count == 1 else
+            is_first = self._log_calibration_count == 1
+            self._log_lifecycle_event(
+                "calibration_completed" if is_first else "calibration_rerun",
+                "calibration %s (search_done -> True).",
+                "completed" if is_first else
                 f"re-run (#{self._log_calibration_count}, force_recalibration)",
             )
             # Reset global flag after triggering recalibration to avoid forcing it on every forward
@@ -322,11 +359,11 @@ class BaseQuantizer(nn.Module, ABC):
         if alpha_before < 1.0:
             if not self._log_annealing_started:
                 self._log_annealing_started = True
-                qid = getattr(self, "quant_id", repr(id(self)))
-                logger.info(
-                    "Quantizer %r: annealing started (annealing_alpha=%.3f, step=%.4f) -- "
+                self._log_lifecycle_event(
+                    "annealing_started",
+                    "annealing started (annealing_alpha=%.3f, step=%.4f) -- "
                     "output is a (1-alpha)*float + alpha*quantized blend until alpha reaches 1.0.",
-                    qid, alpha_before, self.annealing_alpha_step,
+                    alpha_before, self.annealing_alpha_step,
                 )
             result = AnnealingBlendFn.apply(x, quantized, alpha_before)
             if self.training:
@@ -337,10 +374,9 @@ class BaseQuantizer(nn.Module, ABC):
 
         if current_alpha >= 1.0 and not self._log_annealing_complete:
             self._log_annealing_complete = True
-            qid = getattr(self, "quant_id", repr(id(self)))
-            logger.info(
-                "Quantizer %r: annealing complete (annealing_alpha=1.0) -- output is now fully quantized.",
-                qid,
+            self._log_lifecycle_event(
+                "annealing_complete",
+                "annealing complete (annealing_alpha=1.0) -- output is now fully quantized.",
             )
 
         # 4. Diagnostics (runs only when diagnostics_dir is set; never in ONNX export)

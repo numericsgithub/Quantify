@@ -1,3 +1,6 @@
+from typing import Optional
+
+
 class QuantizerManager:
     """
     Singleton manager object for coordinating quantizer instances across the entire project.
@@ -41,6 +44,35 @@ class QuantizerManager:
         self.diagnostics_dir = None   # set by trainer; None disables diagnostics
         self._snapshot_count = 0      # incremented by request_snapshot()
 
+        # Current training position, for pinning lifecycle log events
+        # (BaseQuantizer's gate/calibration/annealing logging) to an
+        # epoch/step. Plain attributes, not buffers -- these are written once
+        # per batch by the training harness (update_progress()) and only ever
+        # read inside BaseQuantizer's one-shot lifecycle-event branches, so
+        # the cost is a couple of attribute writes per step, not per
+        # quantizer and not per forward call. None until a trainer (or the
+        # user) calls update_progress(); _progress_str() below handles that.
+        self.current_epoch: Optional[int] = None
+        self.current_step: Optional[int] = None
+        self.current_global_step: Optional[int] = None
+
+    def update_progress(self, epoch=None, step=None, global_step=None) -> None:
+        """Record the current (epoch, step-within-epoch, global_step) so that
+        BaseQuantizer's lifecycle log messages (gate opened, calibration,
+        annealing started/complete) can report exactly when each event
+        happened. Intended to be called once per training step/batch (e.g.
+        from the training harness's per-batch loop) -- it's three plain
+        attribute assignments, not a quantizer walk, so it's safe to call
+        every step with no measurable overhead. Any argument left as None
+        leaves that field unchanged.
+        """
+        if epoch is not None:
+            self.current_epoch = epoch
+        if step is not None:
+            self.current_step = step
+        if global_step is not None:
+            self.current_global_step = global_step
+
     def reset(self):
         """
         Reset the manager's internal state. Useful for testing or restarting experiments.
@@ -53,6 +85,9 @@ class QuantizerManager:
         self._inference_sequence_id_counter = 0
         self.diagnostics_dir = None
         self._snapshot_count = 0
+        self.current_epoch = None
+        self.current_step = None
+        self.current_global_step = None
 
     @property
     def is_quantizing_everything_fully(self):
