@@ -156,12 +156,13 @@ def find_optimal_lsb(
     rounding_mode: "RoundingMode",
     narrow_range: bool = False,
     prefer_high_lsb: bool = False,
+    max_clip_pct: Optional[float] = None,
 ) -> Tuple[int, int, list]:
     """
     Search over LSB positions to find the best fixed-point step size.
 
     Two selection rules:
-      prefer_high_lsb=False (weights): maximise the number of unique
+      prefer_high_lsb=False (weights, biases): maximise the number of unique
         quantised output values, ties broken by smallest SAD — prefers a
         finer grid when multiple LSBs reach the same unique count.
       prefer_high_lsb=True (activations): COVERAGE-FIRST. Maximising unique
@@ -175,13 +176,28 @@ def find_optimal_lsb(
         calibration, and is the finest resolution possible subject to that
         constraint.
 
+    max_clip_pct : only consulted when prefer_high_lsb=False. A hard ceiling
+        on the percentage of input values that may fall outside the
+        representable range (and so get clipped) at the selected LSB. Any
+        candidate LSB exceeding it is disqualified from the "maximise unique
+        count" selection above, regardless of how good its unique-count/SAD
+        would otherwise be -- a bit-width that technically resolves the bulk
+        of the distribution very finely is useless if it clips too much of
+        it. `max_clip_pct=0.0` means NO clipping at all is tolerated (used
+        for biases). The search range (`search_lo`..`search_hi`, centered on
+        `ideal_lsb` -- the LSB that exactly spans `abs_max` with zero
+        clipping) always includes LSBs coarse enough to clip nothing, so
+        there is always at least one qualifying candidate; if every tested
+        LSB were somehow disqualified, the one that clipped the least is
+        used as a defensive fallback instead of leaving the quantizer
+        uncalibrated.
+
     Returns
     -------
     (best_lsb, best_unique, search_records)
         search_records is a list of (lsb, n_unique, sad) for every position tested,
         ordered high→low, used by the diagnostic plot.
     """
-    print("find_optimal_lsb was called!")
     w_min = inputs.min().item()
     w_max = inputs.max().item()
     abs_max = max(abs(w_min), abs(w_max))
@@ -196,6 +212,12 @@ def find_optimal_lsb(
     else:
         n_positive_codes = 2 ** bit_width - 1
     integer_max = n_positive_codes
+    if signed:
+        integer_min = -(2 ** (bit_width - 1))
+        if narrow_range:
+            integer_min += 1
+    else:
+        integer_min = 0
 
     ideal_lsb = math.log2(abs_max / n_positive_codes) if n_positive_codes > 0 else 0
     search_lo = math.floor(ideal_lsb) - 12
@@ -214,6 +236,11 @@ def find_optimal_lsb(
     best_sad = float("inf")
     search_records: list = []  # (lsb, n_unique, sad) — high to low
 
+    n_total = inputs.numel()
+    found_qualifying = False
+    fallback_lsb = search_lo
+    fallback_clip_pct = float("inf")
+
     for lsb in reversed(range(search_lo, search_hi + 1)):
         q = quantize_fixed_point(inputs, lsb, bit_width, signed, rounding_mode, narrow_range)
         n_unique = int(torch.unique(q).numel())
@@ -226,11 +253,33 @@ def find_optimal_lsb(
                 best_unique = n_unique
                 best_sad = sad
         else:
-            # Weight mode: ties broken by minimum SAD (finer grid preferred)
+            if max_clip_pct is not None:
+                step = 2.0 ** lsb
+                q_min = integer_min * step
+                q_max = integer_max * step
+                n_clip = int(((inputs < q_min) | (inputs > q_max)).sum().item())
+                clip_pct = 100.0 * n_clip / max(n_total, 1)
+                if clip_pct < fallback_clip_pct:
+                    fallback_lsb = lsb
+                    fallback_clip_pct = clip_pct
+                if clip_pct > max_clip_pct:
+                    continue  # disqualified -- clips more than the allowed ceiling
+                found_qualifying = True
+            # Weight/bias mode: ties broken by minimum SAD (finer grid preferred)
             if n_unique > best_unique or (n_unique == best_unique and sad < best_sad):
                 best_lsb = lsb
                 best_unique = n_unique
                 best_sad = sad
+
+    if max_clip_pct is not None and not found_qualifying:
+        # Defensive fallback: every tested LSB clipped more than max_clip_pct
+        # allows (shouldn't happen -- the search range always reaches an
+        # LSB coarse enough for 0% clipping). Use the least-clipping one
+        # rather than silently calibrating with an over-clipping grid.
+        for lsb, n_unique, sad in search_records:
+            if lsb == fallback_lsb:
+                best_lsb, best_unique, best_sad = lsb, n_unique, sad
+                break
 
     return best_lsb, best_unique, search_records
 
@@ -343,6 +392,22 @@ class FixedPointQuantFn(Function):
 # Torch Module — usable as a standalone quantizer
 # ---------------------------------------------------------------------------
 
+# Per-role clipping ceiling consulted by FixedPointPerTensorQuantizer._calibrate
+# via find_optimal_lsb's max_clip_pct. Weights tolerate up to 15% of values
+# clipped (a bit-width that resolves the bulk of the weight distribution very
+# finely is still useless if it clips more than that); biases tolerate none
+# at all (0%) -- a clipped bias shifts every output of that channel by a
+# fixed amount, every single forward pass, so it is never acceptable.
+# Activations are untouched (prefer_high_lsb's own coverage-first rule
+# already guarantees 0% clipping through a different mechanism -- see
+# find_optimal_lsb's docstring) -- "unknown" (a standalone quantizer with no
+# role set) is unconstrained, matching the pre-existing default behavior.
+_MAX_CLIP_PCT_BY_ROLE = {
+    "weight": 15.0,
+    "bias": 0.0,
+}
+
+
 class FixedPointPerTensorQuantizer(BaseQuantizer):
     """
     A self-contained fixed-point per-tensor quantizer.
@@ -424,6 +489,7 @@ class FixedPointPerTensorQuantizer(BaseQuantizer):
             self.rounding_mode,
             self.narrow_range,
             prefer_high_lsb=(self.quantizer_role == "activation"),
+            max_clip_pct=_MAX_CLIP_PCT_BY_ROLE.get(self.quantizer_role),
         )
         return {
             'lsb': lsb,
