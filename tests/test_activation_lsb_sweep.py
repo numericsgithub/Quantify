@@ -56,22 +56,24 @@ def activation_and_cap(request):
 # =========================================================================
 
 
-class TestCapValuesAreNextPowerOfTwo:
-    """The explicit, literal ask: ReLU6's cap must be 8 (next power of two
-    at or above its saturation point of 6), not 12 (2x headroom, the
-    previous rule) or 6 (the raw saturation point itself)."""
+class TestCapValuesMatchExactSaturationPoint:
+    """Superseded by pitfall #23 (see docs/llm/pitfalls/brevitas_pitfalls.md):
+    padding the cap up to the next power of two (ReLU6/Sigmoid -> 8, Tanh ->
+    4) cost a full extra bit of resolution for no benefit, since
+    coverage-first already finds the finest LSB covering whatever cap it's
+    given. The cap is now the activation's raw saturation point exactly."""
 
-    def test_relu6_cap_is_eight(self):
+    def test_relu6_cap_is_six(self):
         from quantizers.activations import QuantReLU6
-        assert get_input_cap(QuantReLU6) == 8.0
+        assert get_input_cap(QuantReLU6) == 6.0
 
-    def test_sigmoid_cap_is_eight(self):
+    def test_sigmoid_cap_is_six(self):
         from quantizers.activations import QuantSigmoid
-        assert get_input_cap(QuantSigmoid) == 8.0
+        assert get_input_cap(QuantSigmoid) == 6.0
 
-    def test_tanh_cap_is_four(self):
+    def test_tanh_cap_is_three(self):
         from quantizers.activations import QuantTanh
-        assert get_input_cap(QuantTanh) == 4.0
+        assert get_input_cap(QuantTanh) == 3.0
 
     @pytest.mark.parametrize("name,cls", [a for a in ACTIVATIONS if a[0] in ("relu", "silu", "gelu", "leaky_relu", "softmax")])
     def test_unbounded_activations_have_no_cap(self, name, cls):
