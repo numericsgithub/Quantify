@@ -76,29 +76,17 @@ from quantizers.fixedpoint_per_tensor import FixedPointPerTensorActivationQuant
 # means the activation has no such point (unbounded, or -- Softmax -- its
 # useful range depends on relative logit spread, not an absolute magnitude).
 #
-# The actual cap used is the NEXT POWER OF TWO at or above this value (see
-# `_next_pow2_at_least`), not the raw saturation point itself -- fixed-point
-# quantizer ranges are themselves powers of two (an 8-bit signed grid at
-# lsb=L spans +/- 2**(lsb+7)), so rounding the cap down to a non-power-of-two
-# number would still forbid the single LSB setting that actually matches the
-# saturation point tightest, for no benefit. E.g. ReLU6's hard clip at 6 ->
-# cap 8 (not 6 itself, and not some arbitrary multiple). Sigmoid and Tanh are
-# exactly related (sigmoid(x) = (1 + tanh(x/2)) / 2), so Sigmoid's natural
-# x-scale is double Tanh's; both numbers below follow from that
-# relationship, not independent guesses.
+# The cap used is this value EXACTLY, not padded up to a power of two --
+# coverage-first (the calibration rule this cap feeds) already finds the
+# finest LSB that covers whatever cap it's given, so padding the cap up only
+# forces a wider, partly-wasted range for no benefit (see pitfall #23 in
+# `docs/llm/pitfalls/brevitas_pitfalls.md`). Sigmoid and Tanh are exactly
+# related (sigmoid(x) = (1 + tanh(x/2)) / 2), so Sigmoid's natural x-scale is
+# double Tanh's; both numbers below follow from that relationship, not
+# independent guesses.
 _RELU6_SATURATION = 6.0
 _TANH_SATURATION = 3.0
 _SIGMOID_SATURATION = 2.0 * _TANH_SATURATION  # == 6.0
-
-
-def _next_pow2_at_least(value: float) -> float:
-    """Smallest power of two that is >= `value` (`value > 0`). A small
-    epsilon guards against a value that's already an exact power of two
-    landing a notch too high purely from floating-point log2 noise (e.g.
-    `log2(8.0)` evaluating to `2.9999999999999996` instead of exactly `3.0`).
-    """
-    import math
-    return 2.0 ** math.ceil(math.log2(value) - 1e-9)
 
 
 def _input_bit_width(bit_width: int, unsigned_output: bool, override: Optional[int]) -> int:
@@ -113,20 +101,28 @@ def _input_bit_width(bit_width: int, unsigned_output: bool, override: Optional[i
 
 
 def _input_max_abs_value(saturation: Optional[float], override: Optional[float]) -> Optional[float]:
-    """Default input-quantizer range cap: the next power of two at or above
-    `saturation` (see `_next_pow2_at_least`), or `None` (uncapped) when
-    `saturation` is `None`. An explicit `override` always wins -- including
-    an explicit `None` passed deliberately to disable the cap (same
-    semantics as every other "`None` means use the default" knob here, so
-    `override` is only consulted when it is NOT None; pass the class's own
-    saturation-derived value if you want to opt back out of an override at
-    the call site).
+    """Default input-quantizer range cap: the activation's own saturation
+    point exactly, or `None` (uncapped) when `saturation` is `None`. An
+    explicit `override` always wins -- including an explicit `None` passed
+    deliberately to disable the cap (same semantics as every other "`None`
+    means use the default" knob here, so `override` is only consulted when
+    it is NOT None; pass the class's own saturation-derived value if you
+    want to opt back out of an override at the call site).
+
+    The cap is the RAW saturation value, not padded up to a power of two.
+    Coverage-first (`prefer_high_lsb=True`, the calibration rule this cap
+    feeds -- see `find_optimal_lsb`) already finds the finest LSB that
+    covers whatever cap it's given, power-of-two or not; padding the cap up
+    only forces that search to cover a wider, partly-wasted range, costing
+    real resolution for no benefit. E.g. ReLU6 hard-clips to [0, 6]: capping
+    at exactly 6.0 calibrates to lsb=-5 (q_max=7.96875); capping at a
+    padded-up 8.0 calibrates to lsb=-4 (q_max=15.9375) -- a full extra bit
+    wasted on headroom the activation throws away regardless. See pitfall
+    #23 in `docs/llm/pitfalls/brevitas_pitfalls.md`.
     """
     if override is not None:
         return override
-    if saturation is None:
-        return None
-    return _next_pow2_at_least(saturation)
+    return saturation
 
 
 # ---------------------------------------------------------------------------
