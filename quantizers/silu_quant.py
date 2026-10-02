@@ -8,7 +8,7 @@ during export to preserve exact quantization semantics.
 
 import torch
 import torch.nn as nn
-from typing import Tuple, Any
+from typing import Tuple, Any, Union
 
 from quantizers.base_quantizer import BaseQuantizer
 from quantizers.base_injector import BaseActivationQuant
@@ -90,7 +90,7 @@ class SiLUTensorQuant(BaseQuantizer):
         bit_width: int = 8,
         signed: bool = False,
         rounding_mode: RoundingMode = RoundingMode.ROUND_TO_NEAREST_EVEN,
-        clipped_ste: bool = False,
+        clipped_ste: Union[bool, str] = False,
     ):
         # clipped_ste is stored by BaseQuantizer (shared by all quantizers).
         super().__init__(bit_width=bit_width, clipped_ste=clipped_ste)
@@ -160,6 +160,18 @@ class SiLUTensorQuant(BaseQuantizer):
         mask only zeroes it where the grid clamp saturated, i.e. clipped STE is
         applied to the quantization step, not to the SiLU nonlinearity.
         """
+        x_silu, lower, upper = self._silu_and_range_limits(x, params)
+        return (x_silu >= lower) & (x_silu <= upper)
+
+    def _clip_side(self, x: torch.Tensor, params: Any) -> torch.Tensor:
+        """Single-direction clipped-STE support: -1/+1 where silu(x) lies
+        below/above the grid, 0 inside (same bounds as _in_range_mask). The
+        direction test is on the gradient w.r.t. the quantized SiLU output, so
+        "inward" means towards the grid in SiLU-output space."""
+        x_silu, lower, upper = self._silu_and_range_limits(x, params)
+        return (x_silu > upper).to(torch.int8) - (x_silu < lower).to(torch.int8)
+
+    def _silu_and_range_limits(self, x: torch.Tensor, params: Any):
         x_silu = torch.nn.functional.silu(x)
         step = 2.0 ** int(params['lsb'])
         if self.signed:
@@ -168,9 +180,7 @@ class SiLUTensorQuant(BaseQuantizer):
         else:
             integer_min = 0
             integer_max = 2 ** self.bit_width - 1
-        lower = integer_min * step
-        upper = integer_max * step
-        return (x_silu >= lower) & (x_silu <= upper)
+        return x_silu, integer_min * step, integer_max * step
 
 
 class QuantSiLUActivationQuant(BaseActivationQuant):

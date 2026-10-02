@@ -68,6 +68,56 @@ class ClippedSTEFn(torch.autograd.Function):
         return grad_output * in_range_mask, None
 
 
+class SingleDirectionClippedSTEFn(torch.autograd.Function):
+    """Single-direction clipped STE, shared by all quantizers.
+
+    Like ClippedSTEFn, forward is a value-preserving identity on `quantized`.
+    Backward passes the gradient (slope 1) for in-range inputs, and for
+    out-of-range inputs ONLY when it points back into the range -- i.e. when a
+    gradient-descent step (`w -= lr * grad`) would move the value inward:
+
+        side == 0  (in range)     -> pass
+        side == +1 (above range)  -> pass iff grad > 0 (descent decreases it)
+        side == -1 (below range)  -> pass iff grad < 0 (descent increases it)
+
+    Gradients pushing a clipped value further out are zeroed, exactly like
+    ClippedSTEFn, so a clipped value cannot drift away (the plain-STE
+    problem). But unlike ClippedSTEFn, a clipped value is never permanently
+    stuck: once the loss wants it back inside, it gets the gradient again.
+    For a persistent parameter (a weight) with a fixed quantizer range, plain
+    clipped STE would otherwise freeze it forever -- see
+    examples/ste_clipping_demo.py.
+
+    `side` is a tensor of -1/0/+1 (in the quantized tensor's dtype) computed
+    in BaseQuantizer.forward from the ORIGINAL float input via `_clip_side()`.
+    """
+
+    @staticmethod
+    def forward(ctx, quantized, side):
+        ctx.save_for_backward(side)
+        return quantized.clone()
+
+    @staticmethod
+    def backward(ctx, grad_output):
+        (side,) = ctx.saved_tensors
+        passes = (side == 0) | ((side > 0) & (grad_output > 0)) | ((side < 0) & (grad_output < 0))
+        return grad_output * passes.to(grad_output.dtype), None
+
+
+# Accepted values of a quantizer's `clipped_ste` setting. Booleans are still
+# accepted for backward compatibility: False -> "not_clip", True -> "clip".
+STE_MODES = ("not_clip", "clip", "single_direction_clip")
+
+
+def normalize_ste_mode(value) -> str:
+    """Map a `clipped_ste` setting (bool or one of STE_MODES) to its mode string."""
+    if isinstance(value, bool):
+        return "clip" if value else "not_clip"
+    if isinstance(value, str) and value in STE_MODES:
+        return value
+    raise ValueError(f"clipped_ste must be a bool or one of {STE_MODES}, got {value!r}")
+
+
 class BaseQuantizer(nn.Module, ABC):
     """
     Abstract base class for per-tensor quantizers.
@@ -81,15 +131,16 @@ class BaseQuantizer(nn.Module, ABC):
         self,
         bit_width: int = 8,
         quantizer_manager: Optional[QuantizerManager] = None,
-        clipped_ste: bool = False,
+        clipped_ste=False,
         **kwargs
     ):
         super().__init__()
         self.bit_width = bit_width
-        # Clipped-STE toggle lives here (shared by every quantizer) so any
-        # subclass can honor it just by overriding _in_range_mask(). Plain STE
-        # (slope 1 everywhere) remains the default. See ClippedSTEFn and
-        # _in_range_mask below.
+        # STE-clipping mode lives here (shared by every quantizer) so any
+        # subclass can honor it just by overriding _in_range_mask() ("clip")
+        # and _clip_side() ("single_direction_clip"). Plain STE ("not_clip",
+        # slope 1 everywhere) remains the default. See the `clipped_ste`
+        # property, ClippedSTEFn and SingleDirectionClippedSTEFn.
         self.clipped_ste = clipped_ste
         self.inference_counter = 0
         self.inference_sequence_id = -1
@@ -281,6 +332,17 @@ class BaseQuantizer(nn.Module, ABC):
         return getattr(self, cache_attr)
 
     @property
+    def clipped_ste(self) -> bool:
+        """True if any clipping STE mode is active ("clip" or
+        "single_direction_clip"). Assign a bool or one of STE_MODES to change
+        the mode; the normalized mode string is `self.ste_mode`."""
+        return self.ste_mode != "not_clip"
+
+    @clipped_ste.setter
+    def clipped_ste(self, value) -> None:
+        self.ste_mode = normalize_ste_mode(value)
+
+    @property
     def search_done_value(self) -> bool:
         """Cached, sync-free (when unchanged) read of `self.search_done`."""
         return self._cached_scalar(self.search_done, "_search_done_cached", "_search_done_version", bool)
@@ -435,10 +497,17 @@ class BaseQuantizer(nn.Module, ABC):
         # case clipped_ste is a no-op (plain STE). Value is unchanged; only the
         # backward slope is masked. Skipped during ONNX export to keep that
         # path's graph unchanged.
-        if self.clipped_ste and not is_exporting:
+        # "single_direction_clip" additionally lets the gradient through for a
+        # saturated input when it points back into the range (see
+        # SingleDirectionClippedSTEFn), using _clip_side() instead of the mask.
+        if self.ste_mode == "clip" and not is_exporting:
             in_range_mask = self._in_range_mask(x, params)
             if in_range_mask is not None:
                 quantized = ClippedSTEFn.apply(quantized, in_range_mask.to(dtype=x.dtype))
+        elif self.ste_mode == "single_direction_clip" and not is_exporting:
+            side = self._clip_side(x, params)
+            if side is not None:
+                quantized = SingleDirectionClippedSTEFn.apply(quantized, side.to(dtype=x.dtype))
 
         # No .item() anywhere in this block: alpha_before comes from the
         # cache, and current_alpha is tracked in Python since we're the ones
@@ -510,7 +579,8 @@ class BaseQuantizer(nn.Module, ABC):
         """
         Return a boolean/0-1 tensor (same shape as x) that is True where the
         float input x lies INSIDE the quantizer's representable range and False
-        where the forward clamp saturated it. Used only when clipped_ste=True.
+        where the forward clamp saturated it. Used only when
+        clipped_ste="clip" (or True).
 
         Boundary convention is left to the subclass but should be inclusive
         (the exact min/max grid values count as in-range).
@@ -518,6 +588,18 @@ class BaseQuantizer(nn.Module, ABC):
         The base implementation returns None, meaning "this quantizer does not
         define a range" -> clipped STE degrades to plain STE (no masking).
         Subclasses with a well-defined grid (e.g. fixed-point) override this.
+        """
+        return None
+
+    def _clip_side(self, x: torch.Tensor, params: Any) -> Optional[torch.Tensor]:
+        """
+        Return an integer tensor (same shape as x) that is -1 where the float
+        input lies BELOW the representable range, +1 where it lies ABOVE it,
+        and 0 inside it (boundaries inclusive, same convention as
+        _in_range_mask). Used only when clipped_ste="single_direction_clip".
+
+        The base implementation returns None -> single-direction clipping
+        degrades to plain STE, same as _in_range_mask returning None.
         """
         return None
 

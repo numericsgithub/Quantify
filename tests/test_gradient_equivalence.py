@@ -476,14 +476,16 @@ def test_gradients_match_float_reference(arch, act_name, state):
     _run_case(arch, act_name, state)
 
 
+@pytest.mark.parametrize("ste_mode", ["clip", "single_direction_clip"])
 @pytest.mark.parametrize("arch, act_name", [
     pytest.param(arch, act, marks=_known_bug_marks(act), id=f"{arch}-{act}")
     for arch in ["linear_linear", "conv2d_conv2d", "embedding_linear"]
     for act in ACTIVATIONS
 ])
-def test_gradients_match_float_reference_clipped_ste(arch, act_name):
-    """All values are in range, so the clipped-STE mask must be all ones."""
-    _run_case(arch, act_name, "quantizing", clipped_ste=True)
+def test_gradients_match_float_reference_clipped_ste(arch, act_name, ste_mode):
+    """All values are in range, so either clipping mode must pass every
+    gradient unchanged."""
+    _run_case(arch, act_name, "quantizing", clipped_ste=ste_mode)
 
 
 @pytest.mark.parametrize("act_name, seed", [

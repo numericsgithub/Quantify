@@ -17,7 +17,7 @@ Example:
 
 import torch
 import torch.nn as nn
-from typing import Tuple, Any
+from typing import Tuple, Any, Union
 
 from quantizers.base_injector import BaseWeightQuant
 from quantizers.base_quantizer import BaseQuantizer
@@ -108,7 +108,7 @@ class CoefficientPerTensorWeightQuantizer(BaseQuantizer):
     Inherits infrastructure from BaseQuantizer (gating, calibration state, ONNX guards).
     """
 
-    def __init__(self, filepath: str, bit_width: int = 8, clipped_ste: bool = False):
+    def __init__(self, filepath: str, bit_width: int = 8, clipped_ste: Union[bool, str] = False):
         # clipped_ste is stored by BaseQuantizer (shared by all quantizers).
         super().__init__(bit_width=bit_width, clipped_ste=clipped_ste)
         self.filepath = filepath
@@ -233,10 +233,18 @@ class CoefficientPerTensorWeightQuantizer(BaseQuantizer):
         coefficient still receives gradient). Inputs strictly outside are
         zeroed.
         """
-        scaled = self.coefficient_sets[params['set_idx']].to(x.device) * (2.0 ** params['bit_shift_scale'])
-        lower = scaled.min()
-        upper = scaled.max()
+        lower, upper = self._range_limits(x, params)
         return (x >= lower) & (x <= upper)
+
+    def _clip_side(self, x: torch.Tensor, params: Any) -> torch.Tensor:
+        """Single-direction clipped-STE support: -1/+1 below/above the scaled
+        coefficient span, 0 inside (same bounds as _in_range_mask)."""
+        lower, upper = self._range_limits(x, params)
+        return (x > upper).to(torch.int8) - (x < lower).to(torch.int8)
+
+    def _range_limits(self, x: torch.Tensor, params: Any):
+        scaled = self.coefficient_sets[params['set_idx']].to(x.device) * (2.0 ** params['bit_shift_scale'])
+        return scaled.min(), scaled.max()
 
 
 class CoefficientPerTensorWeightQuant(BaseWeightQuant):

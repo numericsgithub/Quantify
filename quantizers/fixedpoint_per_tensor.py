@@ -26,7 +26,7 @@ Example (signed, bit_width=4, lsb=-1):
 
 import math
 from enum import Enum
-from typing import Tuple, Optional, Any
+from typing import Tuple, Optional, Any, Union
 
 import torch
 import torch.nn as nn
@@ -486,15 +486,22 @@ class FixedPointPerTensorQuantizer(BaseQuantizer):
         ROUND_TO_NEAREST_EVEN (default) or FLOOR.
     narrow_range : bool
         Exclude most-negative code in signed mode (default False).
-    clipped_ste : bool
-        If True, use a clipped Straight-Through Estimator: gradient passes
-        through (slope 1) only for weights inside the representable range and is
-        zeroed for weights the forward clamp saturated. If False (default),
-        plain STE (slope 1 everywhere) is used. This is a toggle so plain vs
-        clipped STE can be ablated. The flag and the masking mechanism live in
-        BaseQuantizer; this class supplies the fixed-point range via
-        _in_range_mask(). Only affects the live training/inference path; the
-        ONNX-export path is unchanged.
+    clipped_ste : bool or str
+        Backward behavior for inputs the forward clamp saturated, one of:
+          "not_clip" (or False, default): plain STE, slope 1 everywhere --
+            a clipped weight keeps getting gradient and can drift arbitrarily
+            far outside the range without changing the output.
+          "clip" (or True): clipped STE, slope 0 outside the range -- no
+            drift, but a clipped weight never gets gradient again (stuck
+            unless the range changes).
+          "single_direction_clip": slope 0 outside the range only for
+            gradients pushing the value further out; gradients pointing back
+            into the range pass -- no drift and no getting stuck.
+        See examples/ste_clipping_demo.py for all three side by side. The
+        setting and the masking mechanism live in BaseQuantizer; this class
+        supplies the fixed-point range via _in_range_mask()/_clip_side().
+        Only affects the live training/inference path; the ONNX-export path
+        is unchanged.
     max_abs_value : Optional[float]
         Hard ceiling passed through to `find_optimal_lsb`'s `max_abs_value`
         (see its docstring) -- caps the observed `abs_max` before it drives
@@ -511,7 +518,7 @@ class FixedPointPerTensorQuantizer(BaseQuantizer):
         rounding_mode: RoundingMode = RoundingMode.ROUND,
         narrow_range: bool = False,
         quantizer_role: str = "unknown",
-        clipped_ste: bool = False,
+        clipped_ste: Union[bool, str] = False,
         max_abs_value: Optional[float] = None,
     ):
         # clipped_ste is stored by BaseQuantizer (shared by all quantizers).
@@ -624,6 +631,18 @@ class FixedPointPerTensorQuantizer(BaseQuantizer):
         convention is inclusive (>= lower AND <= upper): a weight sitting
         exactly on the bottom or top code counts as in-range and keeps slope 1.
         """
+        lower, upper = self._range_limits(params)
+        return (x >= lower) & (x <= upper)
+
+    def _clip_side(self, x: torch.Tensor, params: Any) -> torch.Tensor:
+        """Single-direction clipped-STE support: -1 where x lies below the
+        fixed-point range, +1 above it, 0 inside (inclusive, same bounds as
+        _in_range_mask)."""
+        lower, upper = self._range_limits(params)
+        return (x > upper).to(torch.int8) - (x < lower).to(torch.int8)
+
+    def _range_limits(self, params: Any) -> Tuple[float, float]:
+        """Representable range in float units: integer_min*step, integer_max*step."""
         lsb = int(params['lsb'])
         signed = params['signed']
         step = 2.0 ** lsb
@@ -635,9 +654,7 @@ class FixedPointPerTensorQuantizer(BaseQuantizer):
         else:
             integer_min = 0
             integer_max = 2 ** self.bit_width - 1
-        lower = integer_min * step
-        upper = integer_max * step
-        return (x >= lower) & (x <= upper)
+        return integer_min * step, integer_max * step
 
     def _get_metadata(self, params: Any, x: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         """Return scale, zero_point, and bit_width tensors matching x's dtype/device."""
