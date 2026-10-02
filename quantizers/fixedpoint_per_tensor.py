@@ -391,6 +391,17 @@ class FixedPointQuantFn(Function):
             integer_min = 0
             integer_max = 2 ** int(bit_width) - 1
 
+        # min_value_f/max_value_f: the actual representable range in the
+        # tensor's own units (integer_min/max * step) -- purely for graph
+        # readability (e.g. in Netron), so a reader can see at a glance what
+        # this node's grid spans without computing it from lsb/bit_width/
+        # signed/narrow_range by hand. Not consumed by the embedded
+        # FunctionProto body (utils/onnx_self_contained.py), which clips on
+        # the integer domain via integer_min_f/integer_max_f instead.
+        step = 2.0 ** int(lsb)
+        min_value = integer_min * step
+        max_value = integer_max * step
+
         quantized = g.op(
             "Quantify::FixedPointQuant",
             x,
@@ -403,6 +414,8 @@ class FixedPointQuantFn(Function):
             rounding_mode_s=str(rounding_mode.value),
             integer_min_f=float(integer_min),
             integer_max_f=float(integer_max),
+            min_value_f=float(min_value),
+            max_value_f=float(max_value),
             rounding_mode_code_i=ROUNDING_MODE_TO_INT[rounding_mode],
             quantized_ints_t=captured,
         ).setType(x.type())

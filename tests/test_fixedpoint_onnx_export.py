@@ -115,6 +115,12 @@ class TestFixedPointOnnxExport:
             assert "rounding_mode" in attrs
             assert "scale" in attrs
             assert "zero_point" in attrs
+            # min_value/max_value: the actual representable range in the
+            # tensor's own units, for graph readability (Netron etc.) --
+            # see pitfall #22 in docs/llm/pitfalls/brevitas_pitfalls.md.
+            assert "min_value" in attrs
+            assert "max_value" in attrs
+            assert attrs["min_value"] <= attrs["max_value"]
 
     def test_quantizer_parameters_roundtrip(self, tmp_path):
         """Verify that quantizer parameters (lsb, bit_width, signed, etc.) are correctly exported and match expected values."""
@@ -165,6 +171,13 @@ class TestFixedPointOnnxExport:
         assert attrs["signed"] == 1, f"Expected signed=1, got {attrs['signed']}"
         assert attrs["narrow_range"] == 1, f"Expected narrow_range=1, got {attrs['narrow_range']}"
         assert attrs["rounding_mode"] == "round_to_nearest_even", f"Expected rounding_mode='round_to_nearest_even', got {attrs['rounding_mode']}"
+
+        # min_value/max_value: narrow_range=True, signed, bit_width=8, lsb=-3
+        # -> step=2**-3=0.125, integer_min=-127 (narrow), integer_max=127
+        # -> representable range [-15.875, 15.875].
+        step = 2.0 ** -3
+        assert attrs["min_value"] == pytest.approx(-127 * step)
+        assert attrs["max_value"] == pytest.approx(127 * step)
 
     def test_onnx_model_validates(self, model, dummy_input, tmp_path):
         onnx_path = tmp_path / "test_model.onnx"

@@ -40,6 +40,13 @@ class SiLUQuantFn(Function):
             integer_min = 0
             integer_max = 2 ** int(bit_width) - 1
 
+        # min_value_f/max_value_f: see the matching note in
+        # quantizers/fixedpoint_per_tensor.py::FixedPointQuantFn.symbolic --
+        # the actual representable range, for graph readability only.
+        step = 2.0 ** int(lsb)
+        min_value = integer_min * step
+        max_value = integer_max * step
+
         quantized = g.op(
             "Quantify::QuantSiLU",
             x,
@@ -51,6 +58,8 @@ class SiLUQuantFn(Function):
             rounding_mode_s=str(rounding_mode.value),
             integer_min_f=float(integer_min),
             integer_max_f=float(integer_max),
+            min_value_f=float(min_value),
+            max_value_f=float(max_value),
             rounding_mode_code_i=ROUNDING_MODE_TO_INT[rounding_mode],
         ).setType(x.type())
 
