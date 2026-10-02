@@ -92,10 +92,6 @@ COEFF_FILE = __file__.rsplit("/", 1)[0] + "/dummy_coeffs.txt"
 FLOAT32_ARCHS = {"linear_coeff_weights"}
 
 KNOWN_BUGS = {
-    "relu6_boundary_grad": (
-        "QuantReLU6's Relu6Fn backward differentiates torch.clamp, whose gradient "
-        "is 1 at exactly x == 0 and x == 6; nn.ReLU6 (hardtanh) gives 0 there. "
-        "Quantized pre-activations hit 0 exactly whenever they round to code 0."),
     "fused_silu_passthrough": (
         "SiLUTensorQuant applies SiLU inside _quantize() only, so the passthrough "
         "(quantization disabled/gated off) returns x instead of silu(x) and "
@@ -463,12 +459,8 @@ def reset_manager():
 
 
 def _known_bug_marks(act_name, state="quantizing"):
-    """xfail markers for known deviations. ReLU6's is non-strict: it only
-    fails when some pre-activation lands exactly on 0 or 6, which depends on
-    the data."""
+    """xfail markers for known deviations."""
     marks = []
-    if act_name == "relu6":
-        marks.append(pytest.mark.xfail(reason=KNOWN_BUGS["relu6_boundary_grad"], strict=False))
     if act_name == "fused_silu_act_quant" and state != "quantizing":
         marks.append(pytest.mark.xfail(reason=KNOWN_BUGS["fused_silu_passthrough"], strict=True))
     return marks
@@ -503,9 +495,10 @@ def test_gradients_match_float_reference_other_seeds(act_name, seed):
     _run_case("conv2d_conv2d", act_name, "quantizing", seed=seed)
 
 
-@pytest.mark.xfail(reason=KNOWN_BUGS["relu6_boundary_grad"], strict=True)
 def test_relu6_gradient_at_clip_boundaries_matches_pytorch():
-    """Deterministic repro of the ReLU6 deviation: gradient exactly at 0 and 6."""
+    """Regression: QuantReLU6's gradient exactly at the clip points 0 and 6 must
+    be nn.ReLU6's (0), not torch.clamp's (1). Quantized pre-activations land
+    on these points exactly whenever they round to code 0."""
     act = QuantReLU6(bit_width=8).to(DTYPE).train()
     x = torch.tensor([-1.0, 0.0, 3.0, 6.0, 7.0], dtype=DTYPE, requires_grad=True)
     act(x).sum().backward()

@@ -162,7 +162,11 @@ class Relu6Fn(Function):
     @staticmethod
     def backward(ctx, grad_output):
         (x,) = ctx.saved_tensors
-        return _grad_via_recompute(lambda t: torch.clamp(t, min=0.0, max=6.0), x, grad_output)
+        # Differentiate hardtanh (what nn.ReLU6 runs), not torch.clamp: they
+        # agree in value but clamp's gradient is 1 at exactly x == 0 and
+        # x == 6 while nn.ReLU6's is 0 there. Quantized pre-activations hit
+        # those points exactly whenever they round to code 0 (or to 6).
+        return _grad_via_recompute(lambda t: F.hardtanh(t, 0.0, 6.0), x, grad_output)
 
 
 class SiLUFn(Function):
