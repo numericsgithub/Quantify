@@ -42,6 +42,7 @@ _PROXY_SUFFIX_TO_ROLE = [
     (".bias_quant.tensor_quant", "bias"),
     (".act_quant.fused_activation_quant_proxy.tensor_quant", "act"),
     (".act_quant.tensor_quant", "act"),
+    (".input_quant.fused_activation_quant_proxy.tensor_quant", "act_in"),
     (".input_quant.tensor_quant", "act_in"),
     (".output_quant.tensor_quant", "act_out"),
     # Proxies without a nested tensor_quant (non-standard direct attachment).

@@ -3,9 +3,36 @@ Quantized Activation Functions for Quantify.
 
 Provides quantized wrappers for the standard PyTorch activation functions
 (ReLU, ReLU6, Sigmoid, Tanh, SiLU, GELU, LeakyReLU, Softmax). Every wrapper
-applies the activation function, then quantizes the output with an
-`act_quant` injector (fixed-point by default, via
-`FixedPointPerTensorActivationQuant`).
+quantizes BOTH its input and its output, fixed-point by default (via
+`FixedPointPerTensorActivationQuant`): the output quantizer quantizes the
+activation's result; the input quantizer quantizes the pre-activation value
+the nonlinearity itself consumes.
+
+Two things are handled specially for the input quantizer -- see pitfall #21
+in `docs/llm/pitfalls/brevitas_pitfalls.md` for the full writeup:
+
+1. **Bit-width asymmetry.** An activation whose output is structurally
+   forced non-negative (ReLU, ReLU6, Sigmoid, Softmax) never needs a sign
+   bit on its OUTPUT quantizer -- all `bit_width` bits go to magnitude. Its
+   INPUT quantizer, though, usually *does* need a sign bit (pre-activation
+   values are typically signed), so by default it gets one extra bit
+   (`input_bit_width = bit_width + 1`) to keep the same magnitude
+   resolution on both sides of the activation. Activations whose output can
+   be negative (Tanh, SiLU, GELU, LeakyReLU) get `input_bit_width ==
+   bit_width` (no asymmetry -- both sides need a sign bit anyway).
+2. **Saturation-aware range capping.** Activations that converge to a fixed
+   value (ReLU6's hard clip to [0, 6]; Sigmoid/Tanh's asymptotic
+   saturation) must not let a rare, huge pre-activation outlier blow up the
+   input quantizer's calibrated range -- the activation clips/saturates
+   that outlier away immediately afterward regardless, so resolution spent
+   representing it is pure waste. These three get a `max_abs_value` cap
+   derived from the activation's own saturation point (`find_optimal_lsb`'s
+   `max_abs_value` parameter): real inputs beyond the cap get clipped by
+   the quantizer, matching what the activation itself does to them anyway.
+   Activations with no natural saturation point (ReLU -- unbounded above;
+   SiLU/GELU -- grow ~linearly for large positive input; LeakyReLU --
+   unbounded both directions; Softmax -- depends on the relative spread of
+   logits, not an absolute magnitude) are never capped this way.
 
 ONNX export contract: each activation emits exactly one ONNX node for the
 nonlinearity itself, with its output feeding into a separate quantizer node
@@ -27,6 +54,8 @@ a Brevitas `act_quant` injector directly on `QuantConv2d`/`QuantLinear`. The
 with its own separate quantizer, matching the other seven activations.
 """
 
+from typing import Optional
+
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -34,6 +63,55 @@ import brevitas.nn as qnn
 from torch.autograd import Function
 
 from quantizers.fixedpoint_per_tensor import FixedPointPerTensorActivationQuant
+
+
+# ---------------------------------------------------------------------------
+# Input-quantizer defaults: bit-width asymmetry + saturation-aware range cap
+# ---------------------------------------------------------------------------
+
+# "Practical saturation" magnitude per activation -- the point beyond which
+# the activation's output has converged (exactly, for ReLU6's hard clip;
+# asymptotically, for Sigmoid/Tanh) and extra input resolution beyond it is
+# wasted on a range the activation immediately clips/saturates away. `None`
+# means the activation has no such point (unbounded, or -- Softmax -- its
+# useful range depends on relative logit spread, not an absolute magnitude).
+#
+# A 2x headroom multiplier (_SATURATION_HEADROOM_MULTIPLIER) is applied on
+# top of each of these before use, e.g. ReLU6's hard clip at 6 -> cap 12.
+# Sigmoid and Tanh are exactly related (sigmoid(x) = (1 + tanh(x/2)) / 2),
+# so Sigmoid's natural x-scale is double Tanh's; both numbers below follow
+# from that relationship, not independent guesses.
+_RELU6_SATURATION = 6.0
+_TANH_SATURATION = 3.0
+_SIGMOID_SATURATION = 2.0 * _TANH_SATURATION  # == 6.0
+_SATURATION_HEADROOM_MULTIPLIER = 2.0
+
+
+def _input_bit_width(bit_width: int, unsigned_output: bool, override: Optional[int]) -> int:
+    """Default input-quantizer bit-width: `bit_width + 1` when the
+    activation's output is structurally non-negative (no sign bit spent
+    there, so give it to the input instead -- see the module docstring),
+    else plain `bit_width`. An explicit `override` always wins.
+    """
+    if override is not None:
+        return override
+    return bit_width + 1 if unsigned_output else bit_width
+
+
+def _input_max_abs_value(saturation: Optional[float], override: Optional[float]) -> Optional[float]:
+    """Default input-quantizer range cap: `saturation * headroom`, or `None`
+    (uncapped) when `saturation` is `None`. An explicit `override` always
+    wins -- including an explicit `None` passed deliberately to disable the
+    cap (same semantics as every other "`None` means use the default"
+    knob here, so `override` is only consulted when it is NOT None; pass
+    the class's own saturation-derived value if you want to opt back out
+    of an override at the call site).
+    """
+    if override is not None:
+        return override
+    if saturation is None:
+        return None
+    return saturation * _SATURATION_HEADROOM_MULTIPLIER
 
 
 # ---------------------------------------------------------------------------
@@ -117,120 +195,213 @@ class GELUFn(Function):
 
 
 class QuantReLU(qnn.QuantReLU):
-    """ReLU with a fixed-point (by default) output quantizer.
+    """ReLU with fixed-point (by default) input AND output quantizers.
 
-    Exports as a single native `Relu` ONNX node followed by the quantizer's
-    node (`Quantify::FixedPointQuant` by default).
+    Exports as the input quantizer's node, a single native `Relu` ONNX node,
+    then the output quantizer's node (`Quantify::FixedPointQuant` by default
+    for both). ReLU's output is structurally non-negative, so by default the
+    saved output sign bit goes to the input instead
+    (`input_bit_width = bit_width + 1`) -- see the module docstring. ReLU has
+    no upper saturation point, so its input is never range-capped.
     """
 
-    def __init__(self, act_quant=FixedPointPerTensorActivationQuant, **kwargs):
-        super().__init__(act_quant=act_quant, **kwargs)
+    def __init__(
+        self,
+        act_quant=FixedPointPerTensorActivationQuant,
+        input_quant=FixedPointPerTensorActivationQuant,
+        bit_width: int = 8,
+        input_bit_width: Optional[int] = None,
+        **kwargs,
+    ):
+        ibw = _input_bit_width(bit_width, unsigned_output=True, override=input_bit_width)
+        super().__init__(act_quant=act_quant, input_quant=input_quant,
+                          bit_width=bit_width, input_bit_width=ibw, **kwargs)
 
 
 class QuantSigmoid(qnn.QuantSigmoid):
-    """Sigmoid with a fixed-point (by default) output quantizer.
+    """Sigmoid with fixed-point (by default) input AND output quantizers.
 
-    Exports as a single native `Sigmoid` ONNX node followed by the
-    quantizer's node.
+    Exports as the input quantizer's node, a single native `Sigmoid` ONNX
+    node, then the output quantizer's node. Sigmoid's output is structurally
+    non-negative, so by default the saved output sign bit goes to the input
+    instead (`input_bit_width = bit_width + 1`). Sigmoid saturates
+    asymptotically, so its input is range-capped by default (see the module
+    docstring) to avoid a rare huge pre-activation outlier ballooning the
+    calibrated range for no benefit.
     """
 
-    def __init__(self, act_quant=FixedPointPerTensorActivationQuant, **kwargs):
-        super().__init__(act_quant=act_quant, **kwargs)
+    def __init__(
+        self,
+        act_quant=FixedPointPerTensorActivationQuant,
+        input_quant=FixedPointPerTensorActivationQuant,
+        bit_width: int = 8,
+        input_bit_width: Optional[int] = None,
+        input_max_abs_value: Optional[float] = None,
+        **kwargs,
+    ):
+        ibw = _input_bit_width(bit_width, unsigned_output=True, override=input_bit_width)
+        imax = _input_max_abs_value(_SIGMOID_SATURATION, input_max_abs_value)
+        super().__init__(act_quant=act_quant, input_quant=input_quant,
+                          bit_width=bit_width, input_bit_width=ibw,
+                          input_max_abs_value=imax, **kwargs)
 
 
 class QuantTanh(qnn.QuantTanh):
-    """Tanh with a fixed-point (by default) output quantizer.
+    """Tanh with fixed-point (by default) input AND output quantizers.
 
-    Exports as a single native `Tanh` ONNX node followed by the quantizer's
-    node.
+    Exports as the input quantizer's node, a single native `Tanh` ONNX node,
+    then the output quantizer's node. Tanh's output can be negative, so
+    `input_bit_width == bit_width` (no asymmetry -- both sides need a sign
+    bit). Tanh saturates asymptotically, so its input is range-capped by
+    default (see the module docstring).
     """
 
-    def __init__(self, act_quant=FixedPointPerTensorActivationQuant, **kwargs):
-        super().__init__(act_quant=act_quant, **kwargs)
+    def __init__(
+        self,
+        act_quant=FixedPointPerTensorActivationQuant,
+        input_quant=FixedPointPerTensorActivationQuant,
+        bit_width: int = 8,
+        input_bit_width: Optional[int] = None,
+        input_max_abs_value: Optional[float] = None,
+        **kwargs,
+    ):
+        ibw = _input_bit_width(bit_width, unsigned_output=False, override=input_bit_width)
+        imax = _input_max_abs_value(_TANH_SATURATION, input_max_abs_value)
+        super().__init__(act_quant=act_quant, input_quant=input_quant,
+                          bit_width=bit_width, input_bit_width=ibw,
+                          input_max_abs_value=imax, **kwargs)
 
 
 class QuantLeakyReLU(nn.Module):
-    """LeakyReLU with a fixed-point (by default) output quantizer.
+    """LeakyReLU with fixed-point (by default) input AND output quantizers.
 
-    Exports as a single native `LeakyRelu` ONNX node followed by the
-    quantizer's node. Brevitas has no built-in `QuantLeakyReLU`, so this
-    applies the nonlinearity directly and quantizes the result with
-    `qnn.QuantIdentity`.
+    Exports as the input quantizer's node, a single native `LeakyRelu` ONNX
+    node, then the output quantizer's node. Brevitas has no built-in
+    `QuantLeakyReLU`, so this applies the nonlinearity directly between two
+    `qnn.QuantIdentity` instances. LeakyReLU's output can be negative, so
+    `input_bit_width == bit_width` (no asymmetry), and it has no saturation
+    point in either direction, so its input is never range-capped.
     """
 
     def __init__(
         self,
         negative_slope: float = 0.01,
         act_quant=FixedPointPerTensorActivationQuant,
+        input_quant=FixedPointPerTensorActivationQuant,
+        bit_width: int = 8,
+        input_bit_width: Optional[int] = None,
         return_quant_tensor: bool = False,
         **kwargs,
     ):
         super().__init__()
         self.negative_slope = negative_slope
+        ibw = _input_bit_width(bit_width, unsigned_output=False, override=input_bit_width)
+        self.input_quant = qnn.QuantIdentity(
+            act_quant=input_quant, bit_width=ibw, return_quant_tensor=False,
+        )
         self.output_quant = qnn.QuantIdentity(
-            act_quant=act_quant, return_quant_tensor=return_quant_tensor, **kwargs
+            act_quant=act_quant, bit_width=bit_width,
+            return_quant_tensor=return_quant_tensor, **kwargs
         )
 
     def forward(self, x):
+        x = self.input_quant(x)
         return self.output_quant(F.leaky_relu(x, negative_slope=self.negative_slope))
 
 
 class QuantSoftmax(nn.Module):
-    """Softmax with a fixed-point (by default) output quantizer.
+    """Softmax with fixed-point (by default) input AND output quantizers.
 
-    Exports as a single native `Softmax` ONNX node followed by the
-    quantizer's node. Brevitas has no built-in `QuantSoftmax`, so this
-    applies the nonlinearity directly and quantizes the result with
-    `qnn.QuantIdentity`.
+    Exports as the input quantizer's node, a single native `Softmax` ONNX
+    node, then the output quantizer's node. Brevitas has no built-in
+    `QuantSoftmax`, so this applies the nonlinearity directly between two
+    `qnn.QuantIdentity` instances. Softmax's output (probabilities) is
+    structurally non-negative, so by default the saved output sign bit goes
+    to the input instead (`input_bit_width = bit_width + 1`) -- logits are
+    typically signed. Softmax's useful input range depends on the relative
+    spread of the logits, not an absolute magnitude, so it has no
+    saturation-point range cap (unlike ReLU6/Sigmoid/Tanh).
     """
 
     def __init__(
         self,
         dim: int = -1,
         act_quant=FixedPointPerTensorActivationQuant,
+        input_quant=FixedPointPerTensorActivationQuant,
+        bit_width: int = 8,
+        input_bit_width: Optional[int] = None,
         return_quant_tensor: bool = False,
         **kwargs,
     ):
         super().__init__()
         self.dim = dim
+        ibw = _input_bit_width(bit_width, unsigned_output=True, override=input_bit_width)
+        self.input_quant = qnn.QuantIdentity(
+            act_quant=input_quant, bit_width=ibw, return_quant_tensor=False,
+        )
         self.output_quant = qnn.QuantIdentity(
-            act_quant=act_quant, return_quant_tensor=return_quant_tensor, **kwargs
+            act_quant=act_quant, bit_width=bit_width,
+            return_quant_tensor=return_quant_tensor, **kwargs
         )
 
     def forward(self, x):
+        x = self.input_quant(x)
         return self.output_quant(F.softmax(x, dim=self.dim))
 
 
 class QuantReLU6(nn.Module):
-    """ReLU6 with a fixed-point (by default) output quantizer.
+    """ReLU6 with fixed-point (by default) input AND output quantizers.
 
     PyTorch's own `nn.ReLU6` decomposes into `Constant, Constant, Clip` on
     export, so this uses `Relu6Fn` (a custom `torch.autograd.Function`) to
-    force a single `Quantify::Relu6` ONNX node, followed by the quantizer's
-    node.
+    force a single `Quantify::Relu6` ONNX node, with the input quantizer's
+    node before it and the output quantizer's node after. ReLU6's output is
+    structurally non-negative, so by default the saved output sign bit goes
+    to the input instead (`input_bit_width = bit_width + 1`). ReLU6 hard-
+    clips to `[0, 6]`, so its input is range-capped by default (see the
+    module docstring) to avoid a rare huge pre-activation outlier
+    ballooning the calibrated range for no benefit -- everything beyond the
+    clip point is thrown away by the activation regardless.
     """
 
     def __init__(
         self,
         act_quant=FixedPointPerTensorActivationQuant,
+        input_quant=FixedPointPerTensorActivationQuant,
+        bit_width: int = 8,
+        input_bit_width: Optional[int] = None,
+        input_max_abs_value: Optional[float] = None,
         return_quant_tensor: bool = False,
         **kwargs,
     ):
         super().__init__()
+        ibw = _input_bit_width(bit_width, unsigned_output=True, override=input_bit_width)
+        imax = _input_max_abs_value(_RELU6_SATURATION, input_max_abs_value)
+        self.input_quant = qnn.QuantIdentity(
+            act_quant=input_quant, bit_width=ibw, max_abs_value=imax,
+            return_quant_tensor=False,
+        )
         self.output_quant = qnn.QuantIdentity(
-            act_quant=act_quant, return_quant_tensor=return_quant_tensor, **kwargs
+            act_quant=act_quant, bit_width=bit_width,
+            return_quant_tensor=return_quant_tensor, **kwargs
         )
 
     def forward(self, x):
+        x = self.input_quant(x)
         return self.output_quant(Relu6Fn.apply(x))
 
 
 class QuantSiLU(nn.Module):
-    """SiLU (Swish) with a fixed-point (by default) output quantizer.
+    """SiLU (Swish) with fixed-point (by default) input AND output
+    quantizers.
 
     `nn.SiLU`/`F.silu` decomposes into `Sigmoid, Mul` on export, so this uses
     `SiLUFn` (a custom `torch.autograd.Function`) to force a single
-    `Quantify::SiLU` ONNX node, followed by the quantizer's node.
+    `Quantify::SiLU` ONNX node, with the input quantizer's node before it
+    and the output quantizer's node after. SiLU's output can be negative
+    (down to about -0.278), so `input_bit_width == bit_width` (no
+    asymmetry). SiLU grows ~linearly for large positive input (no upper
+    saturation point), so its input is never range-capped.
 
     See the module docstring for how this differs from
     `quantizers.silu_quant.QuantSiLUActivationQuant`.
@@ -239,39 +410,60 @@ class QuantSiLU(nn.Module):
     def __init__(
         self,
         act_quant=FixedPointPerTensorActivationQuant,
+        input_quant=FixedPointPerTensorActivationQuant,
+        bit_width: int = 8,
+        input_bit_width: Optional[int] = None,
         return_quant_tensor: bool = False,
         **kwargs,
     ):
         super().__init__()
+        ibw = _input_bit_width(bit_width, unsigned_output=False, override=input_bit_width)
+        self.input_quant = qnn.QuantIdentity(
+            act_quant=input_quant, bit_width=ibw, return_quant_tensor=False,
+        )
         self.output_quant = qnn.QuantIdentity(
-            act_quant=act_quant, return_quant_tensor=return_quant_tensor, **kwargs
+            act_quant=act_quant, bit_width=bit_width,
+            return_quant_tensor=return_quant_tensor, **kwargs
         )
 
     def forward(self, x):
+        x = self.input_quant(x)
         return self.output_quant(SiLUFn.apply(x))
 
 
 class QuantGELU(nn.Module):
-    """GELU with a fixed-point (by default) output quantizer.
+    """GELU with fixed-point (by default) input AND output quantizers.
 
     `nn.GELU`/`F.gelu` decomposes into a long Erf- (or Tanh-)based chain on
     export, so this uses `GELUFn` (a custom `torch.autograd.Function`) to
-    force a single `Quantify::GELU` ONNX node, followed by the quantizer's
-    node.
+    force a single `Quantify::GELU` ONNX node, with the input quantizer's
+    node before it and the output quantizer's node after. GELU's output can
+    be negative (down to about -0.17), so `input_bit_width == bit_width`
+    (no asymmetry). GELU grows ~linearly for large positive input (no upper
+    saturation point), so its input is never range-capped.
     """
 
     def __init__(
         self,
         approximate: str = "none",
         act_quant=FixedPointPerTensorActivationQuant,
+        input_quant=FixedPointPerTensorActivationQuant,
+        bit_width: int = 8,
+        input_bit_width: Optional[int] = None,
         return_quant_tensor: bool = False,
         **kwargs,
     ):
         super().__init__()
         self.approximate = approximate
+        ibw = _input_bit_width(bit_width, unsigned_output=False, override=input_bit_width)
+        self.input_quant = qnn.QuantIdentity(
+            act_quant=input_quant, bit_width=ibw, return_quant_tensor=False,
+        )
         self.output_quant = qnn.QuantIdentity(
-            act_quant=act_quant, return_quant_tensor=return_quant_tensor, **kwargs
+            act_quant=act_quant, bit_width=bit_width,
+            return_quant_tensor=return_quant_tensor, **kwargs
         )
 
     def forward(self, x):
+        x = self.input_quant(x)
         return self.output_quant(GELUFn.apply(x, self.approximate))

@@ -157,6 +157,7 @@ def find_optimal_lsb(
     narrow_range: bool = False,
     prefer_high_lsb: bool = False,
     max_clip_pct: Optional[float] = None,
+    max_abs_value: Optional[float] = None,
 ) -> Tuple[int, int, list]:
     """
     Search over LSB positions to find the best fixed-point step size.
@@ -192,6 +193,21 @@ def find_optimal_lsb(
         used as a defensive fallback instead of leaving the quantizer
         uncalibrated.
 
+    max_abs_value : a hard ceiling on the observed `abs_max` BEFORE it drives
+        LSB selection (either rule). Used for the input quantizer of a
+        saturating activation (e.g. ReLU6, Sigmoid, Tanh -- see
+        `quantizers/activations.py` and pitfall #21 in
+        `docs/llm/pitfalls/brevitas_pitfalls.md`): without this, a huge
+        pre-activation outlier would make coverage-first size the ENTIRE
+        grid to cover it, even though the activation itself clips/saturates
+        far below that -- wasting resolution on a range the activation
+        throws away anyway. Capping `abs_max` here means any real input
+        beyond the cap gets clipped by the quantizer (intentional: it would
+        have been clipped/saturated by the activation right afterward
+        regardless). `None` (default) leaves `abs_max` as observed, matching
+        every other use of this function (weights, biases, non-saturating
+        activations).
+
     Returns
     -------
     (best_lsb, best_unique, search_records)
@@ -201,6 +217,8 @@ def find_optimal_lsb(
     w_min = inputs.min().item()
     w_max = inputs.max().item()
     abs_max = max(abs(w_min), abs(w_max))
+    if max_abs_value is not None:
+        abs_max = min(abs_max, max_abs_value)
 
     if abs_max == 0.0:
         return 0, 1, []  # all-zero tensor, LSB doesn't matter
@@ -432,6 +450,13 @@ class FixedPointPerTensorQuantizer(BaseQuantizer):
         BaseQuantizer; this class supplies the fixed-point range via
         _in_range_mask(). Only affects the live training/inference path; the
         ONNX-export path is unchanged.
+    max_abs_value : Optional[float]
+        Hard ceiling passed through to `find_optimal_lsb`'s `max_abs_value`
+        (see its docstring) -- caps the observed `abs_max` before it drives
+        LSB selection, regardless of `quantizer_role`. Used for the input
+        quantizer of a saturating activation (ReLU6/Sigmoid/Tanh -- see
+        `quantizers/activations.py`); `None` (default) leaves calibration
+        unconstrained, as before.
     """
 
     def __init__(
@@ -442,6 +467,7 @@ class FixedPointPerTensorQuantizer(BaseQuantizer):
         narrow_range: bool = False,
         quantizer_role: str = "unknown",
         clipped_ste: bool = False,
+        max_abs_value: Optional[float] = None,
     ):
         # clipped_ste is stored by BaseQuantizer (shared by all quantizers).
         super().__init__(bit_width=bit_width, clipped_ste=clipped_ste)
@@ -449,6 +475,7 @@ class FixedPointPerTensorQuantizer(BaseQuantizer):
         self.rounding_mode = rounding_mode
         self.narrow_range = narrow_range
         self.quantizer_role = quantizer_role
+        self.max_abs_value = max_abs_value
 
         # Register search results as buffers to ensure they are serialized in state_dict
         self.register_buffer('search_result_is_signed', torch.tensor(signed, dtype=torch.bool))
@@ -490,6 +517,7 @@ class FixedPointPerTensorQuantizer(BaseQuantizer):
             self.narrow_range,
             prefer_high_lsb=(self.quantizer_role == "activation"),
             max_clip_pct=_MAX_CLIP_PCT_BY_ROLE.get(self.quantizer_role),
+            max_abs_value=self.max_abs_value,
         )
         return {
             'lsb': lsb,

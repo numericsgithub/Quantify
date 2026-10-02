@@ -6,13 +6,17 @@ For every activation, covers:
     - Plain (unquantized-math) correctness against the equivalent torch op
     - Behavior once quantized (calibrates, output lands on the fixed-point
       grid, gradients still flow via STE)
-    - ONNX export: exactly one node for the activation itself (native op
-      where PyTorch already lowers to one, a `Quantify::<Name>` custom node
-      otherwise) followed by exactly one quantizer node
-      (`Quantify::FixedPointQuant` by default), and the exported graph
-      validates and numerically matches the eager output
+    - ONNX export: an input quantizer node, exactly one node for the
+      activation itself (native op where PyTorch already lowers to one, a
+      `Quantify::<Name>` custom node otherwise), then an output quantizer
+      node (`Quantify::FixedPointQuant` by default for both), and the
+      exported graph validates and numerically matches the eager output
     - train()/eval() mode: calibration only happens in training mode (first
       call), eval mode reuses the calibrated grid and does not recalibrate
+
+Bit-width asymmetry and the saturation-aware input-range cap (both new
+input-quantizer-specific behaviors) have their own dedicated test file:
+tests/test_activation_io_quantizers.py.
 """
 
 import os
@@ -148,15 +152,22 @@ class TestQuantizedBehavior:
 
 
 def _find_base_quantizer(module):
-    """Dig out the BaseQuantizer instance a QuantXXX module wraps, whether it
-    sits behind `output_quant`/`act_quant` (QuantIdentity path) or directly
-    inside Brevitas's own QuantReLU/Sigmoid/Tanh proxy."""
+    """Dig out the OUTPUT BaseQuantizer instance a QuantXXX module wraps
+    (whether it sits behind `output_quant`/`act_quant` (QuantIdentity path)
+    or directly inside Brevitas's own QuantReLU/Sigmoid/Tanh proxy) --
+    every activation now also has a separate INPUT quantizer (see
+    tests/test_activation_io_quantizers.py), so "first one found" is no
+    longer unambiguous. `inference_sequence_id` is assigned in true
+    forward-execution order (quantizers/manager.py), and the input
+    quantizer always runs strictly before the output one, so the output
+    quantizer is always the one with the highest sequence id.
+    """
     from quantizers.base_quantizer import BaseQuantizer
 
-    for m in module.modules():
-        if isinstance(m, BaseQuantizer):
-            return m
-    raise AssertionError("No BaseQuantizer found inside module")
+    quantizers = [m for m in module.modules() if isinstance(m, BaseQuantizer)]
+    if not quantizers:
+        raise AssertionError("No BaseQuantizer found inside module")
+    return max(quantizers, key=lambda q: q.inference_sequence_id)
 
 
 # =========================================================================
@@ -166,7 +177,7 @@ def _find_base_quantizer(module):
 
 class TestONNXExport:
     @pytest.mark.parametrize("cls,kwargs,ref_fn,op,domain", CASES, ids=CASE_IDS)
-    def test_single_activation_node_plus_quantizer_node(self, cls, kwargs, ref_fn, op, domain):
+    def test_input_quant_activation_output_quant_nodes(self, cls, kwargs, ref_fn, op, domain):
         module = cls(bit_width=8, **kwargs)
         x = _sample_input()
         module.train()
@@ -179,9 +190,9 @@ class TestONNXExport:
             onnx.checker.check_model(onnx_model)
             ops = [(n.op_type, n.domain) for n in onnx_model.graph.node]
 
-            assert ops == [(op, domain), ("FixedPointQuant", "Quantify")], (
-                f"Expected exactly one '{op}' node followed by one "
-                f"'Quantify::FixedPointQuant' node, got {ops}"
+            assert ops == [("FixedPointQuant", "Quantify"), (op, domain), ("FixedPointQuant", "Quantify")], (
+                f"Expected an input quantizer node, then exactly one '{op}' node, "
+                f"then an output quantizer node, got {ops}"
             )
         finally:
             os.remove(onnx_path)
