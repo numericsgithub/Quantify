@@ -312,6 +312,22 @@ class RoundingMode(Enum):
     ROUND = "round"
 
 
+# Integer encoding of RoundingMode used ONLY for the `rounding_mode_i`
+# attribute emitted alongside `rounding_mode_s` on exported ONNX nodes --
+# see utils/onnx_self_contained.py. The embedded ONNX FunctionProto bodies
+# need to pick a rounding operator per node *instance* (every node's
+# attributes are fixed, but the function body is shared across all nodes of
+# that op_type in the model), and there's no standard ONNX op for comparing
+# strings, so the mode is also encoded numerically for a `Where`-based
+# selection inside the function body. `rounding_mode_s` remains the
+# human-readable source of truth; this is a derived, redundant attribute.
+ROUNDING_MODE_TO_INT = {
+    RoundingMode.FLOOR: 0,
+    RoundingMode.ROUND: 1,
+    RoundingMode.ROUND_TO_NEAREST_EVEN: 2,
+}
+
+
 def _round(x: torch.Tensor, mode: RoundingMode) -> torch.Tensor:
     """Round tensor according to the selected rounding mode."""
     if mode is RoundingMode.FLOOR:
@@ -361,7 +377,20 @@ class FixedPointQuantFn(Function):
 
         # Pop the integers that the corresponding forward() enqueued
         captured = FixedPointQuantFn._integer_queue.popleft()
-        
+
+        # integer_min_f/integer_max_f/rounding_mode_i are redundant with
+        # bit_width_i/signed_i/narrow_range_i/rounding_mode_s -- precomputed
+        # here (Python ints/mode are already known at export time) purely so
+        # the embedded ONNX FunctionProto body (utils/onnx_self_contained.py)
+        # doesn't need to reconstruct them via in-graph integer arithmetic or
+        # string comparison. See ROUNDING_MODE_TO_INT's docstring.
+        if signed:
+            integer_min = -(2 ** (int(bit_width) - 1)) + (1 if narrow_range else 0)
+            integer_max = 2 ** (int(bit_width) - 1) - 1
+        else:
+            integer_min = 0
+            integer_max = 2 ** int(bit_width) - 1
+
         quantized = g.op(
             "Quantify::FixedPointQuant",
             x,
@@ -372,6 +401,9 @@ class FixedPointQuantFn(Function):
             signed_i=int(signed),
             narrow_range_i=int(narrow_range),
             rounding_mode_s=str(rounding_mode.value),
+            integer_min_f=float(integer_min),
+            integer_max_f=float(integer_max),
+            rounding_mode_code_i=ROUNDING_MODE_TO_INT[rounding_mode],
             quantized_ints_t=captured,
         ).setType(x.type())
         

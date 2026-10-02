@@ -12,7 +12,9 @@ from typing import Tuple, Any
 
 from quantizers.base_quantizer import BaseQuantizer
 from quantizers.base_injector import BaseActivationQuant
-from quantizers.fixedpoint_per_tensor import quantize_fixed_point, find_optimal_lsb, RoundingMode
+from quantizers.fixedpoint_per_tensor import (
+    quantize_fixed_point, find_optimal_lsb, RoundingMode, ROUNDING_MODE_TO_INT,
+)
 from torch.autograd import Function
 from torch.onnx import symbolic_helper
 
@@ -24,7 +26,20 @@ class SiLUQuantFn(Function):
     def symbolic(g, x, scale, zero_point, lsb, bit_width, signed, rounding_mode):
         scale_val = symbolic_helper._maybe_get_const(scale, "t")
         zero_point_val = symbolic_helper._maybe_get_const(zero_point, "t")
-        
+
+        # integer_min_f/integer_max_f/rounding_mode_i: see the matching note
+        # in quantizers/fixedpoint_per_tensor.py::FixedPointQuantFn.symbolic
+        # -- precomputed here purely so the embedded ONNX FunctionProto body
+        # (utils/onnx_self_contained.py) doesn't need in-graph integer
+        # arithmetic or string comparison. SiLUTensorQuant has no
+        # narrow_range option (always the full range).
+        if signed:
+            integer_min = -(2 ** (int(bit_width) - 1))
+            integer_max = 2 ** (int(bit_width) - 1) - 1
+        else:
+            integer_min = 0
+            integer_max = 2 ** int(bit_width) - 1
+
         quantized = g.op(
             "Quantify::QuantSiLU",
             x,
@@ -34,8 +49,11 @@ class SiLUQuantFn(Function):
             bit_width_i=int(bit_width),
             signed_i=int(signed),
             rounding_mode_s=str(rounding_mode.value),
+            integer_min_f=float(integer_min),
+            integer_max_f=float(integer_max),
+            rounding_mode_code_i=ROUNDING_MODE_TO_INT[rounding_mode],
         ).setType(x.type())
-        
+
         return quantized
 
     @staticmethod

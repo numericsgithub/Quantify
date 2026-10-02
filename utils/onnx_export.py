@@ -159,6 +159,7 @@ def export_onnx_with_io(
     dynamo: bool = False,
     reset_states: bool = True,
     freeze_annealing: bool = True,
+    self_contained: bool = True,
     **export_kwargs,
 ) -> onnx.ModelProto:
     """
@@ -206,6 +207,15 @@ def export_onnx_with_io(
         started-complete) from the export's own forward passes -- see
         `_freeze_uncalibrated`/`_suppress_lifecycle_logging` and pitfall #19
         in docs/llm/pitfalls/brevitas_pitfalls.md.
+    self_contained : bool
+        If True (default), embeds an `onnx.FunctionProto` for every
+        `Quantify::*` custom node actually present in the exported graph
+        (`utils/onnx_self_contained.py`), implementing its exact math with
+        only standard ONNX operators. This makes the file loadable and
+        runnable with plain `onnxruntime.InferenceSession` -- no custom op
+        registration -- while keeping the custom nodes themselves (for
+        graph inspection) exactly as before. See pitfall #22 in
+        docs/llm/pitfalls/brevitas_pitfalls.md.
     **export_kwargs
         Extra keyword arguments forwarded verbatim to ``torch.onnx.export``.
 
@@ -297,6 +307,10 @@ def export_onnx_with_io(
 
     # 3. Embed into the ONNX model
     onnx_model = onnx.load(filepath)
+
+    if self_contained:
+        from utils.onnx_self_contained import embed_self_contained_functions
+        embed_self_contained_functions(onnx_model)
 
     if embed_mode == "metadata":
         _embed_as_metadata(onnx_model, dummy_input_np, dummy_output_np)

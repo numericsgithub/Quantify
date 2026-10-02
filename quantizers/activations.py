@@ -189,7 +189,21 @@ class GELUFn(Function):
     @staticmethod
     def symbolic(g, x, approximate):
         approximate_val = torch.onnx.symbolic_helper._maybe_get_const(approximate, "s")
-        return g.op("Quantify::GELU", x, approximate_s=str(approximate_val)).setType(x.type())
+        # approximate_code_i: redundant int encoding (0="none"/erf-based,
+        # 1="tanh") of approximate_s, for the embedded ONNX FunctionProto
+        # body (utils/onnx_self_contained.py) to select a branch with --
+        # there's no standard ONNX op for string comparison, so the function
+        # body picks via Where on this instead. Named "..._code_i" (not
+        # "approximate_i") because PyTorch's ONNX exporter strips the
+        # trailing type-suffix from attribute names when writing the node
+        # (e.g. "approximate_s" -> "approximate"), so "approximate_i" would
+        # otherwise collide with "approximate_s" on the exported node.
+        approximate_code_i = 1 if str(approximate_val) == "tanh" else 0
+        return g.op(
+            "Quantify::GELU", x,
+            approximate_s=str(approximate_val),
+            approximate_code_i=approximate_code_i,
+        ).setType(x.type())
 
     @staticmethod
     def forward(ctx, x, approximate):

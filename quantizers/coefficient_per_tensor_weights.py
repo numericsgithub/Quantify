@@ -48,6 +48,12 @@ class CoefficientQuantFn(Function):
             x,
             coefficients,
             bit_shift_scale_i=int(bit_shift_scale),
+            # scale_f: redundant precomputed float (== 2**bit_shift_scale),
+            # so the embedded ONNX FunctionProto body
+            # (utils/onnx_self_contained.py) can reference it directly
+            # instead of computing a power-of-two from the int attribute
+            # in-graph.
+            scale_f=float(2.0 ** bit_shift_scale),
             chosen_indices_t=captured_indices,
             quantized_values_t=captured_quantized,
         ).setType(x.type())
@@ -67,7 +73,17 @@ class CoefficientQuantFn(Function):
                 _, __, indices = apply_non_uniform_quantization(x, coefficients, bit_shift_scale)
                 CoefficientQuantFn._queue.append((
                     indices.cpu().to(torch.long),
-                    quantized.cpu(),
+                    # .detach() -- this cached copy is embedded into the
+                    # exported node as a plain tensor attribute purely for
+                    # introspection (symbolic()'s quantized_values_t); it
+                    # must never carry grad-tracking (x is typically a
+                    # Parameter with requires_grad=True, e.g. a conv
+                    # weight), or embedding it as a g.op() attribute hits
+                    # PyTorch's "!v.requires_grad()" internal assert. The
+                    # REAL output (`quantized`, returned below, used for the
+                    # STE backward) is untouched -- only this cached copy
+                    # is detached.
+                    quantized.detach().cpu(),
                 ))
 
         bw = torch.tensor(float(bit_width), dtype=x.dtype, device=x.device)
