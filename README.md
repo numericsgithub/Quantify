@@ -109,6 +109,13 @@ view("runs/imp_mymodel")              # starts the offline viewer, opens the bro
 
 or from the CLI: `python -m importance.serve runs/imp_mymodel [--port 8000]`.
 
+The viewer draws the model as a Netron-style dataflow graph (residuals,
+concats and multi-output heads included); every Conv/Linear node carries a
+mini histogram of its per-filter importance, and clicking a node drills
+down filter → kernel → weight in a sidebar. Zero filters, kernels and
+weights are marked throughout (exact zeros for quantized weights, a
+size-aware tolerance for float weights).
+
 See `docs/llm/importance_analysis.md` for the metrics (including the
 BatchNorm scale-invariance caveat and how `act_filter` fixes it), the
 on-disk format, and known v1 limitations.

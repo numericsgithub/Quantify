@@ -19,7 +19,9 @@ import numpy as np
 import torch
 
 from importance.discovery import LayerInfo
-from importance.engine import EngineResult, LEVEL_PRIORITY, _reduce_grad
+from importance.engine import EngineResult, LEVEL_PRIORITY, _quantized_weight, _reduce_grad
+from importance.graph import sequential_fallback_graph
+from importance.sparsity import layer_sparsity
 
 TOOL_VERSION = "0.1.0"
 DEFAULT_SIZE_WARNING_BYTES = 2 * 1024 ** 3  # 2 GiB
@@ -58,6 +60,11 @@ def _quantize_uint8(arr: np.ndarray):
     return q, scale
 
 
+def _float16_scale(arr: np.ndarray) -> float:
+    amax = float(np.abs(arr).max()) if arr.size else 0.0
+    return amax if amax > 0.0 and np.isfinite(amax) else 1.0
+
+
 def _dtype_for(level: str, weight_dtype: str) -> str:
     if level == "weight":
         return weight_dtype
@@ -68,12 +75,16 @@ class Result:
     """In-memory or on-disk importance analysis result."""
 
     def __init__(self, manifest: dict, arrays: Dict[str, Dict[str, Dict[str, np.ndarray]]],
-                 samples: Optional[dict] = None, base_dir: Optional[Path] = None):
+                 samples: Optional[dict] = None, base_dir: Optional[Path] = None,
+                 graph: Optional[dict] = None):
         self.manifest = manifest
         # arrays[layer_id][level][metric] -> np.ndarray, shape [n_out_total, *level_shape]
         self.arrays = arrays
         self.samples = samples or {}
         self.base_dir = Path(base_dir) if base_dir else None
+        # dataflow graph (importance/graph.py); None for results saved before it existed
+        self._graph = graph
+        self._sparsity_cache: Dict[str, dict] = {}
 
     # ------------------------------------------------------------------ #
     # Construction from a fresh engine run
@@ -82,7 +93,7 @@ class Result:
     def from_engine_result(
         cls, engine_result: EngineResult, layers: List[LayerInfo], config, output_spec,
         weight_dtype: str, model_summary: dict, dataset_info: dict, samples: dict,
-        size_warning_bytes: int = DEFAULT_SIZE_WARNING_BYTES,
+        size_warning_bytes: int = DEFAULT_SIZE_WARNING_BYTES, graph: Optional[dict] = None,
     ) -> "Result":
         levels_wanted = set(config.levels) | {"layer"}
         finest = engine_result.level
@@ -108,6 +119,17 @@ class Result:
                 layer_arrays["raw"]["bias"] = raw_bias
                 raw_entry["bias"] = {"dtype": "float32"}
                 total_bytes += raw_bias.nbytes
+            # The quantized weight, but only when the weight quantizer is
+            # actually active (differs from the float weight) -- it makes
+            # zero detection exact (see importance/sparsity.py).
+            with torch.no_grad():
+                qw = _quantized_weight(layer.module)
+            if qw is not None and qw.shape == layer.module.weight.shape:
+                qw_np = qw.detach().cpu().numpy().astype(np.float32)
+                if not np.array_equal(qw_np, raw_weight):
+                    layer_arrays["raw"]["qweight"] = qw_np
+                    raw_entry["qweight"] = {"dtype": "float32"}
+                    total_bytes += qw_np.nbytes
 
             for level in _all_levels_from_finest(finest):
                 if level != "layer" and level not in levels_wanted:
@@ -173,7 +195,7 @@ class Result:
                 "size_warning": size_warning,
             },
         }
-        return cls(manifest, arrays, samples=samples)
+        return cls(manifest, arrays, samples=samples, graph=graph)
 
     # ------------------------------------------------------------------ #
     # Save / load
@@ -204,10 +226,21 @@ class Result:
                                             "shape": list(arr.shape)}
                     else:
                         target_dtype = np.float16 if _dtype_for(level, weight_dtype) == "float16" else np.float32
-                        arr_out = arr.astype(target_dtype)
+                        entry = {"dtype": target_dtype.__name__, "file": f"layers/{layer_id}/{fname}",
+                                 "shape": list(arr.shape)}
+                        if target_dtype is np.float16:
+                            # Taylor scores are routinely < 6e-8 (float16's smallest
+                            # subnormal) -- e.g. 1e-11 in an untrained MobileNetV2 --
+                            # and would silently underflow to 0. Store arr/max|arr|
+                            # instead, which keeps float16's ~3 significant digits
+                            # relative to the array's own scale.
+                            scale = _float16_scale(arr)
+                            arr_out = (arr / scale).astype(np.float16)
+                            entry["scale"] = scale
+                        else:
+                            arr_out = arr.astype(target_dtype)
                         np.save(fpath, arr_out)
-                        metrics[metric] = {"dtype": str(target_dtype.__name__ if hasattr(target_dtype, "__name__") else target_dtype),
-                                            "file": f"layers/{layer_id}/{fname}", "shape": list(arr.shape)}
+                        metrics[metric] = entry
 
         for layer_entry in manifest["layers"]:
             layer_id = layer_entry["id"]
@@ -225,6 +258,10 @@ class Result:
         if "meta" in self.samples:
             with open(base / "samples" / "meta.json", "w") as f:
                 json.dump(self.samples["meta"], f)
+
+        if self._graph is not None:
+            with open(base / "graph.json", "w") as f:
+                json.dump(self._graph, f)
 
         with open(base / "manifest.json", "w") as f:
             json.dump(manifest, f, indent=2)
@@ -247,7 +284,9 @@ class Result:
                 for metric, info in metrics.items():
                     fpath = base / info["file"]
                     raw = np.load(fpath, mmap_mode="r")
-                    if info["dtype"] == "int8":
+                    if info["dtype"] == "int8" or "scale" in info:
+                        # int8, or scaled float16 (results saved before the
+                        # scale was introduced have no "scale" key -> as-is)
                         arrays[layer_id][level][metric] = raw.astype(np.float32) * info["scale"]
                     else:
                         arrays[layer_id][level][metric] = raw
@@ -265,7 +304,11 @@ class Result:
                 with open(meta_path) as fh:
                     samples["meta"] = json.load(fh)
 
-        return cls(manifest, arrays, samples=samples, base_dir=base)
+        graph = None
+        if (base / "graph.json").exists():
+            with open(base / "graph.json") as fh:
+                graph = json.load(fh)
+        return cls(manifest, arrays, samples=samples, base_dir=base, graph=graph)
 
     # ------------------------------------------------------------------ #
     # Query API
@@ -307,6 +350,30 @@ class Result:
     def raw_bias(self, layer: str) -> Optional[np.ndarray]:
         arr = self.arrays[layer].get("raw", {}).get("bias")
         return np.asarray(arr) if arr is not None else None
+
+    def raw_qweight(self, layer: str) -> Optional[np.ndarray]:
+        """Quantized weight values, if the layer's weight quantizer was active
+        at analysis time; None otherwise."""
+        arr = self.arrays[layer].get("raw", {}).get("qweight")
+        return np.asarray(arr) if arr is not None else None
+
+    @property
+    def graph(self) -> dict:
+        """Dataflow graph {"nodes", "edges"}; a sequential chain of the
+        analyzed layers if no traced graph was stored."""
+        return self._graph if self._graph is not None else sequential_fallback_graph(self.manifest)
+
+    def sparsity(self, layer: str) -> dict:
+        """Zero weights/kernels/filters of `layer` (see importance/sparsity.py
+        for the zero rule). Uses the quantized weight when one was stored."""
+        if layer not in self._sparsity_cache:
+            entry = self._layer_entry(layer)
+            self._sparsity_cache[layer] = layer_sparsity(
+                self.raw_weight(layer), qweight=self.raw_qweight(layer), bias=self.raw_bias(layer),
+                groups=entry.get("groups") or 1,
+                in_channels=entry.get("in_channels") if entry.get("kind") == "conv" else None,
+            )
+        return self._sparsity_cache[layer]
 
     def layer_score(self, layer: str, output=None, metric: str = "mean_abs_s") -> np.ndarray:
         return self._level(layer, "layer", output, metric)

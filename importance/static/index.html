@@ -7,63 +7,90 @@
   <link rel="stylesheet" href="/static/style.css" />
 </head>
 <body>
-  <header id="app-header">
-    <h1>Importance Viewer</h1>
-    <div id="model-summary" class="muted"></div>
-    <div class="controls">
-      <label>Metric
-        <select id="metric-select">
-          <option value="auto" selected>auto (act_filter after BN, else mean |s|)</option>
-          <option value="mean_abs_s">mean |s| (Taylor, abs)</option>
-          <option value="mean_s">mean s (Taylor, signed)</option>
-          <option value="act_filter">act_filter (activation-based)</option>
-        </select>
-      </label>
-      <label>Normalize
-        <select id="normalize-select">
-          <option value="raw">raw</option>
-          <option value="per-layer" selected>per-layer</option>
-          <option value="global">global</option>
-          <option value="rank">rank</option>
-        </select>
-      </label>
-      <label>Weight values
-        <select id="weight-normalize-select">
-          <option value="raw" selected>raw</option>
-          <option value="max100">normalize to max=100</option>
-        </select>
-      </label>
-      <label>Sort
-        <select id="sort-select">
-          <option value="original">original order</option>
-          <option value="importance">by importance</option>
-        </select>
-      </label>
-      <label>Top-k <input id="topk-slider" type="range" min="0" max="100" value="100" /> <span id="topk-label">100%</span></label>
-      <label>Search <input id="layer-search" type="text" placeholder="layer name..." /></label>
-      <button id="export-csv">Export CSV</button>
+  <header id="topbar">
+    <div class="brand">
+      <span class="brand-title">Importance Viewer</span>
+      <span id="model-summary" class="muted"></span>
     </div>
-    <div id="topk-summary" class="muted"></div>
+    <div class="controls">
+      <label title="Which model output the importance is measured against">Output
+        <select id="output-select"></select>
+      </label>
+      <label title="Importance metric. auto = act_filter for layers followed by BatchNorm (weight scores are scale-invariant there), else mean |s|">Metric
+        <select id="metric-select">
+          <option value="auto" selected>auto</option>
+          <option value="mean_abs_s">mean |s|</option>
+          <option value="mean_s">mean s (signed)</option>
+          <option value="act_filter">act_filter</option>
+        </select>
+      </label>
+      <label title="What each node's mini histogram shows: one bar per filter/neuron, or one bar per input channel (summed over the filters reading it)">Bars
+        <select id="hist-axis">
+          <option value="filter" selected>per filter</option>
+          <option value="input">per input ch.</option>
+        </select>
+        <select id="hist-order">
+          <option value="sorted" selected>sorted</option>
+          <option value="index">by index</option>
+        </select>
+      </label>
+      <label title="How importance maps to colour in grids and heatmaps. log spreads out the low end (3 decades below the max)">Colours
+        <select id="color-scale">
+          <option value="linear" selected>linear</option>
+          <option value="log">log</option>
+        </select>
+      </label>
+      <div class="seg" id="orient-seg" title="Graph direction">
+        <button data-v="TB" class="on">↓</button><button data-v="LR">→</button>
+      </div>
+      <label class="check" title="Show tensor shapes on edges"><input type="checkbox" id="edge-shapes" checked /> shapes</label>
+      <label class="check" title="Dim every node that has no zero weights/kernels/filters"><input type="checkbox" id="zeros-only" /> zeros only</label>
+      <div class="search-wrap">
+        <input id="search" type="search" placeholder="Find layer…  ( / )" autocomplete="off" />
+        <div id="search-results" class="search-results" hidden></div>
+      </div>
+      <button id="fit-btn" title="Fit graph to window (F)">Fit</button>
+      <button id="export-csv" title="Filter-level scores of every layer for the selected output">CSV</button>
+      <button id="theme-btn" title="Toggle light/dark">◐</button>
+    </div>
   </header>
 
-  <main>
-    <section id="input-panel" class="panel">
-      <h2>Input <select id="sample-select"></select></h2>
-      <div id="input-render"></div>
-    </section>
+  <div id="workspace">
+    <div id="graph-pane">
+      <svg id="graph-svg" xmlns="http://www.w3.org/2000/svg">
+        <defs>
+          <pattern id="hatch" width="4" height="4" patternUnits="userSpaceOnUse" patternTransform="rotate(45)">
+            <rect width="4" height="4" class="hatch-bg" />
+            <line x1="0" y1="0" x2="0" y2="4" class="hatch-line" />
+          </pattern>
+          <marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+            <path d="M0,1 L9,5 L0,9 z" class="arrow-head" />
+          </marker>
+        </defs>
+        <g id="viewport"><g id="edges-layer"></g><g id="nodes-layer"></g></g>
+      </svg>
+      <div id="sparsity-summary" class="floating-card"></div>
+      <div id="legend" class="floating-card legend">
+        <span><i class="sw sw-imp sw-scale"></i>importance (low → high)</span>
+        <span><i class="sw sw-zero"></i>zero (all weights 0)</span>
+        <span><i class="sw sw-neg"></i>negative (signed)</span>
+      </div>
+      <div id="graph-status" class="muted"></div>
+    </div>
+    <div id="splitter" title="Drag to resize"></div>
+    <aside id="sidebar">
+      <div id="sidebar-empty" class="empty-hint">
+        <p><b>Click a node</b> to see its properties, sparsity and per-filter importance.</p>
+        <p class="muted">Mini histograms in each layer node show the importance of every filter / neuron for the selected output.
+          Red <span class="zero-chip">∅</span> markers flag filters, kernels and weights that are zero.</p>
+        <p class="muted">Scroll to zoom, drag to pan, <kbd>F</kbd> fits the graph, <kbd>/</kbd> searches,
+          <kbd>←</kbd>/<kbd>→</kbd> step through filters of the selected layer.</p>
+      </div>
+      <div id="sidebar-content" hidden></div>
+    </aside>
+  </div>
+  <div id="tooltip" hidden></div>
 
-    <section id="layers-panel" class="panel">
-      <h2>Layers</h2>
-      <div id="layers-list"></div>
-    </section>
-
-    <section id="output-panel" class="panel">
-      <h2>Output</h2>
-      <div id="output-chips"></div>
-      <div id="output-values"></div>
-    </section>
-  </main>
-
-  <script src="/static/app.js"></script>
+  <script type="module" src="/static/app.js"></script>
 </body>
 </html>

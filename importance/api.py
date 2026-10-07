@@ -3,12 +3,15 @@ from __future__ import annotations
 
 from typing import Any, Callable, Optional, Tuple
 
+import logging
+
 import numpy as np
 import torch
 import torch.nn as nn
 
 from importance.discovery import discover_layers, detect_batch, build_output_spec, warn_if_probability_head
 from importance.engine import AnalyzeConfig, run_analysis
+from importance.graph import trace_graph
 from importance.storage import Result, DEFAULT_SIZE_WARNING_BYTES
 
 
@@ -82,6 +85,14 @@ def analyze(
         progress=progress,
     )
 
+    graph = None
+    try:
+        graph = trace_graph(model, dummy, analyzed_ids={layer.id for layer in layers})
+    except Exception as e:  # noqa: BLE001 - the graph is a viewer nicety, never fatal
+        logging.getLogger("importance").warning(
+            "graph tracing failed (%s: %s); the viewer will show a sequential layer chain instead",
+            type(e).__name__, e)
+
     engine_result = run_analysis(model, dataloader, layers, output_spec, config, resolved_device)
 
     model.train(was_training)
@@ -96,7 +107,7 @@ def analyze(
 
     result = Result.from_engine_result(
         engine_result, layers, config, output_spec, weight_dtype, model_summary, dataset_info,
-        samples, size_warning_bytes=size_warning_bytes,
+        samples, size_warning_bytes=size_warning_bytes, graph=graph,
     )
     return result
 
