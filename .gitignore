@@ -82,3 +82,6 @@ output/
 *.csv
 *.json
 .aider*
+
+# Stray run/debug output
+*.log
