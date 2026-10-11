@@ -10,6 +10,7 @@ import brevitas.nn as qnn
 from quantizers.manager import QuantizerManager
 from quantizers.fixedpoint_per_tensor import FixedPointPerTensorWeightQuant, FixedPointPerTensorActivationQuant, FixedPointPerTensorBiasQuant
 from utils.onnx_export import export_onnx_with_io
+from quantizers.activations import QuantReLU
 
 # Training Harness Imports
 from training_harness.engine_utils import set_seed, EarlyStopping, EpochTimer
@@ -39,7 +40,9 @@ class SimpleMNISTNet(nn.Module):
             weight_quant=FixedPointPerTensorWeightQuant,
             output_quant=FixedPointPerTensorActivationQuant
         )
-        self.relu1 = nn.ReLU()
+        # Quantify QuantReLU without quantizers: a plain nn.ReLU between
+        # quantized layers is rejected by export_onnx_with_io's canonical checks.
+        self.relu1 = QuantReLU(act_quant=None, input_quant=None)
 
         # Layer 2: Conv -> ReLU -> Pool
         self.conv2 = qnn.QuantConv2d(
@@ -48,7 +51,7 @@ class SimpleMNISTNet(nn.Module):
             weight_quant=FixedPointPerTensorWeightQuant,
             output_quant=FixedPointPerTensorActivationQuant
         )
-        self.relu2 = nn.ReLU()
+        self.relu2 = QuantReLU(act_quant=None, input_quant=None)
 
         self.conv3 = qnn.QuantConv2d(
             4, 6, kernel_size=3, stride=2,

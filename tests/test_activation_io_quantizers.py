@@ -41,6 +41,8 @@ from quantizers.activations import (
     QuantGELU,
     QuantLeakyReLU,
     QuantSoftmax,
+    QuantHardSwish,
+    QuantHardSigmoid,
 )
 from quantizers.base_quantizer import BaseQuantizer
 
@@ -69,7 +71,7 @@ def _find_by_role_position(module, want_input: bool):
     return quantizers_sorted[0] if want_input else quantizers_sorted[-1]
 
 
-# All 8 modules, each with (constructor, is_unsigned_output, kwargs_for_ctor).
+# All 10 modules, each with (constructor, is_unsigned_output, kwargs_for_ctor).
 # is_unsigned_output drives the expected input_bit_width = bit_width (+1 if True).
 ACTIVATIONS = [
     pytest.param(QuantReLU, True, {}, id="relu"),
@@ -80,6 +82,8 @@ ACTIVATIONS = [
     pytest.param(QuantSiLU, False, {}, id="silu"),
     pytest.param(QuantGELU, False, {}, id="gelu"),
     pytest.param(QuantLeakyReLU, False, {}, id="leaky_relu"),
+    pytest.param(QuantHardSigmoid, True, {}, id="hardsigmoid"),
+    pytest.param(QuantHardSwish, False, {}, id="hardswish"),
 ]
 
 
@@ -316,6 +320,7 @@ class TestGuardrailIsNotTooStrict:
         pytest.param(QuantSiLU, {}, id="silu"),
         pytest.param(QuantGELU, {}, id="gelu"),
         pytest.param(QuantLeakyReLU, {}, id="leaky_relu"),
+        pytest.param(QuantHardSwish, {}, id="hardswish"),
     ])
     def test_unbounded_activations_are_never_range_constrained(self, cls, kwargs):
         """ReLU/SiLU/GELU/LeakyReLU have no upper saturation point (they
@@ -344,3 +349,14 @@ class TestGuardrailIsNotTooStrict:
         q_in = _find_by_role_position(module, want_input=True)
         q_max = _calibrated_q_max(q_in)
         assert q_max >= float(x.abs().max()) * 0.99
+
+
+def test_hardsigmoid_input_range_is_capped_at_its_saturation_point():
+    """HardSigmoid hard-clips for |x| >= 3, so (like ReLU6) its input
+    quantizer must not balloon to cover a huge outlier."""
+    x = _huge_outlier_input()
+    module = QuantHardSigmoid(bit_width=8)
+    module.train()
+    module(x)
+    q_max = _calibrated_q_max(_find_by_role_position(module, want_input=True))
+    assert 3.0 <= q_max < 8.0, f"expected input range capped near 3, got q_max={q_max}"

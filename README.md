@@ -90,6 +90,13 @@ export_onnx_with_io(
 )
 ```
 
+The export is checked to be a canonical graph and raises `NonCanonicalONNXError`
+otherwise (`canonical_checks="warn"`/`"off"` to relax): every Linear is one
+`Quantify::Dense` node, Conv/Pool pads are VALID or TF-SAME (use
+`padding="same"` layers from `quantizers/layers.py`), the graph input feeds
+the first layer directly, and activations are Quantify modules. See
+`docs/llm/skills/canonical-onnx-export.md`.
+
 ## 🔍 Importance Analysis & Viewer
 
 `importance/` computes, for every Conv/Linear layer (plain PyTorch,

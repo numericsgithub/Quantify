@@ -8,20 +8,26 @@ model must be trained from scratch or initialised from a custom checkpoint.
 Architecture:
     Stem (3→32 conv, s=2) + 13 depthwise-separable blocks + GlobalAvgPool + FC
     Total 28 convolutional layers.
+
+3x3 convs use TF-style SAME padding (quantizers/layers.py) so the model
+exports as a canonical ONNX graph (VALID/SAME pads only).
 """
 
 import torch.nn as nn
 import brevitas.nn as qnn
 
 from models.quant_activations import QuantReLU6
+from quantizers.layers import QuantConv2d
 
 
 def _relu(act_quant):
     # MobileNetV1 (incl. timm's mobilenetv1_100 checkpoints) uses ReLU6, not an
-    # unbounded ReLU; see models/quant_activations.py:QuantReLU6.
+    # unbounded ReLU; see models/quant_activations.py:QuantReLU6. Without
+    # act_quant it's still a QuantReLU6 (exports as Quantify::Relu6), just
+    # with no quantizers.
     if act_quant is not None:
         return QuantReLU6(act_quant=act_quant)
-    return nn.ReLU6(inplace=True)
+    return QuantReLU6(act_quant=None, input_quant=None)
 
 
 class QuantDWSepBlock(nn.Module):
@@ -29,8 +35,8 @@ class QuantDWSepBlock(nn.Module):
 
     def __init__(self, in_ch, out_ch, stride, weight_quant=None, act_quant=None):
         super().__init__()
-        self.dw = qnn.QuantConv2d(
-            in_ch, in_ch, 3, stride=stride, padding=1,
+        self.dw = QuantConv2d(
+            in_ch, in_ch, 3, stride=stride, padding="same",
             groups=in_ch, bias=False, weight_quant=weight_quant,
         )
         self.bn_dw = nn.BatchNorm2d(in_ch)
@@ -70,7 +76,7 @@ class QuantMobileNetV1(nn.Module):
         super().__init__()
 
         self.stem = nn.Sequential(
-            qnn.QuantConv2d(3, 32, 3, stride=2, padding=1, bias=False, weight_quant=weight_quant),
+            QuantConv2d(3, 32, 3, stride=2, padding="same", bias=False, weight_quant=weight_quant),
             nn.BatchNorm2d(32),
             _relu(act_quant),
         )

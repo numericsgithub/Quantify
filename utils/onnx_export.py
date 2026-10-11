@@ -4,7 +4,9 @@ Provides a unified export function that handles:
 - Legacy exporter requirement (`dynamo=False`)
 - Custom quantizer state reset (FIFO deque cleanup)
 - Dummy input/output embedding (metadata or initializer)
-- Zero-bias injection for QuantLinear layers
+- Canonical-graph checks (uniform Quantify::Dense, VALID/TF-SAME padding only,
+  graph input straight into the first layer, Quantify activations only) --
+  see utils/onnx_canonical.py
 - QCDQ vs QONNX routing helpers
 """
 
@@ -12,6 +14,7 @@ from __future__ import annotations
 
 import ast
 import base64
+import warnings
 from typing import Optional
 
 import numpy as np
@@ -154,6 +157,7 @@ def export_onnx_with_io(
     reset_states: bool = True,
     freeze_annealing: bool = True,
     self_contained: bool = True,
+    canonical_checks: str = "raise",
     **export_kwargs,
 ) -> onnx.ModelProto:
     """
@@ -210,6 +214,21 @@ def export_onnx_with_io(
         registration -- while keeping the custom nodes themselves (for
         graph inspection) exactly as before. See pitfall #22 in
         docs/llm/pitfalls/brevitas_pitfalls.md.
+    canonical_checks : {"raise", "warn", "off"}
+        What to do when the export is not a canonical graph (see
+        `utils/onnx_canonical.py`): a Linear not exported as exactly one
+        `Quantify::Dense`; a Conv/Pool whose pads are neither VALID nor
+        TF-style SAME (or `ceil_mode=1`); a graph input not feeding straight
+        into the first compute layer; a plain activation that has a Quantify
+        equivalent, unless it produces a model output. "raise" (default)
+        raises `NonCanonicalONNXError` listing every violation -- AFTER the
+        file has been written, so the offending graph can still be inspected;
+        "warn" emits them as warnings; "off" skips the checks. LayerNorm and
+        activations without a Quantify equivalent only ever warn.
+
+        Independently of this flag, every `nn.Linear` is always exported as
+        `Quantify::Dense` (patched for the duration of the export only; the
+        live model is never modified).
     **export_kwargs
         Extra keyword arguments forwarded verbatim to ``torch.onnx.export``.
 
@@ -220,6 +239,20 @@ def export_onnx_with_io(
     """
     if custom_opsets is None:
         custom_opsets = {"Quantify": 1}
+    if canonical_checks not in ("raise", "warn", "off"):
+        raise ValueError(
+            f"canonical_checks must be 'raise', 'warn' or 'off', got {canonical_checks!r}"
+        )
+
+    from utils.onnx_canonical import (
+        NonCanonicalONNXError,
+        activation_module_findings,
+        check_onnx_graph,
+        dense_constants_to_initializers,
+        dense_export,
+        find_activation_modules,
+        record_forward,
+    )
 
     # 0. Reset quantizer capture states to avoid FIFO deque collisions
     if reset_states:
@@ -237,15 +270,9 @@ def export_onnx_with_io(
     was_training = model.training
     model.eval()
 
-    def inject_zero_biases(model: torch.nn.Module) -> None:
-        """Inject zero biases into all bias=False QuantLinear layers in-place."""
-        for name, module in model.named_modules():
-            if isinstance(module, torch.nn.Linear) and module.bias is None:
-                module.bias = torch.nn.Parameter(
-                    torch.zeros(module.out_features, device=module.weight.device)
-                )
-
-    inject_zero_biases(model)
+    rejected_acts, warn_acts = (
+        find_activation_modules(model) if canonical_checks != "off" else ([], [])
+    )
 
     # 1+2. Export via torch.onnx.export, then compute the reference output
     # used for the embedded dummy I/O -- both done with annealing frozen off
@@ -273,18 +300,26 @@ def export_onnx_with_io(
             f"rather than calibrating them against dummy_input: {names}"
         )
     try:
-        torch.onnx.export(
-            model,
-            dummy_input,
-            filepath,
-            opset_version=opset_version,
-            do_constant_folding=True,
-            custom_opsets=custom_opsets,
-            dynamo=dynamo,
-            **export_kwargs,
-        )
+        # Every Linear -> one Quantify::Dense node (any input rank, bias
+        # always present) -- patched for the trace only, see dense_export.
+        with dense_export(model):
+            torch.onnx.export(
+                model,
+                dummy_input,
+                filepath,
+                opset_version=opset_version,
+                do_constant_folding=True,
+                custom_opsets=custom_opsets,
+                dynamo=dynamo,
+                **export_kwargs,
+            )
 
-        with torch.no_grad():
+        # The reference forward pass doubles as the canonical checks'
+        # probe: which flagged activation modules produce a model output
+        # (those may stay plain), and how many Linear calls the graph must
+        # contain as Quantify::Dense nodes.
+        watched = [m for _, m, _ in rejected_acts + warn_acts]
+        with torch.no_grad(), record_forward(model, watched) as fwd_record:
             dummy_output = model(dummy_input)
     finally:
         _restore_annealing(saved_annealing)
@@ -301,6 +336,7 @@ def export_onnx_with_io(
 
     # 3. Embed into the ONNX model
     onnx_model = onnx.load(filepath)
+    dense_constants_to_initializers(onnx_model)
 
     if self_contained:
         from utils.onnx_self_contained import embed_self_contained_functions
@@ -316,6 +352,30 @@ def export_onnx_with_io(
         )
 
     onnx.save(onnx_model, filepath)
+
+    if canonical_checks != "off":
+        violations, warns = activation_module_findings(
+            rejected_acts, warn_acts, fwd_record, dummy_output
+        )
+        graph_violations, graph_warns = check_onnx_graph(
+            onnx_model, expected_dense_calls=fwd_record["linear_calls"]
+        )
+        violations += graph_violations
+        warns += graph_warns
+        for w in warns:
+            warnings.warn(f"[onnx_export] {w}", stacklevel=2)
+        if violations:
+            msg = (
+                f"exported graph {filepath} is not canonical "
+                f"({len(violations)} violation(s)):\n  - " + "\n  - ".join(violations)
+            )
+            if canonical_checks == "raise":
+                raise NonCanonicalONNXError(
+                    msg + "\n(The file was written for inspection. Pass "
+                    "canonical_checks='warn' or 'off' to export anyway.)"
+                )
+            warnings.warn(f"[onnx_export] {msg}", stacklevel=2)
+
     return onnx_model
 
 

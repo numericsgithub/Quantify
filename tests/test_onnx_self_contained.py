@@ -37,6 +37,8 @@ from quantizers.activations import (
     QuantGELU,
     QuantLeakyReLU,
     QuantSoftmax,
+    QuantHardSwish,
+    QuantHardSigmoid,
 )
 from utils.onnx_export import export_onnx_with_io
 from utils.onnx_self_contained import embed_self_contained_functions, _used_quantify_op_types
@@ -54,6 +56,9 @@ def _export_and_run(module: torch.nn.Module, x: torch.Tensor):
         export_onnx_with_io(
             module, x, f.name, opset_version=17, custom_opsets={"Quantify": 1},
             dynamo=False, input_names=["x"], output_names=["y"],
+            # Toy single-module graphs (e.g. a lone activation) aren't
+            # canonical full models -- this file tests self-containment only.
+            canonical_checks="off",
         )
         onnx_model = onnx.load(f.name)
         onnx.checker.check_model(onnx_model)
@@ -143,6 +148,8 @@ ACTIVATION_CASES = [
     pytest.param(QuantGELU, {"approximate": "tanh"}, id="gelu_tanh"),
     pytest.param(QuantLeakyReLU, {}, id="leaky_relu"),
     pytest.param(QuantSoftmax, {}, id="softmax"),
+    pytest.param(QuantHardSwish, {}, id="hardswish"),
+    pytest.param(QuantHardSigmoid, {}, id="hardsigmoid"),
 ]
 
 

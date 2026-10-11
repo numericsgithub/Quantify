@@ -16,6 +16,8 @@ from quantizers.activations import (
     QuantGELU,
     QuantLeakyReLU,
     QuantSoftmax,
+    QuantHardSwish,
+    QuantHardSigmoid,
 )
 
 __all__ = [
@@ -36,4 +38,6 @@ __all__ = [
     "QuantGELU",
     "QuantLeakyReLU",
     "QuantSoftmax",
+    "QuantHardSwish",
+    "QuantHardSigmoid",
 ]

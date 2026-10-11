@@ -5,6 +5,13 @@ Architecture mirrors torchvision.models.resnet exactly (module names, layer
 structure, expansion factors) so that load_pretrained_weights() can transfer
 float checkpoint weights without any key renaming.
 
+Padding is TF-style SAME (`padding="same"`, quantizers/layers.py) rather than
+torchvision's symmetric `padding=k//2`: at stride 2 on an even input the two
+differ by one pixel, and only VALID/SAME export as a canonical ONNX graph
+(see utils/onnx_canonical.py). The output shapes are identical, so float
+checkpoints still load, but a stride-2 layer's output is shifted by one
+pixel relative to torchvision.
+
 ReLU layers use different names than torchvision (relu1/relu2 vs relu) because
 torchvision's single relu module is called twice in forward. We use distinct
 modules to give each quantizer its own calibration state. Since ReLU has no
@@ -14,11 +21,14 @@ learnable parameters, this difference is invisible to weight loading.
 import torch.nn as nn
 import brevitas.nn as qnn
 
+from quantizers.activations import QuantReLU
+from quantizers.layers import MaxPool2d, QuantConv2d
+
 
 def _relu(act_quant):
-    if act_quant is not None:
-        return qnn.QuantReLU(act_quant=act_quant)
-    return nn.ReLU(inplace=True)
+    # Always a Quantify QuantReLU (exports as Quantify::Relu); output-only
+    # quantization as before, or none at all when act_quant is None.
+    return QuantReLU(act_quant=act_quant, input_quant=None)
 
 
 def _quant_identity(act_quant):
@@ -39,14 +49,14 @@ class QuantBasicBlock(nn.Module):
     def __init__(self, in_planes, planes, stride=1,
                  weight_quant=None, act_quant=None, downsample=None):
         super().__init__()
-        self.conv1 = qnn.QuantConv2d(
-            in_planes, planes, 3, stride=stride, padding=1, bias=False,
+        self.conv1 = QuantConv2d(
+            in_planes, planes, 3, stride=stride, padding="same", bias=False,
             weight_quant=weight_quant,
         )
         self.bn1 = nn.BatchNorm2d(planes)
         self.relu1 = _relu(act_quant)
-        self.conv2 = qnn.QuantConv2d(
-            planes, planes, 3, stride=1, padding=1, bias=False,
+        self.conv2 = QuantConv2d(
+            planes, planes, 3, stride=1, padding="same", bias=False,
             weight_quant=weight_quant,
         )
         self.bn2 = nn.BatchNorm2d(planes)
@@ -75,8 +85,8 @@ class QuantBottleneck(nn.Module):
         self.conv1 = qnn.QuantConv2d(in_planes, planes, 1, bias=False, weight_quant=weight_quant)
         self.bn1 = nn.BatchNorm2d(planes)
         self.relu1 = _relu(act_quant)
-        self.conv2 = qnn.QuantConv2d(
-            planes, planes, 3, stride=stride, padding=1, bias=False,
+        self.conv2 = QuantConv2d(
+            planes, planes, 3, stride=stride, padding="same", bias=False,
             weight_quant=weight_quant,
         )
         self.bn2 = nn.BatchNorm2d(planes)
@@ -128,12 +138,12 @@ class QuantResNet(nn.Module):
         self._act_quant = act_quant
 
         # Stem — names match torchvision exactly for weight mapping
-        self.conv1 = qnn.QuantConv2d(
-            3, 64, 7, stride=2, padding=3, bias=False, weight_quant=weight_quant,
+        self.conv1 = QuantConv2d(
+            3, 64, 7, stride=2, padding="same", bias=False, weight_quant=weight_quant,
         )
         self.bn1 = nn.BatchNorm2d(64)
         self.relu = _relu(act_quant)
-        self.maxpool = nn.MaxPool2d(3, stride=2, padding=1)
+        self.maxpool = MaxPool2d(3, stride=2, padding="same")
 
         # Residual stages — names layer1..layer4 match torchvision
         self.layer1 = self._make_layer(block, 64,  layers[0])

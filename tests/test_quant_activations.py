@@ -36,6 +36,8 @@ from quantizers.activations import (
     QuantGELU,
     QuantLeakyReLU,
     QuantSoftmax,
+    QuantHardSwish,
+    QuantHardSigmoid,
 )
 
 torch.manual_seed(0)
@@ -51,17 +53,20 @@ def _softmax_ref(x):
 
 
 CASES = [
-    pytest.param(QuantReLU, {}, F.relu, "Relu", "", id="relu"),
+    pytest.param(QuantReLU, {}, F.relu, "Relu", "Quantify", id="relu"),
     pytest.param(QuantReLU6, {}, lambda x: torch.clamp(x, 0.0, 6.0), "Relu6", "Quantify", id="relu6"),
-    pytest.param(QuantSigmoid, {}, torch.sigmoid, "Sigmoid", "", id="sigmoid"),
-    pytest.param(QuantTanh, {}, torch.tanh, "Tanh", "", id="tanh"),
+    pytest.param(QuantSigmoid, {}, torch.sigmoid, "Sigmoid", "Quantify", id="sigmoid"),
+    pytest.param(QuantTanh, {}, torch.tanh, "Tanh", "Quantify", id="tanh"),
     pytest.param(QuantSiLU, {}, F.silu, "SiLU", "Quantify", id="silu"),
     pytest.param(QuantGELU, {}, lambda x: F.gelu(x), "GELU", "Quantify", id="gelu"),
-    pytest.param(QuantLeakyReLU, {}, lambda x: F.leaky_relu(x, 0.01), "LeakyRelu", "", id="leaky_relu"),
-    pytest.param(QuantSoftmax, {}, _softmax_ref, "Softmax", "", id="softmax"),
+    pytest.param(QuantLeakyReLU, {}, lambda x: F.leaky_relu(x, 0.01), "LeakyRelu", "Quantify", id="leaky_relu"),
+    pytest.param(QuantSoftmax, {}, _softmax_ref, "Softmax", "Quantify", id="softmax"),
+    pytest.param(QuantHardSwish, {}, F.hardswish, "HardSwish", "Quantify", id="hardswish"),
+    pytest.param(QuantHardSigmoid, {}, F.hardsigmoid, "HardSigmoid", "Quantify", id="hardsigmoid"),
 ]
 
-CASE_IDS = ["relu", "relu6", "sigmoid", "tanh", "silu", "gelu", "leaky_relu", "softmax"]
+CASE_IDS = ["relu", "relu6", "sigmoid", "tanh", "silu", "gelu", "leaky_relu", "softmax",
+            "hardswish", "hardsigmoid"]
 
 
 def _sample_input():

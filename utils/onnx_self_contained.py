@@ -3,7 +3,9 @@ Make exported Quantify ONNX models self-contained and executable with
 vanilla ONNX Runtime -- no custom op registration required.
 
 The custom `Quantify::*` nodes this project emits (`FixedPointQuant`,
-`Relu6`, `SiLU`, `GELU`, `CoefficientQuant`) exist purely to
+`CoefficientQuant`, `Dense`, and the activations `Relu`, `Relu6`,
+`Sigmoid`, `Tanh`, `SiLU`, `GELU`, `LeakyRelu`, `Softmax`, `HardSwish`,
+`HardSigmoid`) exist purely to
 preserve exact quantization semantics in the exported graph for inspection
 (see pitfall #8 in docs/llm/pitfalls/brevitas_pitfalls.md -- "custom nodes
 are for graph inspection, not ORT inference"). This module closes that gap
@@ -243,12 +245,68 @@ def _build_coefficient_quant_function() -> onnx.FunctionProto:
     )
 
 
+# ---------------------------------------------------------------------------
+# Quantify::Relu / Sigmoid / Tanh / HardSwish / LeakyRelu / Softmax /
+# HardSigmoid -- each a single standard op; the custom domain only exists so
+# a Quantify activation stays distinguishable from a plain one in the graph.
+# ---------------------------------------------------------------------------
+
+def _ref_node(op_type: str, inputs: List[str], outputs: List[str], refs: Dict[str, tuple]):
+    """A standard-op node whose attributes are all taken, per call site, from
+    the calling node's attributes: `refs` maps attribute name ->
+    (ref_attr_name, placeholder value whose TYPE matters)."""
+    node = helper.make_node(op_type, inputs, outputs)
+    for name, (ref_name, placeholder) in refs.items():
+        attr = helper.make_attribute(name, placeholder)
+        attr.ref_attr_name = ref_name
+        node.attribute.append(attr)
+    return node
+
+
+def _build_unary_function(op_type: str, refs: Dict[str, tuple] = None) -> onnx.FunctionProto:
+    refs = refs or {}
+    return helper.make_function(
+        domain=DOMAIN, fname=op_type, inputs=["x"], outputs=["y"],
+        nodes=[_ref_node(op_type, ["x"], ["y"], refs)],
+        opset_imports=_opset(), attributes=[r[0] for r in refs.values()],
+    )
+
+
+# ---------------------------------------------------------------------------
+# Quantify::Dense
+# ---------------------------------------------------------------------------
+
+def _build_dense_function() -> onnx.FunctionProto:
+    """y = x @ W^T + b for x of any rank >= 1, W in PyTorch's `[out, in]`
+    layout, b of shape `[out]` (always present -- zeros for a bias-less
+    Linear). The Transpose is an implementation detail of this function body
+    only; the graph itself never carries a runtime Transpose on the weight."""
+    nodes = [
+        helper.make_node("Transpose", ["W"], ["Wt"], perm=[1, 0]),
+        helper.make_node("MatMul", ["x", "Wt"], ["xw"]),
+        helper.make_node("Add", ["xw", "b"], ["y"]),
+    ]
+    return helper.make_function(
+        domain=DOMAIN, fname="Dense", inputs=["x", "W", "b"], outputs=["y"],
+        nodes=nodes, opset_imports=_opset(), attributes=[],
+    )
+
+
 _BUILDERS = {
     "FixedPointQuant": lambda: _build_fixed_point_quant_function(),
     "Relu6": _build_relu6_function,
     "SiLU": _build_silu_function,
     "GELU": _build_gelu_function,
     "CoefficientQuant": _build_coefficient_quant_function,
+    "Relu": lambda: _build_unary_function("Relu"),
+    "Sigmoid": lambda: _build_unary_function("Sigmoid"),
+    "Tanh": lambda: _build_unary_function("Tanh"),
+    "HardSwish": lambda: _build_unary_function("HardSwish"),
+    "LeakyRelu": lambda: _build_unary_function("LeakyRelu", {"alpha": ("alpha", 0.0)}),
+    "Softmax": lambda: _build_unary_function("Softmax", {"axis": ("axis", 0)}),
+    "HardSigmoid": lambda: _build_unary_function(
+        "HardSigmoid", {"alpha": ("alpha", 0.0), "beta": ("beta", 0.0)}),
+    "Dense": _build_dense_function,
 }
 
 

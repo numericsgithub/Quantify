@@ -3,6 +3,7 @@ import torch.nn as nn
 import brevitas.nn as qnn
 from quantizers.fixedpoint_per_tensor import FixedPointPerTensorWeightQuant
 from models.quant_activations import QuantReLU6
+from quantizers.layers import QuantConv2d
 
 class QuantInvertedResidual(nn.Module):
     """Quantized Inverted Residual Block for MobileNetV2.
@@ -31,7 +32,7 @@ class QuantInvertedResidual(nn.Module):
             ]
         layers += [
             # dw
-            qnn.QuantConv2d(hidden_dim, hidden_dim, 3, stride, 1, groups=hidden_dim, bias=False,
+            QuantConv2d(hidden_dim, hidden_dim, 3, stride, "same", groups=hidden_dim, bias=False,
                             weight_bit_width=weight_bit_width, weight_quant=weight_quant),
             nn.BatchNorm2d(hidden_dim),
             QuantReLU6(bit_width=act_bit_width, act_quant=act_quant),
@@ -55,7 +56,10 @@ class QuantMobileNetV2(nn.Module):
     """
     Quantized MobileNetV2 for ImageNet.
     Mirrors the structure of torchvision.models.mobilenet_v2.MobileNet_V2
-    to allow easy weight mapping.
+    to allow easy weight mapping. 3x3 convs use TF-style SAME padding
+    (quantizers/layers.py) instead of torchvision's symmetric padding=1, so
+    the model exports as a canonical ONNX graph -- same shapes and weights,
+    but stride-2 outputs are shifted by one pixel relative to torchvision.
 
     Args:
         num_classes:     Output logits. Default 1000.
@@ -90,7 +94,7 @@ class QuantMobileNetV2(nn.Module):
         # Stem
         self.features = []
         self.features.append(
-            qnn.QuantConv2d(3, 32, 3, 2, 1, bias=False,
+            QuantConv2d(3, 32, 3, 2, "same", bias=False,
                             weight_bit_width=weight_bit_width, weight_quant=weight_quant)
         )
         self.features.append(nn.BatchNorm2d(32))
