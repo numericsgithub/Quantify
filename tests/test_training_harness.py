@@ -6,8 +6,9 @@ import torch.optim as optim
 from torch.utils.data import DataLoader, TensorDataset
 import pytest
 
-from training_harness.trainer import Trainer
-from training_harness.config import TrainerConfig, QuantScheduleConfig
+from training_harness import QATTrainerV2, TrainerConfigV2, QATScheduleConfigV2
+from quantizers.base_quantizer import BaseQuantizer
+from quantizers.manager import QuantizerManager
 from quantizers import FixedPointPerTensorWeightQuant, FixedPointPerTensorActivationQuant
 
 
@@ -51,41 +52,48 @@ def dummy_mnist_data():
 
 def test_training_harness_basic(dummy_mnist_data):
     """
-    Test that the training harness runs without exceptions for 3 epochs.
-    Validates metric tracking, QAT schedule transitions, and checkpoint saving.
+    QATTrainerV2 end to end on a tiny quantized CNN: float warmup with
+    quantization fully disabled, then QAT activates after the warmup budget,
+    the quantizers calibrate and start annealing, metrics are tracked and a
+    checkpoint is written.
     """
+    QuantizerManager().reset()
     with tempfile.TemporaryDirectory() as tmpdir:
-        config = TrainerConfig(
+        config = TrainerConfigV2(
             experiment_name="test_harness_mnist",
             output_dir=tmpdir,
             epochs=3,
             batch_size=32,
             learning_rate=1e-3,
-            quant_schedule=QuantScheduleConfig(
+            device="cpu",
+            num_classes=10,
+            qat=QATScheduleConfigV2(
                 float_warmup_epochs=1,
-                calibration_batches=2,
+                annealing_steps=4,
+                quantization_start_gap=1,
                 track_scale_factors=True,
             ),
         )
-        
+
         model = SimpleQuantizedMNIST()
         optimizer = optim.Adam(model.parameters(), lr=config.learning_rate)
-        
-        trainer = Trainer(
+        quantizers = [m for m in model.modules() if isinstance(m, BaseQuantizer)]
+        assert quantizers, "test model has no Quantify quantizers"
+
+        trainer = QATTrainerV2(
             config=config,
             model=model,
             optimizer=optimizer,
             train_loader=dummy_mnist_data,
             loss_fn=nn.CrossEntropyLoss(),
         )
-        
-        # Should not raise any exceptions during the full training loop
         tracker = trainer.fit()
-        
-        # Verify basic metrics were recorded across all epochs
+
         assert len(tracker.history) == 3, "Expected exactly 3 epoch snapshots"
         assert "train_loss" in tracker.history[0].metrics, "Missing train_loss in first epoch"
-        
-        # Verify checkpoint was saved to disk
-        assert os.path.exists(os.path.join(tmpdir, "checkpoints", "last.pt")), \
+        assert trainer._qat_active, "QAT never activated after the float warmup"
+        assert all(q.search_done_value for q in quantizers), "quantizers did not calibrate during QAT"
+        assert any(q.annealing_alpha_value > 0 for q in quantizers), "no quantizer started annealing"
+        assert os.path.exists(os.path.join(config.checkpoint_dir, "last.pt")), \
             "Expected 'last.pt' checkpoint to be saved"
+    QuantizerManager().reset()

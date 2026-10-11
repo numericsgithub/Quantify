@@ -1,28 +1,47 @@
 # Training Harness
 
-The `training_harness` provides an end-to-end QAT pipeline.
+The `training_harness` provides an end-to-end QAT pipeline built around
+`QATTrainerV2` (`training_harness/trainer_v2.py`).
 
 ## Pipeline Phases
-1. **Float Warmup**: Train in full precision to learn robust weights.
-2. **Calibration**: Run a PTQ-style pass to initialize quantization ranges.
-3. **QAT**: Enable fake-quantization and fine-tune with learned scales.
-4. **Checkpointing & Logging**: Automatic top-K checkpointing, CSV/TensorBoard/W&B logging, and training curve plotting.
+1. **Float warmup**: all quantization is fully disabled (`QuantizerManager().disable_quantization()`) and the model trains in full precision.
+2. **QAT activation**: after `float_warmup_epochs`, or earlier when `val_loss` plateaus, calibration buffers are reset, BatchNorm is frozen, and the quantizers switch on one by one (`quantization_start_gap`), each annealing from float to fully quantized over `annealing_steps` forward passes.
+3. **QAT**: fine-tune with fake quantization; gradients flow through the STE.
+4. **Checkpointing & Logging**: automatic top-K checkpointing, CSV/TensorBoard/W&B logging, and training curve plotting.
 
-## Configuration
-Use `TrainerConfig` to define experiment parameters:
+## Configuration and usage
+`TrainerConfigV2` holds the run settings, and its `qat` field
+(`QATScheduleConfigV2`) controls when and how quantization switches on:
 ```python
-config = TrainerConfig(
+from training_harness import QATTrainerV2, TrainerConfigV2, QATScheduleConfigV2
+
+config = TrainerConfigV2(
     experiment_name="my_qat_run",
     epochs=50,
     learning_rate=1e-3,
-    quant_schedule=QuantScheduleConfig(float_warmup_epochs=5, calibration_batches=100),
+    qat=QATScheduleConfigV2(
+        float_warmup_epochs=10,    # QAT starts after this, or earlier on a val_loss plateau
+        plateau_patience=5,
+        annealing_steps=100,       # forward passes for each quantizer to ramp 0 -> 1
+        quantization_start_gap=20, # quantizer N waits N x gap passes before switching on
+    ),
 )
+
+trainer = QATTrainerV2(
+    config=config,
+    model=model,
+    optimizer=optimizer,
+    train_loader=train_loader,
+    val_loader=val_loader,
+    loss_fn=nn.CrossEntropyLoss(),
+)
+
+tracker = trainer.fit()
 ```
 
 ## Key Classes
-- `Trainer`: Orchestrates the training loop, validation, checkpointing, and logging.
-- `CheckpointManager`: Handles saving/loading model state and ONNX export.
-- `ExperimentLogger`: Routes metrics to CSV, TensorBoard, and W&B.
-- `QATWarmupScheduler`: Manages phase transitions (float → calibration → QAT).
-
-For usage, see the [README](../README.md). (The old example scripts are archived on the `old_examples` branch.)
+- `QATTrainerV2`: orchestrates the training loop, QAT activation, validation, checkpointing and logging.
+- `TrainerConfigV2` / `QATScheduleConfigV2` / `CheckpointConfig` / `LoggingConfig`: configuration (`config_v2.py`).
+- `CheckpointManager`: saving/loading model state and ONNX export.
+- `ExperimentLogger`: routes metrics to CSV, TensorBoard and W&B.
+- `find_lr`: learning-rate range test using the same model setup as the trainer.

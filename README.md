@@ -38,29 +38,34 @@ trainer) are archived on the `old_examples` branch.
 
 ## 🛠 Training Harness
 
-The `training_harness` provides an end-to-end QAT pipeline:
-1. **Float Warmup**: Train in full precision to learn robust weights.
-2. **Calibration**: Run a PTQ-style pass to initialize quantization ranges.
-3. **QAT**: Enable fake-quantization and fine-tune with learned scales.
-4. **Checkpointing & Logging**: Automatic top-K checkpointing, CSV/TensorBoard/W&B logging, and training curve plotting.
+The `training_harness` provides an end-to-end QAT pipeline (`QATTrainerV2`):
+1. **Float warmup**: all quantization is fully disabled (`QuantizerManager().disable_quantization()`) and the model trains in full precision.
+2. **QAT activation**: after `float_warmup_epochs`, or earlier when `val_loss` plateaus, calibration buffers are reset, BatchNorm is frozen, and the quantizers switch on one by one (`quantization_start_gap`), each annealing from float to fully quantized over `annealing_steps` forward passes.
+3. **QAT**: fine-tune with fake quantization; gradients flow through the STE.
+4. **Checkpointing & Logging**: automatic top-K checkpointing, CSV/TensorBoard/W&B logging, and training curve plotting.
 
 ### Basic Usage
 ```python
-from training_harness.trainer import Trainer
-from training_harness.config import TrainerConfig, QuantScheduleConfig
+from training_harness import QATTrainerV2, TrainerConfigV2, QATScheduleConfigV2
 
-config = TrainerConfig(
+config = TrainerConfigV2(
     experiment_name="my_qat_run",
     epochs=50,
     learning_rate=1e-3,
-    quant_schedule=QuantScheduleConfig(float_warmup_epochs=5, calibration_batches=100),
+    qat=QATScheduleConfigV2(
+        float_warmup_epochs=10,    # QAT starts after this, or earlier on a val_loss plateau
+        plateau_patience=5,
+        annealing_steps=100,       # forward passes for each quantizer to ramp 0 -> 1
+        quantization_start_gap=20, # quantizer N waits N x gap passes before switching on
+    ),
 )
 
-trainer = Trainer(
+trainer = QATTrainerV2(
     config=config,
     model=model,
     optimizer=optimizer,
     train_loader=train_loader,
+    val_loader=val_loader,
     loss_fn=nn.CrossEntropyLoss(),
 )
 

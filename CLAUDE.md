@@ -23,7 +23,7 @@ export QUANT_WORKDIR=/tmp/quanttests
 ### Package Layout
 
 - `quantizers/` — Custom Brevitas quantizers with ONNX export support
-- `training_harness/` — End-to-end QAT pipeline (Trainer, config, schedulers, checkpointing, logging)
+- `training_harness/` — End-to-end QAT pipeline (`QATTrainerV2`, `config_v2`, schedulers, checkpointing, logging)
 - `models/` — Quantized model definitions (CIFAR-10, MobileNetV1/V2, ResNet)
 - `utils/` — ONNX export helpers, workspace management, model introspection
 - `docs/llm/` — Agent-facing docs: conventions, pitfalls, skills (read these before touching unfamiliar subsystems)
@@ -40,9 +40,9 @@ All custom quantizers inherit from `quantizers/base_quantizer.py:BaseQuantizer`.
 
 Each quantizer logs its own lifecycle milestones once, via `logging.getLogger("quantizers")` at `INFO` level: gate opened (gap-staggered start), calibration completed/re-run, annealing started, annealing complete. Useful for explaining after the fact exactly when a given layer started quantizing — enable with `logging.basicConfig(level=logging.INFO)` (or attach a handler to the `"quantizers"` logger specifically) in your own script/notebook; the harness itself only uses `print()` for its own console output, it doesn't configure logging for you.
 
-`Trainer`/`QATTrainerV2` call `QuantizerManager().update_progress(epoch=..., step=..., global_step=...)` once per batch (three cheap attribute writes, not a quantizer walk), so every lifecycle message above is stamped `[epoch=.. step=.. global_step=..]` — pinpointing exactly when a quantizer's gate opened, calibrated, or finished annealing. The fields are also attached via `extra=` (`record.epoch`/`record.step`/`record.global_step`/`record.event`/`record.quant_id`/`record.display_name`) for a custom `Formatter`/`Filter` doing structured (e.g. JSON) logging. Outside the harness (standalone quantizer use), these show as `epoch=None step=None global_step=None` unless you call `update_progress()` yourself. None of this touches the per-forward-call hot path — the log call only ever fires from a one-shot `if not self._log_*:` branch per quantizer per event.
+`QATTrainerV2` calls `QuantizerManager().update_progress(epoch=..., step=..., global_step=...)` once per batch (three cheap attribute writes, not a quantizer walk), so every lifecycle message above is stamped `[epoch=.. step=.. global_step=..]` — pinpointing exactly when a quantizer's gate opened, calibrated, or finished annealing. The fields are also attached via `extra=` (`record.epoch`/`record.step`/`record.global_step`/`record.event`/`record.quant_id`/`record.display_name`) for a custom `Formatter`/`Filter` doing structured (e.g. JSON) logging. Outside the harness (standalone quantizer use), these show as `epoch=None step=None global_step=None` unless you call `update_progress()` yourself. None of this touches the per-forward-call hot path — the log call only ever fires from a one-shot `if not self._log_*:` branch per quantizer per event.
 
-By default a quantizer's `quant_id` is a generic `quant_N` (assigned by `QuantizerManager.register_quantizer()` at construction time, before it knows where in the model it'll end up). `quantizers/naming.py::assign_descriptive_quant_ids(model)` replaces these with location-based names derived from `model.named_modules()` (e.g. `"quant_25"` → `quant_id="features_3_conv_0_weight"`, `display_name="features.3.conv.0 [weight]"`); lifecycle log messages show `display_name` when set. `Trainer.__init__` and `QATTrainerV2`'s `_reset_and_register()` (called at the start of `fit()`/QAT activation) both call this automatically — nothing to do for harness users. It's a pure renaming pass (never touches calibration/annealing state), so it's also safe to call by hand on a model built outside the harness.
+By default a quantizer's `quant_id` is a generic `quant_N` (assigned by `QuantizerManager.register_quantizer()` at construction time, before it knows where in the model it'll end up). `quantizers/naming.py::assign_descriptive_quant_ids(model)` replaces these with location-based names derived from `model.named_modules()` (e.g. `"quant_25"` → `quant_id="features_3_conv_0_weight"`, `display_name="features.3.conv.0 [weight]"`); lifecycle log messages show `display_name` when set. `QATTrainerV2`'s `_reset_and_register()` (called at the start of `fit()`/QAT activation) calls this automatically — nothing to do for harness users. It's a pure renaming pass (never touches calibration/annealing state), so it's also safe to call by hand on a model built outside the harness.
 
 The `"calibration_completed"`/`"calibration_rerun"` and `"annealing_complete"` lifecycle events additionally carry a rich metrics dict as `record.metrics` (from `utils/quantizer_diagnostics.py::compute_metrics`) — LSB/scale, representable vs. observed min/max, exact clipped/unclipped counts, number of unique quantized codes, a histogram of the float input, the exact per-code quantized-value counts, and SQNR/MAE/MSE. Computed once per event (never on the per-forward-call hot path), and only when the quantizer subclass supports it (`_get_diagnostics_params()` returns non-`None`) — `record.metrics` is `None` on `gate_opened`/`annealing_started`, for a subclass that doesn't support it, or during an ONNX export's isolated forward passes. Pass it to `utils.quantizer_diagnostics.plot_quantizer_metrics(record.metrics)` (one axes) or `plot_quantizer_metrics_grid(...)` (linear + log side by side, the same view `diagnostics_dir`'s on-disk plots use) for a ready-made figure — e.g. from a custom `logging.Handler` on the `"quantizers"` logger, to see exactly how a quantizer's error/clipping/coverage changed between calibration and the end of annealing.
 
@@ -55,13 +55,13 @@ Public quantizers (re-exported from `quantizers/__init__.py`):
 
 ### Training Harness Flow
 
-`Trainer` (`training_harness/trainer.py`) runs three phases in sequence:
+`QATTrainerV2` (`training_harness/trainer_v2.py`) runs these phases:
 
-1. **Float warmup** (`float_warmup_epochs`) — full-precision training; quantization gated off
-2. **Calibration** (`calibration_batches`) — PTQ-style pass; `QuantizerManager` sets ranges
-3. **QAT** — fake-quantization enabled; scales learned via STE gradients
+1. **Float warmup** (`float_warmup_epochs`) — `QuantizerManager().disable_quantization()` first, then full-precision training
+2. **QAT activation** — after the warmup budget, or earlier on a `val_loss` plateau: calibration buffers reset, BN frozen, quantizers gated on one by one (`quantization_start_gap`) and annealed 0→1 over `annealing_steps` forward passes
+3. **QAT** — fake quantization on; gradients via the STE
 
-Use `TrainerConfig` + `QuantScheduleConfig` to control timing. Do **not** write manual training loops for QAT — the harness manages `QuantizerManager` state transitions that are easy to get wrong (see pitfall #1 in `docs/llm/pitfalls/training_harness_pitfalls.md`).
+Use `TrainerConfigV2` + `QATScheduleConfigV2` (`training_harness/config_v2.py`) to control timing. Do **not** write manual training loops for QAT — the harness manages `QuantizerManager` state transitions that are easy to get wrong (see pitfall #1 in `docs/llm/pitfalls/training_harness_pitfalls.md`).
 
 ### ONNX Export
 

@@ -202,7 +202,7 @@ This means **every** Brevitas-quantized model (Quantify's fixed-point quantizers
 
 ## 16. A Quantizer Mid-Annealing Exports a `Mul`/`Add` Float-Weight Blend Instead of the Quantized Value
 
-**When this happens:** You export to ONNX a checkpoint saved *during* QAT annealing (`BaseQuantizer.annealing_alpha` between 0 and 1 — the ramp `AnnealingBlendFn` uses to blend `(1-alpha)*float_weight + alpha*quantized_weight` as training progresses; see `quantizers/base_quantizer.py`). `Trainer`'s per-epoch checkpoints can easily land here, especially early in the `[QAT]` phase right after `[qat_sched] Epoch N: fake-quantization ENABLED`.
+**When this happens:** You export to ONNX a checkpoint saved *during* QAT annealing (`BaseQuantizer.annealing_alpha` between 0 and 1 — the ramp `AnnealingBlendFn` uses to blend `(1-alpha)*float_weight + alpha*quantized_weight` as training progresses; see `quantizers/base_quantizer.py`). `QATTrainerV2`'s per-epoch checkpoints can easily land here, especially early in the `[QAT]` phase right after `[qat_sched] Epoch N: fake-quantization ENABLED`.
 
 **The Problem:** `BaseQuantizer.forward()` only emits a clean `quantized`-only graph when `annealing_alpha == 1.0`; for any `alpha < 1.0` it routes through `AnnealingBlendFn.apply(x, quantized, alpha)`. That `autograd.Function` has no `symbolic` method (unlike `FixedPointQuantFn`), so the legacy TorchScript exporter traces straight through its `forward()` arithmetic instead of emitting one clean op. The result: right after the `FixedPointQuant` node, the exported graph gets a `Mul` (by the `alpha` constant) then an `Add` (of a `(1-alpha)*original_float_weight` constant) before the value reaches `Conv`/`Gemm` — i.e. the "quantized" weight actually baked into the ONNX graph is a blend that still contains the raw float weight, not a real quantized value. Verified by forcing `annealing_alpha.fill_(0.5)` on a calibrated quantizer and exporting: the graph shows exactly `FixedPointQuant -> Mul -> Add -> Conv` instead of `FixedPointQuant -> Conv`.
 
@@ -216,7 +216,7 @@ This means **every** Brevitas-quantized model (Quantify's fixed-point quantizers
 
 **How to Prevent It:** For `prefer_high_lsb=True` (activations), `find_optimal_lsb` now uses a **coverage-first** rule instead of maximizing unique-value count: pick the *finest* (lowest) LSB whose representable range still covers the observed `abs_max` without clipping it. This guarantees the full observed range — including outliers — survives calibration, at the cost of coarser resolution on the dense bulk (an explicit, correct tradeoff for activations, where saturating a real outlier corrupts every downstream computation that depends on it, unlike weights where finer resolution of the bulk is usually more valuable). Weight calibration (`prefer_high_lsb=False`) still maximizes unique-value count, ties broken by SAD — but see pitfall #20: it's no longer *unconstrained* while doing so, for the same outlier-clipping reason.
 
-Note this remains a **single-batch** calibration: `search_done` flips to `True` after the very first forward pass that reaches an uncalibrated quantizer (`quantizers/base_quantizer.py`), so whichever batch triggers calibration must itself contain the worst-case outlier for this fix to help — there is no multi-batch min/max aggregation across `calibration_batches` today. If outliers appear only in later calibration batches, they will still be clipped.
+Note this remains a **single-batch** calibration: `search_done` flips to `True` after the very first forward pass that reaches an uncalibrated quantizer (`quantizers/base_quantizer.py`), so whichever batch triggers calibration must itself contain the worst-case outlier for this fix to help — there is no multi-batch min/max aggregation across calibration batches today. If outliers appear only in later calibration batches, they will still be clipped.
 
 ## 18. `disable_quantization()` Used To Compute And Discard a Full Quantized Tensor On Every Forward Call
 
@@ -228,7 +228,7 @@ Note this remains a **single-batch** calibration: `search_done` flips to `True` 
 
 ## 19. Scale-Factor Tracking And ONNX Export Both Used To Silently Bypass `quantization_start_gap`
 
-**When this happens:** QAT is active with a non-trivial `quantization_start_gap` (meant to stagger which quantizer starts quantizing after how many real training forward passes), and either (a) `track_scale_factors=True` (the default in both `TrainerConfig`/`TrainerConfigV2`) runs `collect_scale_factors()` once per epoch, or (b) a checkpoint is saved with its usual ONNX export (`CheckpointManager.save()` → `_export_onnx()`, every epoch by default).
+**When this happens:** QAT is active with a non-trivial `quantization_start_gap` (meant to stagger which quantizer starts quantizing after how many real training forward passes), and either (a) `track_scale_factors=True` (the default in `QATScheduleConfigV2`) runs `collect_scale_factors()` once per epoch, or (b) a checkpoint is saved with its usual ONNX export (`CheckpointManager.save()` → `_export_onnx()`, every epoch by default).
 
 **The Problem:** Two independent code paths ran a *real* forward pass through `BaseQuantizer.forward()` outside the normal, gated training loop, and neither one was isolated from it:
 

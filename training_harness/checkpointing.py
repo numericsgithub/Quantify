@@ -232,7 +232,7 @@ class CheckpointManager:
             optimizer:     Optimizer state to save.
             scheduler:     LR scheduler state to save (optional).
             metrics_dict:  Full metrics snapshot (stored as metadata).
-            config_dict:   TrainerConfig as a plain dict (stored for reference).
+            config_dict:   TrainerConfigV2 as a plain dict (stored for reference).
             extra:         Any extra data to bundle into the checkpoint.
             dummy_input:   Optional tensor for ONNX export. If None, a random
                            tensor of shape (1, 3, 32, 32) is generated.

@@ -1,9 +1,9 @@
 """
-schedulers.py — Learning rate and quantization warmup schedulers.
+schedulers.py — Learning rate scheduler and model-state helpers.
 
 Provides:
   WarmupCosineScheduler  — linear warmup then cosine annealing
-  QATWarmupScheduler     — float warmup → calibration → fake-quant
+  freeze_bn / collect_scale_factors / _set_quant_enabled — used by QATTrainerV2
 """
 
 from __future__ import annotations
@@ -87,107 +87,8 @@ class WarmupCosineScheduler(LRScheduler):
 
 
 # ---------------------------------------------------------------------------
-# QATWarmupScheduler
-# ---------------------------------------------------------------------------
-
-class QATWarmupScheduler:
-    """
-    Controls the quantization state of a Brevitas model across training_harness.
-
-    Training phases
-    ---------------
-    1. **Float warmup**  (epochs 0 … float_warmup_epochs-1)
-       The model trains in full precision. Fake-quantization modules are
-       present but disabled. The model learns good floating-point weights
-       before locking in quantization ranges.
-
-    2. **Calibration**   (triggered at the end of float warmup)
-       A short pass over a few batches sets the initial clipping ranges
-       (via PTQ-style calibration). This gives QAT a much better starting
-       point than random initialisation.
-
-    3. **QAT**           (epochs float_warmup_epochs … end)
-       Fake-quantization is enabled. Scales/zero-points are learned.
-
-    4. **BN freeze**     (optional, epoch freeze_bn_after_epoch)
-       BatchNorm statistics are frozen to stabilise ranges in late QAT.
-
-    Usage::
-
-        qat_sched = QATWarmupScheduler(
-            model=model,
-            float_warmup_epochs=5,
-            freeze_bn_after_epoch=20,
-        )
-
-        for epoch in range(total_epochs):
-            qat_sched.step(epoch)          # update quant state
-            train_one_epoch(model, ...)
-    """
-
-    def __init__(
-        self,
-        model: nn.Module,
-        float_warmup_epochs: int = 5,
-        freeze_bn_after_epoch: Optional[int] = None,
-    ):
-        self.model = model
-        self.float_warmup_epochs = float_warmup_epochs
-        self.freeze_bn_after_epoch = freeze_bn_after_epoch
-
-        self._quant_enabled: bool = False
-        self._bn_frozen: bool = False
-
-        # Start with quant disabled
-        disable_quant(model)
-
-    # ------------------------------------------------------------------
-
-    def step(self, epoch: int) -> None:
-        """Call at the start of each epoch to update the model's quant state."""
-
-        # Phase transition: float → QAT
-        if epoch == self.float_warmup_epochs and not self._quant_enabled:
-            enable_quant(self.model)
-            self._quant_enabled = True
-            print(f"[qat_sched] Epoch {epoch}: fake-quantization ENABLED ✓")
-
-        # BN freeze
-        if (
-            self.freeze_bn_after_epoch is not None
-            and epoch >= self.freeze_bn_after_epoch
-            and not self._bn_frozen
-        ):
-            freeze_bn(self.model)
-            self._bn_frozen = True
-            print(f"[qat_sched] Epoch {epoch}: BatchNorm statistics FROZEN ✓")
-
-    @property
-    def in_float_warmup(self) -> bool:
-        """True while training_harness in full precision (before fake-quant is on)."""
-        return not self._quant_enabled
-
-    @property
-    def in_qat(self) -> bool:
-        """True once fake-quantization has been enabled."""
-        return self._quant_enabled
-
-
-# ---------------------------------------------------------------------------
 # Brevitas model state helpers
 # ------------------------------------------------------------------
-
-def enable_quant(model: nn.Module) -> None:
-    """
-    Enable fake-quantization on all Brevitas quantized modules.
-    """
-    _set_quant_enabled(model, enabled=True)
-
-
-def disable_quant(model: nn.Module) -> None:
-    """Disable fake-quantization on all Brevitas quantized modules."""
-    _set_quant_enabled(model, enabled=False)
-
 
 def _set_quant_enabled(model: nn.Module, enabled: bool) -> None:
     """
@@ -232,7 +133,7 @@ def collect_scale_factors(model: nn.Module) -> dict[str, float]:
     REAL forward pass through our `BaseQuantizer.forward()` on the model's
     live weight tensor, right here, as a side effect of merely reading the
     scale. Since this is called once per epoch as soon as QAT is active
-    (`Trainer`/`QATTrainerV2`, in eval mode, outside the normal gated
+    (`QATTrainerV2`, in eval mode, outside the normal gated
     training loop), it used to make ANY quantizer whose staggered gate
     threshold happens to be 0 (the first one reached in forward order)
     calibrate, open its gate, and start annealing on the very first epoch

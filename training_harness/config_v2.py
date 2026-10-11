@@ -3,8 +3,6 @@ config_v2.py — Configuration dataclasses for the V2 QAT training harness.
 
 V2 implements the correct protocol for the project's custom quantizers:
   disable → float warmup → reset calibration → gradual cascade (gating + annealing)
-
-Reuses CheckpointConfig and LoggingConfig from config.py unchanged.
 """
 
 from __future__ import annotations
@@ -13,7 +11,77 @@ import os
 from dataclasses import dataclass, field
 from typing import Optional
 
-from .config import CheckpointConfig, LoggingConfig
+
+# ---------------------------------------------------------------------------
+# Checkpoint sub-config
+# ---------------------------------------------------------------------------
+
+@dataclass
+class CheckpointConfig:
+    """Controls how and when checkpoints are saved."""
+
+    save_dir: str = "checkpoints"
+    """
+    Subdirectory name for checkpoint files.
+    Resolved to <output_dir>/checkpoints by TrainerConfigV2.
+    """
+
+    top_k: int = 3
+    """Keep only the K best checkpoints by the watched metric."""
+
+    monitor_metric: str = "val_loss"
+    """Metric used to rank checkpoints ('val_loss', 'val_acc', …)."""
+
+    monitor_mode: str = "min"
+    """'min' for loss-style metrics, 'max' for accuracy-style metrics."""
+
+    save_last: bool = True
+    """Always keep a 'last.pt' checkpoint, regardless of top-k."""
+
+    save_every_n_epochs: Optional[int] = None
+    """If set, also save a checkpoint every N epochs unconditionally."""
+
+
+# ---------------------------------------------------------------------------
+# Logging sub-config
+# ---------------------------------------------------------------------------
+
+@dataclass
+class LoggingConfig:
+    """Controls experiment logging behaviour."""
+
+    log_dir: str = "logs"
+    """
+    Subdirectory name for log files (CSV, TensorBoard events, etc.).
+    Resolved to <output_dir>/logs by TrainerConfigV2.
+    """
+
+    use_tensorboard: bool = False
+    """Write TensorBoard event files (requires tensorboard package)."""
+
+    use_wandb: bool = False
+    """Log to Weights & Biases (requires wandb package)."""
+
+    wandb_project: Optional[str] = None
+    """W&B project name (required when use_wandb=True)."""
+
+    wandb_entity: Optional[str] = None
+    """W&B entity / user (optional)."""
+
+    csv_log: bool = True
+    """Write a simple CSV log file — always available, zero dependencies."""
+
+    log_every_n_steps: int = 10
+    """How often (in optimizer steps) to log training_harness loss."""
+
+    plot_dir: str = "plots"
+    """
+    Subdirectory name for saved plot PNGs.
+    Resolved to <output_dir>/plots by TrainerConfigV2.
+    """
+
+    save_plots: bool = True
+    """Save plots to disk after training_harness (and optionally at checkpoints)."""
 
 
 @dataclass
