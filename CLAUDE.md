@@ -18,8 +18,6 @@ pytest tests/test_fixedpoint_per_tensor.py -v
 export QUANT_WORKDIR=/tmp/quanttests
 ```
 
-The `scripts/test.sh` wrapper sets `QUANT_WORKDIR` and reinstalls before running pytest — use it when the environment may be stale.
-
 ## Architecture
 
 ### Package Layout

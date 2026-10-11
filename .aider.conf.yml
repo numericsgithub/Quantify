@@ -1,6 +1,0 @@
-read:
-  - docs/llm/CONVENTIONS.md
-  - docs/llm/skills/onnx-brevitas-custom-ops.md
-  - docs/llm/pitfalls/brevitas_pitfalls.md
-  - docs/llm/BREVITAS_DOCUMENTATION.md
-  - docs/llm/BREVITAS_QUANTIZERS_DOCUMENTATION.md

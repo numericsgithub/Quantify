@@ -9,6 +9,8 @@ Welcome to the documentation for the Brevitas QAT Framework.
 - [Contributing & Conventions](contributing.md)
 
 ## Developer Guides
-- [ONNX Export & Custom Ops](developer/onnx-export.md)
-- [Brevitas Pitfalls & Best Practices](developer/brevitas-pitfalls.md)
-- [Conventions](developer/conventions.md)
+- [ONNX Export & Custom Ops](llm/ONNX_CUSTOM_NODE_EXPORT.md)
+- [Brevitas Pitfalls & Best Practices](llm/pitfalls/brevitas_pitfalls.md)
+- [Training Harness Pitfalls](llm/pitfalls/training_harness_pitfalls.md)
+- [Conventions](llm/CONVENTIONS.md)
+- [Importance Analysis & Viewer](llm/importance_analysis.md)

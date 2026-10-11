@@ -25,4 +25,4 @@ layer = qnn.QuantConv2d(
 )
 ```
 
-For advanced quantizer development and ONNX export patterns, see [ONNX Export & Custom Ops](developer/onnx-export.md).
+For advanced quantizer development and ONNX export patterns, see [ONNX Export & Custom Ops](llm/ONNX_CUSTOM_NODE_EXPORT.md).

@@ -94,7 +94,7 @@ class QATTrainerV2:
         self.device = torch.device(config.resolve_device())
 
         # ── Timm Mixup / CutMix ────────────────────────────────────────────
-        # DALILoader already squeezes labels to [B] long, so no squeeze needed.
+        # Labels are expected as [B] long (squeeze them in the loader if needed).
         self._mixup_fn = None
         if config.mixup > 0 or config.cutmix > 0:
             from timm.data import Mixup as TimmMixup

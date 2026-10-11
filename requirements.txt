@@ -9,7 +9,6 @@ inflect
 Pillow
 tqdm
 timm
-nvidia-dali-cuda120
 datasets==4.8.4
 matplotlib
 datasets
