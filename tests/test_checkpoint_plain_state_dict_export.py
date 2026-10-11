@@ -220,7 +220,7 @@ class _PlainConvBNNet(nn.Module):
 class _QuantConvBNNet(nn.Module):
     """Same architecture as _PlainConvBNNet, but conv1/conv2 are Brevitas
     QuantConv2d with Quantify's fixed-point weight quantizer -- mirrors
-    examples/basics/importance_mnist.py::ImportanceMNISTNet."""
+    the former examples/basics/importance_mnist.py::ImportanceMNISTNet."""
 
     def __init__(self):
         super().__init__()

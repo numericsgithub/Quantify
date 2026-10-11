@@ -16,11 +16,8 @@ pip install -e ".[dev]"
 ├── models/              # PyTorch model definitions (YOLOv8, CIFAR-10, MobileNet)
 ├── quantizers/          # Custom Brevitas quantizers (Fixed-Point, Coefficient, SiLU)
 ├── training_harness/    # QAT training loop, calibration, checkpointing, logging
-├── examples/            # Training scripts (MNIST, ImageNet, YOLOv8)
-│   ├── basics/          # Simple, self-contained scripts
-│   ├── training/        # Full-scale harness pipelines
-│   └── yolo/            # YOLOv8 integration examples
-├── scripts/             # Utility/debug scripts
+├── importance/          # Importance analysis + interactive graph viewer
+├── scripts/             # Utility/debug/demo scripts
 ├── tests/               # Pytest suite
 ├── utils/               # Shared utilities (ONNX export, workspace management)
 └── docs/                # Project documentation
@@ -29,19 +26,14 @@ pip install -e ".[dev]"
 
 ## 🚀 Quick Start
 
-### Train a Quantized Model (MNIST Example)
+### Train a small model and explore its importance
 ```bash
-python examples/basics/simple_mnist_qat.py
+python scripts/train_residual_importance_demo.py --kernel-lasso 0.3 --filter-lasso 0.4
+python -m importance.serve runs/imp_residual_mnist
 ```
 
-### Train YOLOv8n (PAN-Only Variant) on COCO
-```bash
-python examples/yolo/train_custom_yolo.py \
-    --data /path/to/coco.yaml \
-    --epochs 300 \
-    --batch 64 \
-    --device cuda
-```
+For QAT, use the training harness below. The old example scripts (MNIST,
+CIFAR-10, ImageNet, YOLOv8) are archived on the `old_examples` branch.
 
 ## 🛠 Training Harness
 

@@ -3,7 +3,7 @@ Tests for QATTrainerV2._activate_qat() with preserve_calibrated_quantizers.
 
 Verifies that quantizers already calibrated (search_done=True) before QAT
 activates — the situation after loading a PTQ checkpoint produced by
-examples/find_perfect_lsbs_imagenet_ptq.py — keep their search_result_lsb
+examples/find_perfect_lsbs_imagenet_ptq.py (old_examples branch) — keep their search_result_lsb
 and jump straight to annealing_alpha=1.0 instead of being wiped back to
 search_done=False / annealing_alpha=0.0 like a fresh, never-calibrated
 quantizer. Quantizers that are NOT yet calibrated must still go through

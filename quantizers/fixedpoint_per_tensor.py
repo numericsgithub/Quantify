@@ -497,7 +497,7 @@ class FixedPointPerTensorQuantizer(BaseQuantizer):
           "single_direction_clip": slope 0 outside the range only for
             gradients pushing the value further out; gradients pointing back
             into the range pass -- no drift and no getting stuck.
-        See examples/ste_clipping_demo.py for all three side by side. The
+        See examples/ste_clipping_demo.py (old_examples branch) for all three side by side. The
         setting and the masking mechanism live in BaseQuantizer; this class
         supplies the fixed-point range via _in_range_mask()/_clip_side().
         Only affects the live training/inference path; the ONNX-export path

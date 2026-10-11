@@ -41,7 +41,7 @@ The pattern wraps a layer's forward pass in a `torch.autograd.Function` to inter
 - **Dynamic Axes & Dummy Inputs**: Pass `dynamic_axes` to `torch.onnx.export()` if batch/height/width vary at runtime. Ensure dummy inputs match expected runtime dimensions and data types.
 
 ## 5. Reference
-- **Example File**: `examples/export_custom_onnx_nodes.py`
+- **Example File**: `examples/export_custom_onnx_nodes.py` (archived on the `old_examples` branch)
 - **PyTorch ONNX Export Documentation**: https://docs.pytorch.org/docs/stable/onnx_export.html
 - **PyTorch ONNX Control Flow Tutorial**: https://pytorch.org/tutorials/beginner/onnx/export_control_flow_model_to_onnx_tutorial.html
 - **Dependencies**: The example imports `brevitas.nn as qnn` and `FixedPointPerTensorWeightQuant`, but relies on standard `torch.nn.functional` for the actual computation. No additional Brevitas-specific export hooks are used.

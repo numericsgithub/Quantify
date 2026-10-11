@@ -19,7 +19,7 @@ not from inside a quantizer's own `__init__`.
 
 Consolidates what used to be two near-identical private implementations
 (`training_harness/trainer_v2.py::_make_quant_id` +
-`examples/find_perfect_lsbs_imagenet_ptq.py::_assign_descriptive_ids`) into
+`examples/find_perfect_lsbs_imagenet_ptq.py::_assign_descriptive_ids`, old_examples branch) into
 one shared, public utility both now delegate to.
 """
 

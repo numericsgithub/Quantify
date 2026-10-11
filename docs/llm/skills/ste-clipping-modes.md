@@ -39,7 +39,7 @@ stuck: activations are recomputed every step, and PyTorch/TF weight ranges
 come from a min/max observer of the weights themselves (or are learned, as in
 LSQ/PACT). Quantify's ranges are fixed by calibration and weights may be
 deliberately clipped (up to 15% per layer), so a weight that crosses the limit
-under `"clip"` never comes back. `examples/ste_clipping_demo.py` shows all
+under `"clip"` never comes back. `examples/ste_clipping_demo.py` (archived on the `old_examples` branch) shows all
 three modes step by step on a single 10-bit weight.
 
 ## Adding a new quantizer

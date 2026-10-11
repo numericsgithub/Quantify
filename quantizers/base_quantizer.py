@@ -86,7 +86,7 @@ class SingleDirectionClippedSTEFn(torch.autograd.Function):
     stuck: once the loss wants it back inside, it gets the gradient again.
     For a persistent parameter (a weight) with a fixed quantizer range, plain
     clipped STE would otherwise freeze it forever -- see
-    examples/ste_clipping_demo.py.
+    examples/ste_clipping_demo.py (old_examples branch).
 
     `side` is a tensor of -1/0/+1 (in the quantized tensor's dtype) computed
     in BaseQuantizer.forward from the ORIGINAL float input via `_clip_side()`.
@@ -360,7 +360,7 @@ class BaseQuantizer(nn.Module, ABC):
         `q.annealing_alpha.data.fill_(...)` throughout this codebase --
         `manager.py` used to, several tests still do, and so do
         `examples/find_perfect_lsbs_imagenet_ptq.py` /
-        `examples/train_imagenet_qat.py` -- so a version-checked cache would
+        `examples/train_imagenet_qat.py` on the old_examples branch -- so a version-checked cache would
         silently go stale against any of those. `search_done` and the
         subclass search-result buffers are, empirically, never written via
         `.data.fill_()` anywhere in this codebase, so their caches are safe.

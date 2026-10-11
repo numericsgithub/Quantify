@@ -128,7 +128,7 @@ def test_forward_values_identical_across_modes():
 
 
 # ---------------------------------------------------------------------------
-# The training story from examples/ste_clipping_demo.py, as assertions
+# The training story from examples/ste_clipping_demo.py (old_examples branch), as assertions
 # ---------------------------------------------------------------------------
 
 def _train_up_then_down(mode, steps_up=30, steps_down=60, lr=0.02):

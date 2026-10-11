@@ -73,7 +73,7 @@ class QATScheduleConfigV2:
     """
     If True, quantizers that are already calibrated (search_done=True) when
     QAT activates — e.g. because the model was initialized from a PTQ
-    checkpoint produced by examples/find_perfect_lsbs_imagenet_ptq.py — keep
+    checkpoint produced by examples/find_perfect_lsbs_imagenet_ptq.py (old_examples branch) — keep
     their existing search_done/search_result_lsb and jump straight to
     annealing_alpha=1.0 instead of being reset to search_done=False and
     annealing_alpha=0.0 like a freshly-built, never-calibrated quantizer.

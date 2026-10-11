@@ -25,4 +25,4 @@ config = TrainerConfig(
 - `ExperimentLogger`: Routes metrics to CSV, TensorBoard, and W&B.
 - `QATWarmupScheduler`: Manages phase transitions (float → calibration → QAT).
 
-For usage examples, see the [README](../README.md) or `examples/` directory.
+For usage, see the [README](../README.md). (The old example scripts are archived on the `old_examples` branch.)

@@ -28,7 +28,6 @@ The `scripts/test.sh` wrapper sets `QUANT_WORKDIR` and reinstalls before running
 - `training_harness/` — End-to-end QAT pipeline (Trainer, config, schedulers, checkpointing, logging)
 - `models/` — Quantized model definitions (CIFAR-10, MobileNetV2, YOLOv8 variants)
 - `utils/` — ONNX export helpers, workspace management, model introspection
-- `examples/` — Full training scripts using the harness
 - `docs/llm/` — Agent-facing docs: conventions, pitfalls, skills (read these before touching unfamiliar subsystems)
 
 ### Quantizer Hierarchy
