@@ -25,7 +25,6 @@ from quantizers.base_quantizer import BaseQuantizer, STE_MODES, normalize_ste_mo
 from quantizers.coefficient_per_tensor_weights import CoefficientPerTensorWeightQuantizer
 from quantizers.fixedpoint_per_tensor import FixedPointPerTensorQuantizer
 from quantizers.manager import QuantizerManager
-from quantizers.silu_quant import SiLUTensorQuant
 
 BIT_WIDTH = 10
 LSB = -7
@@ -210,23 +209,16 @@ def _coefficient_quantizer(mode, tmp_path):
     return CoefficientPerTensorWeightQuantizer(filepath=str(path), bit_width=3, clipped_ste=mode)
 
 
-@pytest.mark.parametrize("name", ["coefficient", "silu"])
 @pytest.mark.parametrize("g, expected", [(+1.0, 1.0), (-1.0, 0.0)])
-def test_other_quantizers_single_direction(name, g, expected, tmp_path):
+def test_coefficient_quantizer_single_direction(g, expected, tmp_path):
     """Above-range input: the gradient passes only if it points back inward."""
-    if name == "coefficient":
-        q = _coefficient_quantizer("single_direction_clip", tmp_path)
-    else:
-        q = SiLUTensorQuant(bit_width=3, clipped_ste="single_direction_clip")
+    q = _coefficient_quantizer("single_direction_clip", tmp_path)
     q.train()
     with torch.no_grad():
         q(torch.tensor([0.0, 0.5, 1.0, 1.5, 2.0, 2.5, 3.0, 3.5]))  # calibrate
     assert q.search_done_value
-    w = torch.tensor(10.0, requires_grad=True)  # far above both quantizers' range
+    w = torch.tensor(10.0, requires_grad=True)  # far above the quantizer's range
     (q(w)[0] * g).backward()
-    if name == "silu":
-        expected *= torch.sigmoid(w) * (1 + w * (1 - torch.sigmoid(w)))  # silu'(10)
-        expected = expected.item()
     assert w.grad.item() == pytest.approx(expected)
 
 

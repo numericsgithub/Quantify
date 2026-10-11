@@ -11,5 +11,4 @@ Welcome to the documentation for the Brevitas QAT Framework.
 ## Developer Guides
 - [ONNX Export & Custom Ops](developer/onnx-export.md)
 - [Brevitas Pitfalls & Best Practices](developer/brevitas-pitfalls.md)
-- [Ultralytics Integration](developer/ultralytics-integration.md)
 - [Conventions](developer/conventions.md)

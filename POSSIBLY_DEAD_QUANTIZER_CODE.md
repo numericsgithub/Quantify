@@ -51,15 +51,14 @@ calibration math; `FixedPointQuantFn` is only for the real forward/ONNX path."
 
 **Why it looks suspicious**:
 - It exists only as a thin wrapper around the Testing class (see item 1).
-- It is called in two places:
-  - `find_optimal_lsb()` (line 197) — calibration loop.
-  - `SiLUTensorQuant._quantize()` (line 100) — non-ONNX inference path.
+- It is called from `find_optimal_lsb()` (line 197) — calibration loop.
+  (Its former second caller, `SiLUTensorQuant._quantize()`, was removed
+  together with `quantizers/silu_quant.py`.)
 - If the Testing class is removed (item 1), this function should be refactored
   to call `quantize_fixed_point_with_integers()[0]` directly, or the callers
   should be updated to call `quantize_fixed_point_with_integers()` directly.
 
-**How to confirm**: See item 1. After fixing item 1, also update the
-`SiLUTensorQuant._quantize()` call site if necessary.
+**How to confirm**: See item 1.
 
 ---
 
@@ -238,7 +237,7 @@ quantizers. This is the "turn full quantization on immediately" path.
 - `ROUND_TO_NEAREST_EVEN` and `ROUND` are subtly different (banker's vs. half-up)
   and it is unclear whether this distinction is intentional.
 - `FixedPointPerTensorWeightQuant` uses `ROUND`, `FixedPointPerTensorActivationQuant`
-  uses `FLOOR`, `QuantSiLUActivationQuant` uses `ROUND_TO_NEAREST_EVEN`. The
+  uses `FLOOR` (the removed `QuantSiLUActivationQuant` used `ROUND_TO_NEAREST_EVEN`). The
   inconsistency may be intentional (different error properties for each role) or
   may be an oversight.
 - This is not dead code, but one of the two `ROUND*` modes may be redundant.

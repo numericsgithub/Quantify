@@ -25,3 +25,20 @@ def dummy_classification_input(device):
 def dummy_linear_input(device):
     """Return a dummy input for linear/fully-connected layers."""
     return torch.randn(8, 64, device=device)
+
+
+@pytest.fixture(autouse=True)
+def _reset_quantizer_manager_switches():
+    """QuantizerManager is a process-wide singleton, so a test that disables
+    quantization or sets a start gap / forced recalibration would otherwise
+    leak that into whatever runs next on the same pytest-xdist worker (seen
+    as order-dependent failures in test_quant_activations.py). Reset just the
+    global switches -- not the quantizer registry, which module-scoped
+    fixtures may rely on."""
+    from quantizers.manager import QuantizerManager
+
+    mgr = QuantizerManager()
+    mgr.quantization_globally_disabled = False
+    mgr.quantization_start_gap = 0
+    mgr.force_recalibration = False
+    yield

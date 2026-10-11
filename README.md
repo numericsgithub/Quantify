@@ -13,7 +13,7 @@ pip install -e ".[dev]"
 ## 📂 Project Structure
 
 ```
-├── models/              # PyTorch model definitions (YOLOv8, CIFAR-10, MobileNet)
+├── models/              # PyTorch model definitions (CIFAR-10, MobileNet, ResNet)
 ├── quantizers/          # Custom Brevitas quantizers (Fixed-Point, Coefficient, SiLU)
 ├── training_harness/    # QAT training loop, calibration, checkpointing, logging
 ├── importance/          # Importance analysis + interactive graph viewer
@@ -33,7 +33,8 @@ python -m importance.serve runs/imp_residual_mnist
 ```
 
 For QAT, use the training harness below. The old example scripts (MNIST,
-CIFAR-10, ImageNet, YOLOv8) are archived on the `old_examples` branch.
+CIFAR-10, ImageNet, YOLOv8 -- plus the YOLOv8 models and their Ultralytics
+trainer) are archived on the `old_examples` branch.
 
 ## 🛠 Training Harness
 
@@ -116,7 +117,6 @@ on-disk format, and known v1 limitations.
 
 - **Conventions**: See `docs/llm/CONVENTIONS.md` for dependency and skill management rules.
 - **Pitfalls**: Check `docs/llm/pitfalls/brevitas_pitfalls.md` for common Brevitas/ONNX export gotchas.
-- **Ultralytics Integration**: `docs/llm/ULTRALYTICS_DOCUMENTATION.md` covers YOLOv8/QAT integration patterns.
 
 ## 🧪 Testing
 

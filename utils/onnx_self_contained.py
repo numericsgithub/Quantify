@@ -3,7 +3,7 @@ Make exported Quantify ONNX models self-contained and executable with
 vanilla ONNX Runtime -- no custom op registration required.
 
 The custom `Quantify::*` nodes this project emits (`FixedPointQuant`,
-`QuantSiLU`, `Relu6`, `SiLU`, `GELU`, `CoefficientQuant`) exist purely to
+`Relu6`, `SiLU`, `GELU`, `CoefficientQuant`) exist purely to
 preserve exact quantization semantics in the exported graph for inspection
 (see pitfall #8 in docs/llm/pitfalls/brevitas_pitfalls.md -- "custom nodes
 are for graph inspection, not ORT inference"). This module closes that gap
@@ -21,8 +21,8 @@ attribute-reference mechanism (`AttributeProto.ref_attr_name`): a `Constant`
 node inside the function body declares `ref_attr_name="scale"`, and at each
 call site that constant takes the VALUE of that specific node's own `scale`
 attribute. This is why several symbolic() methods
-(quantizers/fixedpoint_per_tensor.py, quantizers/silu_quant.py,
-quantizers/activations.py, quantizers/coefficient_per_tensor_weights.py)
+(quantizers/fixedpoint_per_tensor.py, quantizers/activations.py,
+quantizers/coefficient_per_tensor_weights.py)
 emit a few redundant, precomputed attributes (`integer_min_f`,
 `integer_max_f`, `rounding_mode_code_i`, `approximate_code_i`, `scale_f` on
 CoefficientQuant) alongside their existing human-readable ones -- the
@@ -137,38 +137,6 @@ def _build_fixed_point_quant_function(op_type: str = "FixedPointQuant") -> onnx.
 
 
 # ---------------------------------------------------------------------------
-# Quantify::QuantSiLU  (SiLU, fused with the same fixed-point quantize math)
-# ---------------------------------------------------------------------------
-
-def _build_quant_silu_function() -> onnx.FunctionProto:
-    """y = FixedPointQuant(x * Sigmoid(x))  -- same math as
-    _build_fixed_point_quant_function, applied to SiLU(x) instead of x."""
-    fp = _build_fixed_point_quant_function(op_type="QuantSiLU")
-    silu_nodes = [
-        helper.make_node("Sigmoid", ["x"], ["_sig"]),
-        helper.make_node("Mul", ["x", "_sig"], ["_silu_x"]),
-    ]
-    # Re-point the fixed-point body's "x" input to the computed SiLU value.
-    renamed = []
-    for n in fp.node:
-        n2 = onnx.NodeProto()
-        n2.CopyFrom(n)
-        for i, inp in enumerate(n2.input):
-            if inp == "x":
-                n2.input[i] = "_silu_x"
-        renamed.append(n2)
-    return helper.make_function(
-        domain=DOMAIN,
-        fname="QuantSiLU",
-        inputs=["x"],
-        outputs=["y"],
-        nodes=silu_nodes + renamed,
-        opset_imports=_opset(),
-        attributes=list(fp.attribute),
-    )
-
-
-# ---------------------------------------------------------------------------
 # Quantify::Relu6
 # ---------------------------------------------------------------------------
 
@@ -277,7 +245,6 @@ def _build_coefficient_quant_function() -> onnx.FunctionProto:
 
 _BUILDERS = {
     "FixedPointQuant": lambda: _build_fixed_point_quant_function(),
-    "QuantSiLU": _build_quant_silu_function,
     "Relu6": _build_relu6_function,
     "SiLU": _build_silu_function,
     "GELU": _build_gelu_function,

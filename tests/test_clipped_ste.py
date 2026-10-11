@@ -272,15 +272,6 @@ def _coefficient_quantizer_factory():
     return factory
 
 
-def _silu_quantizer_factory():
-    from quantizers.silu_quant import SiLUTensorQuant
-
-    def factory(clipped_ste):
-        return SiLUTensorQuant(bit_width=BIT_WIDTH, clipped_ste=clipped_ste)
-
-    return factory
-
-
 IN_RANGE_SMALL_W = 0.5  # on both grids (coeff set + silu grid) -> safely in-range
 
 
@@ -305,7 +296,6 @@ def _calibrate_and_measure(q, w_value):
     "name, factory",
     [
         ("coefficient", _coefficient_quantizer_factory()),
-        ("silu", _silu_quantizer_factory()),
     ],
 )
 def test_other_quantizers_honor_clipped_ste(name, factory):

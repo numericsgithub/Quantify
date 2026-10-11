@@ -26,7 +26,7 @@ The `scripts/test.sh` wrapper sets `QUANT_WORKDIR` and reinstalls before running
 
 - `quantizers/` — Custom Brevitas quantizers with ONNX export support
 - `training_harness/` — End-to-end QAT pipeline (Trainer, config, schedulers, checkpointing, logging)
-- `models/` — Quantized model definitions (CIFAR-10, MobileNetV2, YOLOv8 variants)
+- `models/` — Quantized model definitions (CIFAR-10, MobileNetV1/V2, ResNet)
 - `utils/` — ONNX export helpers, workspace management, model introspection
 - `docs/llm/` — Agent-facing docs: conventions, pitfalls, skills (read these before touching unfamiliar subsystems)
 
@@ -53,7 +53,7 @@ The `"calibration_completed"`/`"calibration_rerun"` and `"annealing_complete"` l
 Public quantizers (re-exported from `quantizers/__init__.py`):
 - `FixedPointPerTensorWeightQuant` / `FixedPointPerTensorActivationQuant` / `FixedPointPerTensorBiasQuant`
 - `CoefficientPerTensorWeightQuant`
-- `QuantSiLUActivationQuant` (used in YOLO necks)
+- The quantized activation modules from `quantizers/activations.py` (`QuantReLU` … `QuantSoftmax`, see above)
 
 ### Training Harness Flow
 
@@ -70,7 +70,7 @@ Use `TrainerConfig` + `QuantScheduleConfig` to control timing. Do **not** write 
 `utils/onnx_export.py:export_onnx_with_io` is the canonical export path. Key constraints:
 - Always pass `dynamo=False` — custom quantizers use `torch.autograd.Function.symbolic`, which the dynamo exporter does not support (pitfall #3 in `docs/llm/pitfalls/brevitas_pitfalls.md`).
 - Call `reset_quantizer_states()` before every export to flush FIFO deque capture state.
-- Custom ONNX nodes land in the `Quantify` domain (e.g., `Quantify::FixedPointQuant`), for graph inspection. They are ALSO directly executable in plain `onnxruntime.InferenceSession` — no custom op registration — because `export_onnx_with_io` embeds an `onnx.FunctionProto` for each `Quantify::*` node actually present (`self_contained=True`, the default), implementing its exact math with only standard ONNX ops (`utils/onnx_self_contained.py`; pitfall #22 in `docs/llm/pitfalls/brevitas_pitfalls.md`). `FixedPointQuant`/`QuantSiLU` nodes also carry `min_value`/`max_value` attributes — the actual representable range in the tensor's own units (`integer_min/max * 2**lsb`) — purely for human readability when inspecting the graph (e.g. in Netron); the embedded function body clips on the integer domain via the separate `integer_min`/`integer_max` attributes instead.
+- Custom ONNX nodes land in the `Quantify` domain (e.g., `Quantify::FixedPointQuant`), for graph inspection. They are ALSO directly executable in plain `onnxruntime.InferenceSession` — no custom op registration — because `export_onnx_with_io` embeds an `onnx.FunctionProto` for each `Quantify::*` node actually present (`self_contained=True`, the default), implementing its exact math with only standard ONNX ops (`utils/onnx_self_contained.py`; pitfall #22 in `docs/llm/pitfalls/brevitas_pitfalls.md`). `FixedPointQuant` nodes also carry `min_value`/`max_value` attributes — the actual representable range in the tensor's own units (`integer_min/max * 2**lsb`) — purely for human readability when inspecting the graph (e.g. in Netron); the embedded function body clips on the integer domain via the separate `integer_min`/`integer_max` attributes instead.
 - `freeze_annealing=True` (default) is required if a checkpoint might be mid-QAT-anneal, or the exported graph leaks a `Mul`/`Add` float-weight blend after the quantize node (pitfall #16 in `docs/llm/pitfalls/brevitas_pitfalls.md`).
 
 ### Checkpoints

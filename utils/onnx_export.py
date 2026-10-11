@@ -35,12 +35,6 @@ def reset_quantizer_states() -> None:
         pass
 
     try:
-        from quantizers.silu_quant import SiLUQuantFn
-        SiLUQuantFn.reset_capture_state()
-    except (ImportError, AttributeError):
-        pass
-
-    try:
         from quantizers.coefficient_per_tensor_weights import CoefficientQuantFn
         CoefficientQuantFn.reset_capture_state()
     except (ImportError, AttributeError):

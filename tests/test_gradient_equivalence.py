@@ -51,7 +51,6 @@ from quantizers import (
     FixedPointPerTensorActivationQuant,
     FixedPointPerTensorBiasQuant,
     CoefficientPerTensorWeightQuant,
-    QuantSiLUActivationQuant,
     QuantReLU,
     QuantReLU6,
     QuantSigmoid,
@@ -62,7 +61,6 @@ from quantizers import (
     QuantSoftmax,
 )
 from quantizers.base_quantizer import BaseQuantizer
-from quantizers.silu_quant import SiLUTensorQuant
 from quantizers.manager import QuantizerManager
 
 DTYPE = torch.float64
@@ -92,22 +90,11 @@ COEFF_FILE = __file__.rsplit("/", 1)[0] + "/dummy_coeffs.txt"
 FLOAT32_ARCHS = {"linear_coeff_weights"}
 
 KNOWN_BUGS = {
-    "fused_silu_passthrough": (
-        "SiLUTensorQuant applies SiLU inside _quantize() only, so the passthrough "
-        "(quantization disabled/gated off) returns x instead of silu(x) and "
-        "AnnealingBlendFn blends x (not silu(x)) with the quantized silu(x), "
-        "with a slope-1 backward that skips silu'(x)."),
     "coeff_float64": (
         "CoefficientPerTensorWeightQuantizer returns float32 weights for a float64 "
         "model (coefficient sets are float32 tensors and never cast to x.dtype), "
         "so a float64 QuantLinear fails with a Double/Float matmul error."),
 }
-
-
-class _SignedQuantSiLUActivationQuant(QuantSiLUActivationQuant):
-    # The default (signed=False) clips SiLU's negative lobe to 0, which would
-    # change values by design; signed keeps the quantizer a no-op here.
-    signed = True
 
 
 class _DummyCoeffWeightQuant(CoefficientPerTensorWeightQuant):
@@ -137,8 +124,6 @@ ACTIVATIONS = {
     "gelu_tanh": (lambda: QuantGELU(approximate="tanh", bit_width=ACT_BW),
                   lambda: nn.GELU(approximate="tanh"), False),
     "softmax": (lambda: QuantSoftmax(dim=1, bit_width=ACT_BW), lambda: nn.Softmax(dim=1), False),
-    "fused_silu_act_quant": (lambda: _qid(act_quant=_SignedQuantSiLUActivationQuant),
-                             lambda: nn.SiLU(), False),
 }
 
 # ---------------------------------------------------------------------------
@@ -341,14 +326,11 @@ def _quantizers(model):
 
 def _record_quantizer_io(model):
     """Forward hooks recording (expected output, output, scale) of every
-    quantizer. A no-op quantizer returns its input unchanged -- except the
-    fused SiLU quantizer, which applies SiLU itself, so returns silu(input)."""
+    quantizer. A no-op quantizer returns its input unchanged."""
     records, handles = {}, []
     for name, q in _quantizers(model).items():
         def hook(mod, inp, out, name=name):
             expected = inp[0].detach()
-            if isinstance(mod, SiLUTensorQuant):
-                expected = F.silu(expected)
             records[name] = (expected, out[0].detach(), out[1].detach())
         handles.append(q.register_forward_hook(hook))
     return records, handles
@@ -357,8 +339,7 @@ def _record_quantizer_io(model):
 def _is_downstream_of_smooth_act(qname):
     # The smooth activation's output quantizer and the model-output quantizer.
     # (QuantIdentity-based activations name it output_quant, Brevitas'
-    # QuantSigmoid/QuantTanh name it act_quant; the fused SiLU quantizes its
-    # own output via act_quant.)
+    # QuantSigmoid/QuantTanh name it act_quant.)
     return qname.startswith(("act.output_quant", "act.act_quant", "out."))
 
 
@@ -461,8 +442,6 @@ def reset_manager():
 def _known_bug_marks(act_name, state="quantizing"):
     """xfail markers for known deviations."""
     marks = []
-    if act_name == "fused_silu_act_quant" and state != "quantizing":
-        marks.append(pytest.mark.xfail(reason=KNOWN_BUGS["fused_silu_passthrough"], strict=True))
     return marks
 
 

@@ -43,15 +43,8 @@ TorchScript exporter, so no extra shimming is needed. ReLU6, SiLU and GELU do
 NOT lower to a single node natively (PyTorch decomposes them into
 Clip/Constant, Sigmoid/Mul, and Erf-based chains respectively) -- these three
 use a `torch.autograd.Function` with a custom `symbolic()` (same pattern as
-`quantizers/fixedpoint_per_tensor.py`/`quantizers/silu_quant.py`) to force a
-single `Quantify::<Name>` node.
-
-Note: this is a different, decoupled pattern from `quantizers/silu_quant.py`'s
-`QuantSiLUActivationQuant`, which fuses the SiLU nonlinearity and the
-fixed-point quantize step into a single `Quantify::QuantSiLU` node for use as
-a Brevitas `act_quant` injector directly on `QuantConv2d`/`QuantLinear`. The
-`QuantSiLU` module here is a standalone activation module (like `nn.SiLU`)
-with its own separate quantizer, matching the other seven activations.
+`quantizers/fixedpoint_per_tensor.py`) to force a single `Quantify::<Name>`
+node.
 """
 
 from typing import Optional
@@ -431,9 +424,6 @@ class QuantSiLU(nn.Module):
     (down to about -0.278), so `input_bit_width == bit_width` (no
     asymmetry). SiLU grows ~linearly for large positive input (no upper
     saturation point), so its input is never range-capped.
-
-    See the module docstring for how this differs from
-    `quantizers.silu_quant.QuantSiLUActivationQuant`.
     """
 
     def __init__(
