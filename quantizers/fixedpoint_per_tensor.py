@@ -582,6 +582,14 @@ class FixedPointPerTensorQuantizer(BaseQuantizer):
         quantizer of ReLU/ReLU6 (`quantizers/activations.py`), whose output
         values already lie on the input quantizer's grid. `None` (default)
         = no floor.
+    constant_ok : bool
+        Treat a calibration that sees a single unique quantized value as
+        successful. By default a one-valued tensor leaves `search_done` False
+        (a degenerate "nothing to calibrate" signal), so the quantizer
+        recalibrates on every forward and an active one in eval mode raises.
+        That is wrong for tensors that are legitimately constant, like the
+        frozen all-equal weights and zero bias of `QuantAvgPool*d`
+        (`quantizers/layers.py`). Default False.
     """
 
     def __init__(
@@ -594,6 +602,7 @@ class FixedPointPerTensorQuantizer(BaseQuantizer):
         clipped_ste: Union[bool, str] = False,
         max_abs_value: Optional[float] = None,
         lsb_floor_link: Optional["LsbFloorLink"] = None,
+        constant_ok: bool = False,
     ):
         # clipped_ste is stored by BaseQuantizer (shared by all quantizers).
         super().__init__(bit_width=bit_width, clipped_ste=clipped_ste)
@@ -605,6 +614,7 @@ class FixedPointPerTensorQuantizer(BaseQuantizer):
         # Plain (non-Module) attribute on purpose: the link points back at the
         # owning activation module, which must not become a submodule here.
         self.lsb_floor_link = lsb_floor_link
+        self.constant_ok = constant_ok
 
         # Register search results as buffers to ensure they are serialized in state_dict
         self.register_buffer('search_result_is_signed', torch.tensor(signed, dtype=torch.bool))
@@ -665,7 +675,7 @@ class FixedPointPerTensorQuantizer(BaseQuantizer):
         self._search_result_is_signed_version = self.search_result_is_signed._version
         self._search_result_lsb_cached = int(params['lsb'])
         self._search_result_lsb_version = self.search_result_lsb._version
-        self.set_search_done(params['num_unique'] > 1)
+        self.set_search_done(params['num_unique'] > 1 or self.constant_ok)
 
     def _load_calibration(self) -> Any:
         """Load calibration results, reading the cache when the buffers

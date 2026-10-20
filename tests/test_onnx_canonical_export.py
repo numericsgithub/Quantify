@@ -41,8 +41,6 @@ from quantizers import (
     QuantTanh,
 )
 from quantizers.layers import (
-    AvgPool1d,
-    AvgPool2d,
     MaxPool1d,
     MaxPool2d,
     QuantConv1d,
@@ -267,7 +265,7 @@ class TestSamePadding:
         oracle = _ort_same_upper_conv(x, w, conv.bias.detach(), conv.stride, conv.dilation)
         assert np.allclose(out, oracle, atol=1e-5)
 
-    @pytest.mark.parametrize("pool_cls,op", [(MaxPool2d, "MaxPool"), (AvgPool2d, "AveragePool")])
+    @pytest.mark.parametrize("pool_cls,op", [(MaxPool2d, "MaxPool")])
     @pytest.mark.parametrize("in_hw,k,s", [((32, 32), 3, 2), ((33, 31), 3, 2), ((16, 16), 2, 2),
                                            ((15, 15), (3, 5), (2, 1)), ((12, 12), 5, 1)])
     def test_pool2d_same_matches_tf_same(self, pool_cls, op, in_hw, k, s):
@@ -285,7 +283,7 @@ class TestSamePadding:
         oracle = _ort_same_upper_pool(op, conv_out, kk, ss)
         assert np.allclose(out, oracle, atol=1e-5)
 
-    @pytest.mark.parametrize("pool_cls", [MaxPool1d, AvgPool1d])
+    @pytest.mark.parametrize("pool_cls", [MaxPool1d])
     @pytest.mark.parametrize("length,k,s", [(64, 3, 2), (63, 2, 2), (20, 5, 1)])
     def test_pool1d_same_exports_and_matches(self, pool_cls, length, k, s):
         model = nn.Sequential(QuantConv1d(1, 2, 1, **WQ), pool_cls(k, s, padding="same"))

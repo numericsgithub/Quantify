@@ -11,7 +11,7 @@ This section covers the core quantization concepts and custom quantizers used in
 - **FixedPointPerTensorQuantizer**: Custom fixed-point per-tensor weight/activation quantizer.
 - **CoefficientPerTensorWeightQuant**: Coefficient-based per-tensor weight quantizer.
 - **Quantized activations** (`quantizers/activations.py`): `QuantReLU`, `QuantReLU6`, `QuantSigmoid`, `QuantTanh`, `QuantSiLU`, `QuantGELU`, `QuantLeakyReLU`, `QuantSoftmax`, `QuantHardSwish`, `QuantHardSigmoid` — each with an input and an output fixed-point quantizer, exported as a single `Quantify::<Name>` node.
-- **SAME-padding layers** (`quantizers/layers.py`): `QuantConv1d`/`QuantConv2d`, `MaxPool1d/2d`, `AvgPool1d/2d` accepting `padding="same"` at any stride (exact TF-SAME pads in the exported graph).
+- **SAME-padding layers** (`quantizers/layers.py`): `QuantConv1d`/`QuantConv2d`, `MaxPool1d/2d` accepting `padding="same"`; average pooling is `QuantAvgPool1d/2d` / `QuantGlobalAvgPool1d/2d` (frozen depthwise conv, 12-bit weights, 10-bit output) at any stride (exact TF-SAME pads in the exported graph).
 
 ## Usage
 ```python

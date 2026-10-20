@@ -53,7 +53,7 @@ Public quantizers (re-exported from `quantizers/__init__.py`):
 - `CoefficientPerTensorWeightQuant`
 - The quantized activation modules from `quantizers/activations.py` (`QuantReLU` … `QuantHardSigmoid`, see above)
 
-`quantizers/layers.py` (not re-exported, import from there): `QuantConv1d`/`QuantConv2d` (Brevitas subclasses), `MaxPool1d/2d`, `AvgPool1d/2d` -- drop-ins that also accept `padding="same"` at ANY stride, exporting one Conv/Pool node with exact TF-SAME pads (PyTorch's symmetric `padding=k//2` is NOT SAME at stride 2 on an even input and is rejected on export). The zoo models in `models/` use them. Also `DenseFn`, the `Quantify::Dense` lowering used by the exporter.
+`quantizers/layers.py` (not re-exported, import from there): `QuantConv1d`/`QuantConv2d` (Brevitas subclasses), `MaxPool1d/2d` -- drop-ins that also accept `padding="same"` at ANY stride, exporting one Conv/Pool node with exact TF-SAME pads (PyTorch's symmetric `padding=k//2` is NOT SAME at stride 2 on an even input and is rejected on export). The zoo models in `models/` use them. Also `DenseFn`, the `Quantify::Dense` lowering used by the exporter. Also `QuantAvgPool1d/2d` and `QuantGlobalAvgPool1d/2d`: average pooling implemented as a depthwise `QuantConv` with FROZEN weights `1/prod(kernel)` and zero bias (weights 12 bit, output 10 bit by default, both overridable); they export as an ordinary depthwise `Conv`, never an `AveragePool` (pitfall #26). Use these instead of `nn.AdaptiveAvgPool*d`, which leaves the pooled value unquantized.
 
 ### Training Harness Flow
 
@@ -88,7 +88,7 @@ Use `TrainerConfigV2` + `QATScheduleConfigV2` (`training_harness/config_v2.py`) 
 
 Full list in `docs/llm/pitfalls/brevitas_pitfalls.md`. The most surprising ones:
 
-- **No `QuantGlobalAvgPool2d` or `QuantLayerNorm`** — Brevitas only wraps Conv, Linear, BN, and basic activations. Use standard `nn.AdaptiveAvgPool2d` and wrap outputs with `QuantIdentity` if needed.
+- **No Brevitas `QuantLayerNorm`** — Brevitas only wraps Conv, Linear, BN, and basic activations. Average pooling is Quantify's own `quantizers.layers.QuantAvgPool*d`/`QuantGlobalAvgPool*d` (a frozen depthwise conv, so the pooled value is quantized); a plain `nn.AdaptiveAvgPool2d` leaves it unquantized.
 - **`QuantLinear` requires explicit flatten** — it does not reshape `(B, C, 1, 1)` automatically; always call `nn.Flatten()` before it.
 - **Bias quantization requires `input_quant`** — `Int8Bias` derives scale from `input_scale * weight_scale`; omitting `input_quant` raises a runtime error.
 - **`load_state_dict` with FP checkpoint needs `strict=False`** — quantized models have extra scale/zero-point parameters not present in FP checkpoints.

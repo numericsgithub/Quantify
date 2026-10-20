@@ -18,11 +18,17 @@ asymmetric pads from the actual input shape:
   export one `Conv` node with the explicit TF-SAME `pads`.
 - `MaxPool1d` / `MaxPool2d` -- exported as one `MaxPool` with SAME pads
   (padded positions never win the max, as in TF/ONNX).
-- `AvgPool1d` / `AvgPool2d` -- exported as one `AveragePool` with SAME pads
-  and `count_include_pad=0` (padded positions are excluded from the
-  average, as in TF/ONNX). The eager forward computes exactly that.
+- Average pooling is NOT a float pool here: `QuantAvgPool1d/2d` and
+  `QuantGlobalAvgPool1d/2d` (below) replace the former `AvgPool1d/2d`.
 
 Any other `padding` value just behaves like the parent class.
+
+**Quantized average pooling.** `QuantAvgPool1d/2d` and
+`QuantGlobalAvgPool1d/2d` (which replaced the former float `AvgPool1d/2d`) implement average pooling as a depthwise
+`QuantConv1d/2d` whose weights are frozen to `1/prod(kernel)` and whose bias
+is frozen to zero -- so they quantize (weights 12 bit, output 10 bit by
+default) and export exactly like any other depthwise Conv, no `AveragePool`
+node. See the section below.
 
 Like the activation shims in `quantizers/activations.py`, the single-node
 symbolic Functions are only used while `torch.onnx.is_in_onnx_export()`;
@@ -45,6 +51,12 @@ import torch.nn as nn
 import torch.nn.functional as F
 import brevitas.nn as qnn
 from torch.autograd import Function
+
+from quantizers.fixedpoint_per_tensor import (
+    FixedPointPerTensorActivationQuant,
+    FixedPointPerTensorBiasQuant,
+    FixedPointPerTensorWeightQuant,
+)
 
 
 def _value(t):
@@ -125,21 +137,6 @@ class SameMaxPoolFn(Function):
         return _same_max_pool(x, kernel, stride, dilation, pads)
 
 
-class SameAvgPoolFn(Function):
-    """One ONNX `AveragePool` node with explicit (possibly asymmetric) pads,
-    padded positions excluded from the average (`count_include_pad=0`)."""
-
-    @staticmethod
-    def symbolic(g, x, kernel, stride, pads, out_sizes):
-        node = g.op("AveragePool", x, kernel_shape_i=list(kernel), strides_i=list(stride),
-                    pads_i=_onnx_pads(pads), count_include_pad_i=0, ceil_mode_i=0)
-        return _set_type(node, x, out_sizes)
-
-    @staticmethod
-    def forward(ctx, x, kernel, stride, pads, out_sizes):
-        return _same_avg_pool(x, kernel, stride, pads)
-
-
 class DenseFn(Function):
     """One `Quantify::Dense(x, W, b)` node: `y = x @ W^T + b`, any input rank,
     `W` in `[out, in]` layout, `b` always present."""
@@ -168,17 +165,6 @@ def _same_max_pool(x, kernel, stride, dilation, pads):
     pool = F.max_pool1d if x.dim() == 3 else F.max_pool2d
     x = F.pad(x, _torch_pad(pads), value=float("-inf"))
     return pool(x, kernel, stride, 0, dilation)
-
-
-def _same_avg_pool(x, kernel, stride, pads):
-    pool = F.avg_pool1d if x.dim() == 3 else F.avg_pool2d
-    flat = _torch_pad(pads)
-    total = pool(F.pad(x, flat), kernel, stride, 0)
-    # Fraction of each window that is real (non-padded) input -- dividing
-    # by it turns the count-including-padding mean into the real-only mean.
-    ones = torch.ones_like(x[:1, :1])
-    frac = pool(F.pad(ones, flat), kernel, stride, 0)
-    return total / frac
 
 
 def _spatial(x, n):
@@ -268,22 +254,6 @@ class _SameMaxPoolMixin:
         return _same_max_pool(x, kernel, stride, dilation, pads)
 
 
-class _SameAvgPoolMixin:
-    _spatial_dims: int
-
-    def forward(self, x):
-        if not self.same_padding:
-            return super().forward(x)
-        n = self._spatial_dims
-        kernel, stride = _tuple(self.kernel_size, n), _tuple(self.stride, n)
-        in_sizes = _spatial(x, n)
-        pads = same_pads(in_sizes, kernel, stride, (1,) * n)
-        if torch.onnx.is_in_onnx_export():
-            out = [math.ceil(i / s) for i, s in zip(in_sizes, stride)]
-            return SameAvgPoolFn.apply(x, kernel, stride, pads, _out_sizes(x, n, out))
-        return _same_avg_pool(x, kernel, stride, pads)
-
-
 def _pool_init(self, parent, kernel_size, stride, padding, kwargs):
     same = isinstance(padding, str) and padding.lower() == "same"
     if same and kwargs.get("ceil_mode"):
@@ -308,19 +278,136 @@ class MaxPool2d(_SameMaxPoolMixin, nn.MaxPool2d):
         _pool_init(self, nn.MaxPool2d, kernel_size, stride, padding, kwargs)
 
 
-class AvgPool1d(_SameAvgPoolMixin, nn.AvgPool1d):
-    """`nn.AvgPool1d` that also accepts `padding="same"` (TF-SAME, any
-    stride, padded positions excluded from the average)."""
-    _spatial_dims = 1
+# ---------------------------------------------------------------------------
+# Quantized average pooling == depthwise conv with frozen weights/bias
+# ---------------------------------------------------------------------------
 
-    def __init__(self, kernel_size, stride=None, padding=0, **kwargs):
-        _pool_init(self, nn.AvgPool1d, kernel_size, stride, padding, kwargs)
+class AvgPoolWeightQuant(FixedPointPerTensorWeightQuant):
+    """Weight quantizer for `QuantAvgPool*d`: 12 bit; the all-equal kernel is
+    a legitimate constant (`constant_ok`), not a failed calibration."""
+    bit_width = 12
+    constant_ok = True
 
 
-class AvgPool2d(_SameAvgPoolMixin, nn.AvgPool2d):
-    """`nn.AvgPool2d` that also accepts `padding="same"` (TF-SAME, any
-    stride, padded positions excluded from the average)."""
-    _spatial_dims = 2
+class AvgPoolBiasQuant(FixedPointPerTensorBiasQuant):
+    """Bias quantizer for `QuantAvgPool*d`: 16 bit; the bias is always zero."""
+    bit_width = 16
+    constant_ok = True
 
-    def __init__(self, kernel_size, stride=None, padding=0, **kwargs):
-        _pool_init(self, nn.AvgPool2d, kernel_size, stride, padding, kwargs)
+
+class _QuantAvgPoolNd(nn.Module):
+    """Average pooling as a frozen depthwise convolution.
+
+    `self.conv` is a `QuantConv{1,2}d` with `groups == channels`, every
+    kernel weight `1/prod(kernel_size)` and a zero bias, both
+    `requires_grad=False`. Its weights are fake-quantized (default 12 bit),
+    and so is its output (default 10 bit), like any other quantized layer.
+    ONNX export therefore yields a plain depthwise `Conv` (+ the usual
+    `FixedPointQuant` nodes) whose weights are all one value.
+
+    Notes
+    -----
+    * `channels` is required (a depthwise conv needs it at construction).
+    * `padding` is an int/tuple or `"same"` (TF-SAME, any stride). Padded
+      positions count as zeros in the average (`count_include_pad=True`
+      semantics), so border windows are darker than a TF-SAME
+      `AveragePool` (`count_include_pad=0`) would give. With `padding=0`
+      (VALID) there is no difference.
+    * The weight 1/N is rounded to the 12-bit grid (e.g. 1/9 -> 1820/2**14,
+      a gain of 0.99976); raise `weight_bit_width` for more accuracy.
+    * Anything that re-initialises every Conv's weights after construction
+      (`model.apply(init_fn)`) would overwrite the constant: call
+      `reset_parameters()` afterwards, or `check_frozen()` to verify.
+    """
+
+    _conv_cls = None
+    _n = 0
+
+    def __init__(
+        self,
+        channels: int,
+        kernel_size,
+        stride=None,
+        padding=0,
+        weight_bit_width: int = 12,
+        output_bit_width: int = 10,
+        weight_quant=AvgPoolWeightQuant,
+        bias_quant=AvgPoolBiasQuant,
+        output_quant=FixedPointPerTensorActivationQuant,
+        return_quant_tensor: bool = False,
+    ):
+        super().__init__()
+        n = self._n
+        kernel = _tuple(kernel_size, n)
+        stride = kernel if stride is None else _tuple(stride, n)
+        self.channels = channels
+        self.kernel_size = kernel
+        self.stride = stride
+        self.conv = self._conv_cls(
+            channels, channels, kernel, stride, padding, groups=channels, bias=True,
+            weight_quant=weight_quant, bias_quant=bias_quant,
+            weight_bit_width=weight_bit_width,
+            output_quant=output_quant, output_bit_width=output_bit_width,
+            return_quant_tensor=return_quant_tensor,
+        )
+        self.reset_parameters()
+
+    @torch.no_grad()
+    def reset_parameters(self) -> None:
+        """(Re)set the frozen values: weights 1/prod(kernel), bias 0."""
+        self.conv.weight.fill_(1.0 / math.prod(self.kernel_size))
+        self.conv.bias.zero_()
+        self.conv.weight.requires_grad_(False)
+        self.conv.bias.requires_grad_(False)
+
+    def check_frozen(self) -> None:
+        """Raise if weights/bias were modified or became trainable."""
+        w, b = self.conv.weight, self.conv.bias
+        if w.requires_grad or b.requires_grad:
+            raise RuntimeError("average-pool weights/bias must stay frozen (requires_grad=False)")
+        if not torch.all(w == 1.0 / math.prod(self.kernel_size)) or torch.any(b != 0):
+            raise RuntimeError("average-pool weights/bias were modified; call reset_parameters()")
+
+    def forward(self, x):
+        return self.conv(x)
+
+
+class QuantAvgPool1d(_QuantAvgPoolNd):
+    """Quantized 1-D average pooling (frozen depthwise `QuantConv1d`)."""
+    _conv_cls = QuantConv1d
+    _n = 1
+
+
+class QuantAvgPool2d(_QuantAvgPoolNd):
+    """Quantized 2-D average pooling (frozen depthwise `QuantConv2d`)."""
+    _conv_cls = QuantConv2d
+    _n = 2
+
+
+class _QuantGlobalAvgPoolNd(_QuantAvgPoolNd):
+    """Global average pooling: kernel == the (static) feature-map size, so the
+    spatial dims collapse to 1 -- the same output shape as
+    `nn.AdaptiveAvgPoolNd(1)`. `size` must match the input exactly (a
+    depthwise conv's kernel is fixed at construction); a mismatch raises."""
+
+    def __init__(self, channels: int, size, **kwargs):
+        super().__init__(channels, size, stride=1, padding=0, **kwargs)
+
+    def forward(self, x):
+        got = tuple(x.shape[-self._n:])
+        if got != self.kernel_size:
+            raise ValueError(
+                f"{type(self).__name__} was built for spatial size {self.kernel_size}, got {got}")
+        return self.conv(x)
+
+
+class QuantGlobalAvgPool1d(_QuantGlobalAvgPoolNd):
+    """`(B, C, L) -> (B, C, 1)`; `size` is `L`."""
+    _conv_cls = QuantConv1d
+    _n = 1
+
+
+class QuantGlobalAvgPool2d(_QuantGlobalAvgPoolNd):
+    """`(B, C, H, W) -> (B, C, 1, 1)`; `size` is `(H, W)` or an int."""
+    _conv_cls = QuantConv2d
+    _n = 2

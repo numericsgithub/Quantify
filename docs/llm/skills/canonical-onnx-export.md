@@ -8,7 +8,7 @@ that is not canonical — see `utils/onnx_canonical.py` and pitfall #24 in
 |---|---|
 | `qnn.QuantConv2d(..., stride=2, padding=1)` | `quantizers.layers.QuantConv2d(..., stride=2, padding="same")` |
 | `nn.MaxPool2d(3, 2, padding=1)` / `ceil_mode=True` | `quantizers.layers.MaxPool2d(3, 2, padding="same")` |
-| `nn.AvgPool2d(k, s, padding=p)` | `quantizers.layers.AvgPool2d(k, s, padding="same")` |
+| `nn.AvgPool2d(k, s, padding=p)` / `nn.AdaptiveAvgPool2d(1)` | `quantizers.layers.QuantAvgPool2d(channels, k, s)` / `QuantGlobalAvgPool2d(channels, (H, W))` (exports as a depthwise `Conv`) |
 | `nn.ReLU` / `F.relu` / `qnn.QuantReLU` between layers | `quantizers.QuantReLU` (likewise `QuantSigmoid`, `QuantSoftmax`, `QuantHardSwish`, ...) — `act_quant=None, input_quant=None` for an unquantized one |
 | `x.unsqueeze(1)` / `.transpose()` / embedding lookup before the first layer | feed the input already in the first layer's shape |
 | `nn.MultiheadAttention`, functional `F.linear` | `nn.Linear` / `qnn.QuantLinear` modules (each exports as `Quantify::Dense`) |
