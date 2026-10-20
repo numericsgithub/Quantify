@@ -158,6 +158,7 @@ def find_optimal_lsb(
     prefer_high_lsb: bool = False,
     max_clip_pct: Optional[float] = None,
     max_abs_value: Optional[float] = None,
+    min_lsb: Optional[int] = None,
 ) -> Tuple[int, int, list]:
     """
     Search over LSB positions to find the best fixed-point step size.
@@ -208,6 +209,16 @@ def find_optimal_lsb(
         every other use of this function (weights, biases, non-saturating
         activations).
 
+    min_lsb : a hard FLOOR on the selected LSB (the grid may be this fine or
+        coarser, never finer). Used for the output quantizer of a
+        value-preserving activation (ReLU, ReLU6 -- see
+        `quantizers/activations.py`): its output values are a subset of its
+        input quantizer's grid, so any LSB finer than the input's can only
+        add codes that never occur ("empty LSBs"), wasting bits that could
+        have gone to range. The floor is applied on top of whichever
+        selection rule is active; `None` (default) leaves the search
+        unconstrained.
+
     Returns
     -------
     (best_lsb, best_unique, search_records)
@@ -221,7 +232,8 @@ def find_optimal_lsb(
         abs_max = min(abs_max, max_abs_value)
 
     if abs_max == 0.0:
-        return 0, 1, []  # all-zero tensor, LSB doesn't matter
+        # all-zero tensor, LSB doesn't matter (but still honour the floor)
+        return (0 if min_lsb is None else max(0, min_lsb)), 1, []
 
     if signed:
         n_positive_codes = 2 ** (bit_width - 1) - 1
@@ -240,6 +252,8 @@ def find_optimal_lsb(
     ideal_lsb = math.log2(abs_max / n_positive_codes) if n_positive_codes > 0 else 0
     search_lo = math.floor(ideal_lsb) - 12
     search_hi = math.ceil(ideal_lsb) + 12
+    if min_lsb is not None:
+        search_hi = max(search_hi, min_lsb)  # the floor itself must be a candidate
 
     if prefer_high_lsb:
         # Coverage-first: smallest step whose range still contains abs_max.
@@ -248,6 +262,8 @@ def find_optimal_lsb(
             coverage_lsb -= 1  # a finer step still covers abs_max -- keep sharpening
         while integer_max * (2.0 ** coverage_lsb) < abs_max:
             coverage_lsb += 1  # float rounding left us a hair too fine -- back off
+        if min_lsb is not None:
+            coverage_lsb = max(coverage_lsb, min_lsb)  # never finer than the floor
 
     best_lsb = search_lo
     best_unique = -1
@@ -264,6 +280,9 @@ def find_optimal_lsb(
         n_unique = int(torch.unique(q).numel())
         sad = float(torch.sum(torch.abs(inputs - q)).item())
         search_records.append((lsb, n_unique, sad))
+
+        if min_lsb is not None and lsb < min_lsb:
+            continue  # finer than the floor -- recorded for the plot, never selectable
 
         if prefer_high_lsb:
             if lsb == coverage_lsb:
@@ -288,6 +307,9 @@ def find_optimal_lsb(
                 best_lsb = lsb
                 best_unique = n_unique
                 best_sad = sad
+
+    if min_lsb is not None and best_lsb < min_lsb:
+        best_lsb = min_lsb  # defensive: nothing selectable (shouldn't happen)
 
     if max_clip_pct is not None and not found_qualifying:
         # Defensive fallback: every tested LSB clipped more than max_clip_pct
@@ -471,6 +493,50 @@ _MAX_CLIP_PCT_BY_ROLE = {
 }
 
 
+class LsbFloorLink:
+    """Late-bound "my grid may not be finer than my sibling's" rule.
+
+    Handed to an output quantizer through the Brevitas injector (it reaches
+    `FixedPointPerTensorQuantizer.__init__` as `lsb_floor_link`), then bound
+    to the owning activation module via `bind()`. The sibling input
+    quantizer is looked up by walking `owner.<input_attr>` at EVERY call
+    rather than cached, because Brevitas recreates quantizer objects on
+    `load_state_dict()` (pitfall #12) and a held reference would go stale;
+    the link itself survives that, as the injector keeps handing it to each
+    new quantizer. It holds a plain strong reference to `owner` so that
+    `copy.deepcopy`/pickling of the model re-point it at the copy.
+
+    `lsb_floor()` returns `None` (no constraint) while the input quantizer
+    is missing, not a `FixedPointPerTensorQuantizer`, or not yet calibrated.
+
+    max_floor : optional ceiling on the returned floor. ReLU6 clamps at 6,
+        which is a multiple of 2**1 but not of any coarser grid, so its
+        output grid must be allowed to be as fine as 2**1 even when the
+        input grid is coarser (`max_floor=1`).
+    """
+
+    def __init__(self, input_attr: str = "input_quant", max_floor: Optional[int] = None):
+        self.input_attr = input_attr
+        self.max_floor = max_floor
+        self.owner = None
+
+    def bind(self, owner) -> "LsbFloorLink":
+        self.owner = owner
+        return self
+
+    def lsb_floor(self) -> Optional[int]:
+        src = getattr(self.owner, self.input_attr, None) if self.owner is not None else None
+        if src is None or not hasattr(src, "modules"):
+            return None
+        for m in src.modules():
+            if isinstance(m, FixedPointPerTensorQuantizer):
+                if not m.search_done_value:
+                    return None
+                floor = int(m._lsb_value)
+                return floor if self.max_floor is None else min(floor, self.max_floor)
+        return None
+
+
 class FixedPointPerTensorQuantizer(BaseQuantizer):
     """
     A self-contained fixed-point per-tensor quantizer.
@@ -509,6 +575,13 @@ class FixedPointPerTensorQuantizer(BaseQuantizer):
         quantizer of a saturating activation (ReLU6/Sigmoid/Tanh -- see
         `quantizers/activations.py`); `None` (default) leaves calibration
         unconstrained, as before.
+    lsb_floor_link : Optional[LsbFloorLink]
+        If set, consulted at every calibration for a minimum LSB (see
+        `find_optimal_lsb`'s `min_lsb`): the quantizer never calibrates to a
+        grid finer than the one it is linked to. Used for the output
+        quantizer of ReLU/ReLU6 (`quantizers/activations.py`), whose output
+        values already lie on the input quantizer's grid. `None` (default)
+        = no floor.
     """
 
     def __init__(
@@ -520,6 +593,7 @@ class FixedPointPerTensorQuantizer(BaseQuantizer):
         quantizer_role: str = "unknown",
         clipped_ste: Union[bool, str] = False,
         max_abs_value: Optional[float] = None,
+        lsb_floor_link: Optional["LsbFloorLink"] = None,
     ):
         # clipped_ste is stored by BaseQuantizer (shared by all quantizers).
         super().__init__(bit_width=bit_width, clipped_ste=clipped_ste)
@@ -528,6 +602,9 @@ class FixedPointPerTensorQuantizer(BaseQuantizer):
         self.narrow_range = narrow_range
         self.quantizer_role = quantizer_role
         self.max_abs_value = max_abs_value
+        # Plain (non-Module) attribute on purpose: the link points back at the
+        # owning activation module, which must not become a submodule here.
+        self.lsb_floor_link = lsb_floor_link
 
         # Register search results as buffers to ensure they are serialized in state_dict
         self.register_buffer('search_result_is_signed', torch.tensor(signed, dtype=torch.bool))
@@ -570,6 +647,8 @@ class FixedPointPerTensorQuantizer(BaseQuantizer):
             prefer_high_lsb=(self.quantizer_role == "activation"),
             max_clip_pct=_MAX_CLIP_PCT_BY_ROLE.get(self.quantizer_role),
             max_abs_value=self.max_abs_value,
+            min_lsb=(self.lsb_floor_link.lsb_floor()
+                     if self.lsb_floor_link is not None else None),
         )
         return {
             'lsb': lsb,

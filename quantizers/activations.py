@@ -64,7 +64,7 @@ from brevitas.nn import quant_activation as _brevitas_act
 from brevitas.nn.quant_layer import QuantNonLinearActLayer
 from torch.autograd import Function
 
-from quantizers.fixedpoint_per_tensor import FixedPointPerTensorActivationQuant
+from quantizers.fixedpoint_per_tensor import FixedPointPerTensorActivationQuant, LsbFloorLink
 
 
 # ---------------------------------------------------------------------------
@@ -92,6 +92,8 @@ _SIGMOID_SATURATION = 2.0 * _TANH_SATURATION  # == 6.0
 # HardSigmoid is exactly relu6(x + 3) / 6: hard-clipped to 0 below -3 and to
 # 1 above +3.
 _HARDSIGMOID_SATURATION = 3.0
+# 6 == 3 * 2**1, so ReLU6's clamp point is only on grids with lsb <= 1.
+_RELU6_MAX_FLOOR_LSB = 1
 
 
 def _input_bit_width(bit_width: int, unsigned_output: bool, override: Optional[int]) -> int:
@@ -365,6 +367,13 @@ class QuantReLU(qnn.QuantReLU):
     saved output sign bit goes to the input instead
     (`input_bit_width = bit_width + 1`) -- see the module docstring. ReLU has
     no upper saturation point, so its input is never range-capped.
+
+    ReLU only zeroes values, so its output already lies on the input
+    quantizer's grid. By default the output quantizer is therefore never
+    calibrated finer than the input quantizer's LSB (`match_input_lsb=True`):
+    a finer grid would only add codes that can never occur, spending bits
+    that should have gone to range. Pass `match_input_lsb=False` to disable.
+    See pitfall #25.
     """
 
     def __init__(
@@ -373,16 +382,21 @@ class QuantReLU(qnn.QuantReLU):
         input_quant=FixedPointPerTensorActivationQuant,
         bit_width: int = 8,
         input_bit_width: Optional[int] = None,
+        match_input_lsb: bool = True,
         return_quant_tensor: bool = False,
         **kwargs,
     ):
         ibw = _input_bit_width(bit_width, unsigned_output=True, override=input_bit_width)
+        link = LsbFloorLink() if (match_input_lsb and input_quant is not None) else None
+        extra = {} if link is None else {"lsb_floor_link": link}
         # Same as qnn.QuantReLU.__init__, but with the export-aware act_impl.
         QuantNonLinearActLayer.__init__(
             self, act_impl=_ReLUImpl, passthrough_act=True,
             input_quant=input_quant, act_quant=act_quant,
             return_quant_tensor=return_quant_tensor,
-            bit_width=bit_width, input_bit_width=ibw, **kwargs)
+            bit_width=bit_width, input_bit_width=ibw, **extra, **kwargs)
+        if link is not None:
+            link.bind(self)
 
 
 class QuantSigmoid(qnn.QuantSigmoid):
@@ -546,6 +560,7 @@ class QuantReLU6(nn.Module):
         bit_width: int = 8,
         input_bit_width: Optional[int] = None,
         input_max_abs_value: Optional[float] = None,
+        match_input_lsb: bool = True,
         return_quant_tensor: bool = False,
         **kwargs,
     ):
@@ -556,10 +571,16 @@ class QuantReLU6(nn.Module):
             act_quant=input_quant, bit_width=ibw, max_abs_value=imax,
             return_quant_tensor=False,
         )
+        # The clamp value 6 is a multiple of 2**1 but of no coarser grid, so
+        # the floor is capped at lsb 1 (output must stay able to hit 6).
+        extra = ({"lsb_floor_link": LsbFloorLink(max_floor=_RELU6_MAX_FLOOR_LSB)}
+                 if match_input_lsb and input_quant is not None else {})
         self.output_quant = qnn.QuantIdentity(
             act_quant=act_quant, bit_width=bit_width,
-            return_quant_tensor=return_quant_tensor, **kwargs
+            return_quant_tensor=return_quant_tensor, **extra, **kwargs
         )
+        if extra:
+            extra["lsb_floor_link"].bind(self)
 
     def forward(self, x):
         x = self.input_quant(x)
