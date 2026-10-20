@@ -35,3 +35,12 @@ Pattern used by `quantizers/activations.py` (`ReluFn` ...) and
    `utils/onnx_self_contained.py::_BUILDERS` (attribute refs use the
    suffix-stripped names — pitfall #22) and a case to
    `tests/test_onnx_self_contained.py`.
+
+## Memory inputs (recurrent state)
+
+`export_onnx_with_io(model, (x, h), path, input_names=["x", "h_in"], memory_inputs={"h_in": "lstm.h_n"})`
+marks `h_in` as the previous state of `lstm.h_n` rather than external data. Graph execution is unchanged; the
+mapping lives in `metadata_props["quantify.memory_inputs"]` (JSON) and the input's `doc_string`. Read it back with
+`utils.onnx_export.load_memory_inputs(path)`. Memory inputs are exempt from the "input feeds straight into a compute
+layer" check. `dummy_input` may be a tuple; the first input keeps the legacy `dummy_input*` metadata keys, the others
+are stored as `dummy_input[<name>]`.

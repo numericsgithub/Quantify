@@ -405,9 +405,11 @@ def _flat(pairs):
     return [b for b, _ in pairs] + [e for _, e in pairs]
 
 
-def _check_graph_inputs(G: _Graph) -> List[str]:
+def _check_graph_inputs(G: _Graph, skip: frozenset = frozenset()) -> List[str]:
     v = []
     for inp in G.inputs:
+        if inp in skip:  # recurrent memory input, not external data
+            continue
         frontier = [(inp, [f"input '{inp}'"])]
         while frontier:
             name, chain = frontier.pop()
@@ -466,13 +468,14 @@ def _graph_for_checks(onnx_model: onnx.ModelProto) -> onnx.ModelProto:
 
 
 def check_onnx_graph(onnx_model: onnx.ModelProto,
-                     expected_dense_calls: Optional[int] = None) -> Tuple[List[str], List[str]]:
+                     expected_dense_calls: Optional[int] = None,
+                     skip_inputs: frozenset = frozenset()) -> Tuple[List[str], List[str]]:
     """Run every graph-level canonical check; return `(violations, warnings)`."""
     G = _Graph(_graph_for_checks(onnx_model))
     violations = []
     violations += _check_dense(G, expected_dense_calls)
     violations += _check_padding(G)
-    violations += _check_graph_inputs(G)
+    violations += _check_graph_inputs(G, frozenset(skip_inputs))
     act_v, act_w = _check_activations(G)
     violations += act_v
     return violations, act_w

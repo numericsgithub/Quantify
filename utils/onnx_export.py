@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import ast
 import base64
+import json
 import warnings
 from typing import Optional
 
@@ -158,6 +159,7 @@ def export_onnx_with_io(
     freeze_annealing: bool = True,
     self_contained: bool = True,
     canonical_checks: str = "raise",
+    memory_inputs: Optional[dict] = None,
     **export_kwargs,
 ) -> onnx.ModelProto:
     """
@@ -229,6 +231,18 @@ def export_onnx_with_io(
         Independently of this flag, every `nn.Linear` is always exported as
         `Quantify::Dense` (patched for the duration of the export only; the
         live model is never modified).
+    memory_inputs : dict[str, str], optional
+        Marks graph inputs that are really recurrent *memory* (e.g. an LSTM's
+        hidden/cell state) rather than external data: ``{input_name:
+        source_layer}``, where ``source_layer`` names the layer/output the
+        state came from (free-form, e.g. ``"lstm.h_n"``). Execution is
+        unchanged; the marking is stored in the model's ``metadata_props``
+        under ``"quantify.memory_inputs"`` (JSON) and in the graph input's
+        ``doc_string``, and read back with `load_memory_inputs`. Requires
+        ``dummy_input`` to be a tuple when the model has several inputs and
+        ``input_names=[...]`` (forwarded to ``torch.onnx.export``) so the
+        names can be matched. Memory inputs are exempt from the "graph input
+        must feed straight into a compute layer" canonical check.
     **export_kwargs
         Extra keyword arguments forwarded verbatim to ``torch.onnx.export``.
 
@@ -243,6 +257,16 @@ def export_onnx_with_io(
         raise ValueError(
             f"canonical_checks must be 'raise', 'warn' or 'off', got {canonical_checks!r}"
         )
+
+    memory_inputs = dict(memory_inputs or {})
+    if memory_inputs:
+        known = list(export_kwargs.get("input_names") or [])
+        unknown = sorted(set(memory_inputs) - set(known))
+        if unknown:
+            raise ValueError(
+                f"memory_inputs {unknown} not found in input_names={known}; pass "
+                f"input_names=[...] naming every graph input"
+            )
 
     from utils.onnx_canonical import (
         NonCanonicalONNXError,
@@ -320,7 +344,9 @@ def export_onnx_with_io(
         # contain as Quantify::Dense nodes.
         watched = [m for _, m, _ in rejected_acts + warn_acts]
         with torch.no_grad(), record_forward(model, watched) as fwd_record:
-            dummy_output = model(dummy_input)
+            dummy_output = (
+                model(*dummy_input) if isinstance(dummy_input, (tuple, list)) else model(dummy_input)
+            )
     finally:
         _restore_annealing(saved_annealing)
         _unfreeze_uncalibrated(frozen_uncalibrated)
@@ -331,6 +357,14 @@ def export_onnx_with_io(
     if hasattr(dummy_output, "value"):
         dummy_output = dummy_output.value
 
+    if isinstance(dummy_input, (tuple, list)):
+        extra_inputs = {
+            n: t.detach().cpu().numpy()
+            for n, t in zip(export_kwargs.get("input_names", [])[1:], dummy_input[1:])
+        }
+        dummy_input = dummy_input[0]
+    else:
+        extra_inputs = {}
     dummy_input_np = dummy_input.detach().cpu().numpy()
     dummy_output_np = dummy_output.detach().cpu().numpy()
 
@@ -344,12 +378,17 @@ def export_onnx_with_io(
 
     if embed_mode == "metadata":
         _embed_as_metadata(onnx_model, dummy_input_np, dummy_output_np)
+        for n, arr in extra_inputs.items():
+            _embed_as_metadata_extra(onnx_model, n, arr)
     elif embed_mode == "initializer":
         _embed_as_initializer(onnx_model, dummy_input_np, dummy_output_np)
     else:
         raise ValueError(
             f"embed_mode must be 'metadata' or 'initializer', got '{embed_mode}'"
         )
+
+    if memory_inputs:
+        _mark_memory_inputs(onnx_model, memory_inputs)
 
     onnx.save(onnx_model, filepath)
 
@@ -358,7 +397,8 @@ def export_onnx_with_io(
             rejected_acts, warn_acts, fwd_record, dummy_output
         )
         graph_violations, graph_warns = check_onnx_graph(
-            onnx_model, expected_dense_calls=fwd_record["linear_calls"]
+            onnx_model, expected_dense_calls=fwd_record["linear_calls"],
+            skip_inputs=set(memory_inputs),
         )
         violations += graph_violations
         warns += graph_warns
@@ -399,6 +439,47 @@ def _embed_as_metadata(
     _add("dummy_output", _encode(out))
     _add("dummy_output_shape", str(list(out.shape)))
     _add("dummy_output_dtype", str(out.dtype))
+
+
+def _embed_as_metadata_extra(onnx_model: onnx.ModelProto, name: str, arr: np.ndarray) -> None:
+    """Reference tensor for an additional (2nd, 3rd, ...) graph input."""
+    for suffix, value in (
+        ("", base64.b64encode(arr.tobytes()).decode("utf-8")),
+        ("_shape", str(list(arr.shape))),
+        ("_dtype", str(arr.dtype)),
+    ):
+        prop = onnx_model.metadata_props.add()
+        prop.key = f"dummy_input[{name}]{suffix}"
+        prop.value = value
+
+
+MEMORY_INPUTS_KEY = "quantify.memory_inputs"
+
+
+def _mark_memory_inputs(onnx_model: onnx.ModelProto, memory_inputs: dict) -> None:
+    """Record `{input: source layer}` in metadata_props and input doc_strings."""
+    by_name = {i.name: i for i in onnx_model.graph.input}
+    missing = sorted(set(memory_inputs) - by_name.keys())
+    if missing:
+        raise ValueError(
+            f"memory_inputs {missing} are not graph inputs of the exported model "
+            f"(inputs: {sorted(by_name)})"
+        )
+    for name, source in memory_inputs.items():
+        by_name[name].doc_string = f"memory (from {source})"
+    prop = onnx_model.metadata_props.add()
+    prop.key = MEMORY_INPUTS_KEY
+    prop.value = json.dumps({n: {"source": str(src)} for n, src in memory_inputs.items()})
+
+
+def load_memory_inputs(onnx_model_or_path: "str | onnx.ModelProto") -> dict:
+    """``{input_name: source_layer}`` for inputs marked via ``memory_inputs=``
+    at export; empty if none were marked."""
+    m = onnx.load(onnx_model_or_path) if isinstance(onnx_model_or_path, str) else onnx_model_or_path
+    for p in m.metadata_props:
+        if p.key == MEMORY_INPUTS_KEY:
+            return {n: v["source"] for n, v in json.loads(p.value).items()}
+    return {}
 
 
 def _embed_as_initializer(
