@@ -78,6 +78,27 @@ def _ref_attr(output_name: str, ref_attr_name: str, kind: str, node_name: str = 
     return node
 
 
+def _ref_float(name: str, ref_attr_name: str) -> List[onnx.NodeProto]:
+    """Like `_ref_attr(..., "float")`, but the value is cast to the dtype of the
+    function input `x`, so the body runs unchanged in float32 AND float64
+    (the exporter emits float64 graphs; a bare float32 Constant would be a type
+    mismatch against a double `x`)."""
+    return [
+        _ref_attr(f"{name}_f32", ref_attr_name, "float"),
+        helper.make_node("CastLike", [f"{name}_f32", "x"], [name]),
+    ]
+
+
+def _fconst(name: str, value: float) -> List[onnx.NodeProto]:
+    """A float constant held in double precision and cast to `x`'s dtype, so a
+    float64 graph gets the full-precision value (not a float32-rounded one)."""
+    return [
+        helper.make_node("Constant", [], [f"{name}_f64"],
+                         value=helper.make_tensor(f"{name}_t", TensorProto.DOUBLE, [], [value])),
+        helper.make_node("CastLike", [f"{name}_f64", "x"], [name]),
+    ]
+
+
 def _opset():
     return [helper.make_opsetid("", _FUNCTION_OPSET)]
 
@@ -104,11 +125,11 @@ def _build_fixed_point_quant_function(op_type: str = "FixedPointQuant") -> onnx.
         # strips the type-suffix from g.op() kwargs (e.g. "scale_f" ->
         # "scale") when writing the node, so these must match the STRIPPED
         # form, not the g.op() kwarg spelling.
-        _ref_attr("scale", "scale", "float"),
-        _ref_attr("imin", "integer_min", "float"),
-        _ref_attr("imax", "integer_max", "float"),
+        *_ref_float("scale", "scale"),
+        *_ref_float("imin", "integer_min"),
+        *_ref_float("imax", "integer_max"),
         _ref_attr("rm", "rounding_mode_code", "int"),
-        helper.make_node("Constant", [], ["half"], value_float=0.5),
+        *_fconst("half", 0.5),
         helper.make_node("Constant", [], ["zero_i"], value_int=0),
         helper.make_node("Constant", [], ["one_i"], value_int=1),
 
@@ -144,8 +165,8 @@ def _build_fixed_point_quant_function(op_type: str = "FixedPointQuant") -> onnx.
 
 def _build_relu6_function() -> onnx.FunctionProto:
     nodes = [
-        _ref_attr("lo", "min", "float"),
-        _ref_attr("hi", "max", "float"),
+        *_ref_float("lo", "min"),
+        *_ref_float("hi", "max"),
         helper.make_node("Clip", ["x", "lo", "hi"], ["y"]),
     ]
     return helper.make_function(
@@ -183,12 +204,12 @@ def _build_gelu_function() -> onnx.FunctionProto:
     nodes = [
         _ref_attr("approx", "approximate_code", "int"),
         helper.make_node("Constant", [], ["zero_i"], value_int=0),
-        helper.make_node("Constant", [], ["half"], value_float=0.5),
-        helper.make_node("Constant", [], ["one"], value_float=1.0),
-        helper.make_node("Constant", [], ["sqrt_half"], value_float=sqrt_half),
-        helper.make_node("Constant", [], ["c0"], value_float=c0),
-        helper.make_node("Constant", [], ["c1"], value_float=c1),
-        helper.make_node("Constant", [], ["three"], value_float=3.0),
+        *_fconst("half", 0.5),
+        *_fconst("one", 1.0),
+        *_fconst("sqrt_half", sqrt_half),
+        *_fconst("c0", c0),
+        *_fconst("c1", c1),
+        *_fconst("three", 3.0),
 
         # exact: 0.5 * x * (1 + erf(x / sqrt(2)))
         helper.make_node("Mul", ["x", "sqrt_half"], ["_exact_arg"]),
@@ -229,7 +250,7 @@ def _build_coefficient_quant_function() -> onnx.FunctionProto:
     with keepdims=0 removes the codebook axis introduced by Unsqueeze).
     """
     nodes = [
-        _ref_attr("scale", "scale", "float"),
+        *_ref_float("scale", "scale"),
         helper.make_node("Constant", [], ["neg1"], value_ints=[-1]),
 
         helper.make_node("Mul", ["coefficients", "scale"], ["scaled_coeffs"]),
@@ -292,6 +313,27 @@ def _build_dense_function() -> onnx.FunctionProto:
     )
 
 
+def _build_hard_sigmoid_function() -> onnx.FunctionProto:
+    """PyTorch's hardsigmoid, `Clip(x + 3, 0, 6) / 6`, evaluated exactly like
+    eager. The node's `alpha`/`beta` attributes (1/6, 0.5 -- kept for graph
+    readability) are deliberately NOT used: ONNX float attributes are float32,
+    and `float32(1/6) * x` in a float64 graph rounds differently from `x / 6`,
+    which can flip a downstream quantizer's rounding at a tie."""
+    nodes = [
+        *_fconst("three", 3.0),
+        *_fconst("zero", 0.0),
+        *_fconst("six", 6.0),
+        helper.make_node("Add", ["x", "three"], ["x3"]),
+        helper.make_node("Clip", ["x3", "zero", "six"], ["c"]),
+        helper.make_node("Div", ["c", "six"], ["y"]),
+    ]
+    return helper.make_function(
+        domain=DOMAIN, fname="HardSigmoid", inputs=["x"], outputs=["y"],
+        nodes=nodes, opset_imports=_opset(), attributes=[],
+        attribute_protos=[helper.make_attribute("alpha", 0.0), helper.make_attribute("beta", 0.0)],
+    )
+
+
 _BUILDERS = {
     "FixedPointQuant": lambda: _build_fixed_point_quant_function(),
     "Relu6": _build_relu6_function,
@@ -304,8 +346,7 @@ _BUILDERS = {
     "HardSwish": lambda: _build_unary_function("HardSwish"),
     "LeakyRelu": lambda: _build_unary_function("LeakyRelu", {"alpha": ("alpha", 0.0)}),
     "Softmax": lambda: _build_unary_function("Softmax", {"axis": ("axis", 0)}),
-    "HardSigmoid": lambda: _build_unary_function(
-        "HardSigmoid", {"alpha": ("alpha", 0.0), "beta": ("beta", 0.0)}),
+    "HardSigmoid": _build_hard_sigmoid_function,
     "Dense": _build_dense_function,
 }
 

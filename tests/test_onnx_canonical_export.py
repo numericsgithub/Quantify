@@ -48,6 +48,7 @@ from quantizers.layers import (
     same_pads,
 )
 from utils.onnx_canonical import NonCanonicalONNXError, check_onnx_graph
+from tests.onnx_run import run_onnx
 from utils.onnx_export import export_onnx_with_io
 
 torch.manual_seed(0)
@@ -68,8 +69,7 @@ def _export(model, x, **kwargs):
     f.close()
     try:
         onnx_model = export_onnx_with_io(model, x, f.name, input_names=["x"], **kwargs)
-        sess = ort.InferenceSession(f.name, providers=["CPUExecutionProvider"])
-        out = sess.run(None, {"x": x.numpy()})[0]
+        out = run_onnx(f.name, {"x": x.numpy()})[0]
     finally:
         os.remove(f.name)
     return onnx_model, out

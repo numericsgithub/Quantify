@@ -4,6 +4,7 @@ import pytest
 import torch
 import torch.nn as nn
 
+from tests.onnx_run import run_onnx
 from utils.onnx_export import export_onnx_with_io, load_memory_inputs
 
 
@@ -31,8 +32,7 @@ def test_memory_marking_roundtrip_and_execution_unchanged(tmp_path):
     path, m = _export(tmp_path, memory_inputs={"h_in": "cell.h_out"})
     assert load_memory_inputs(path) == {"h_in": "cell.h_out"}
     assert [i.name for i in m.graph.input] == ["x", "h_in"]
-    out = ort.InferenceSession(path).run(
-        None, {"x": np.ones((1, 4), np.float32), "h_in": np.zeros((1, 4), np.float32)})
+    out = run_onnx(path, {"x": np.ones((1, 4)), "h_in": np.zeros((1, 4))})
     assert out[0].shape == (1, 4)
 
 

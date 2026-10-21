@@ -166,7 +166,7 @@ class CoefficientPerTensorWeightQuantizer(BaseQuantizer):
         combos = []
 
         for idx, coeffs in enumerate(self.coefficient_sets):
-            coeffs_dev = coeffs.to(device)
+            coeffs_dev = coeffs.to(device=device, dtype=x.dtype)
             for bit_shift_scale in range(-12, 13):
                 quantized_temp, scale, _ = apply_non_uniform_quantization(x, coeffs_dev, bit_shift_scale)
                 sads.append(torch.sum(torch.abs(x - quantized_temp)))  # stays a 0-dim tensor
@@ -196,7 +196,7 @@ class CoefficientPerTensorWeightQuantizer(BaseQuantizer):
         }
 
     def _quantize(self, x: torch.Tensor, params: Any) -> torch.Tensor:
-        chosen_coeffs = self.coefficient_sets[params['set_idx']].to(x.device)
+        chosen_coeffs = self.coefficient_sets[params['set_idx']].to(device=x.device, dtype=x.dtype)
         bit_shift_scale = params['bit_shift_scale']
 
         # Route through CoefficientQuantFn in ALL paths, not just ONNX export.
@@ -243,7 +243,7 @@ class CoefficientPerTensorWeightQuantizer(BaseQuantizer):
         return (x > upper).to(torch.int8) - (x < lower).to(torch.int8)
 
     def _range_limits(self, x: torch.Tensor, params: Any):
-        scaled = self.coefficient_sets[params['set_idx']].to(x.device) * (2.0 ** params['bit_shift_scale'])
+        scaled = self.coefficient_sets[params['set_idx']].to(device=x.device, dtype=x.dtype) * (2.0 ** params['bit_shift_scale'])
         return scaled.min(), scaled.max()
 
 

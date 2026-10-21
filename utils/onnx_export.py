@@ -147,6 +147,34 @@ def _unsuppress_lifecycle_logging(touched: list) -> None:
         module.suppress_lifecycle_logging = False
 
 
+def _to_float64(model: torch.nn.Module) -> list:
+    """Upcast every floating-point parameter/buffer of `model` to float64 in
+    place and return `[(tensor, original_dtype)]` for `_restore_dtypes`.
+
+    float32 -> float64 is exact, so this loses nothing; it only makes the
+    exported graph (and the embedded reference I/O) compute in float64.
+    """
+    saved = []
+    for t in list(model.parameters()) + list(model.buffers()):
+        if t.is_floating_point() and t.dtype != torch.float64:
+            saved.append((t, t.dtype))
+            t.data = t.data.double()
+    return saved
+
+
+def _restore_dtypes(saved: list) -> None:
+    for t, dtype in saved:
+        t.data = t.data.to(dtype)
+
+
+def _inputs_to_float64(dummy_input):
+    if isinstance(dummy_input, (tuple, list)):
+        return tuple(_inputs_to_float64(t) for t in dummy_input)
+    if torch.is_tensor(dummy_input) and dummy_input.is_floating_point():
+        return dummy_input.double()
+    return dummy_input
+
+
 def export_onnx_with_io(
     model: torch.nn.Module,
     dummy_input: torch.Tensor,
@@ -164,6 +192,13 @@ def export_onnx_with_io(
 ) -> onnx.ModelProto:
     """
     Export a Brevitas QAT model to ONNX with embedded dummy I/O tensors.
+
+    Everything is always exported in float64: the model's floating-point
+    parameters/buffers and ``dummy_input`` are upcast (exactly) for the
+    export, so the graph inputs/outputs, initializers and the embedded
+    reference I/O are float64 (feed float64 arrays to onnxruntime). The live
+    model is restored to its original dtypes afterward. Float attributes of
+    standard ops (e.g. ``LeakyRelu.alpha``) are float32 by the ONNX spec.
 
     Parameters
     ----------
@@ -310,6 +345,11 @@ def export_onnx_with_io(
     # forced annealing_alpha=1.0 above from tripping a premature "annealing
     # complete" log for a quantizer that's really still mid-anneal. See
     # pitfall #19 in docs/llm/pitfalls/brevitas_pitfalls.md.
+    # Always export in float64 (graph inputs, weights, every intermediate),
+    # so float32 rounding in the ONNX graph can't diverge from a bit-exact
+    # hardware implementation. The live model's dtypes are restored below.
+    saved_dtypes = _to_float64(model)
+    dummy_input = _inputs_to_float64(dummy_input)
     saved_annealing = _freeze_annealing(model) if freeze_annealing else {}
     frozen_uncalibrated = _freeze_uncalibrated(model)
     suppressed_logging = _suppress_lifecycle_logging(model)
@@ -348,6 +388,7 @@ def export_onnx_with_io(
                 model(*dummy_input) if isinstance(dummy_input, (tuple, list)) else model(dummy_input)
             )
     finally:
+        _restore_dtypes(saved_dtypes)
         _restore_annealing(saved_annealing)
         _unfreeze_uncalibrated(frozen_uncalibrated)
         _unsuppress_lifecycle_logging(suppressed_logging)

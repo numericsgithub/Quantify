@@ -348,3 +348,11 @@ Note what did *not* need to change: the calibration **algorithm**. This is still
 **The Problem:** `FixedPointPerTensorQuantizer._save_calibration` sets `search_done = num_unique > 1`, a "nothing to calibrate" guard. For a legitimately constant tensor that never becomes true, so the quantizer recalibrates on every forward and, active in eval mode, raises "has not been calibrated".
 
 **How to Prevent It:** `FixedPointPerTensorQuantizer(constant_ok=True)` (injector attribute `constant_ok = True`) accepts one unique value as a finished calibration. `AvgPoolWeightQuant`/`AvgPoolBiasQuant` set it. Default stays `False`. Related: the weight quantizer auto-detects `signed=False` for all-positive weights, so the 12-bit pool weights are an unsigned 12-bit grid (e.g. 1/25 -> lsb -16). Tests: `tests/test_quant_avg_pool.py`.
+
+## 27. ONNX exports are float64 -- onnxruntime CPU can't run all of them
+
+`export_onnx_with_io` always exports in float64 (floating params/buffers and `dummy_input` are upcast exactly for the trace, then restored; the live model is untouched), so the graph can't diverge from bit-exact hardware through float32 rounding. Consequences:
+
+- Feed **float64** arrays to the graph (a float32 feed is an ORT "Unexpected input data type" error). Embedded dummy I/O is float64 too.
+- onnxruntime's CPU provider has **no float64 kernels** for Conv, ConvTranspose, Erf, HardSigmoid, ... Run such graphs with `onnx.reference.ReferenceEvaluator` (tests: `tests/onnx_run.py::run_onnx`, ORT first, reference evaluator as fallback).
+- Function bodies (`utils/onnx_self_contained.py`) must be dtype-agnostic: float constants go through `_ref_float`/`_fconst` (`CastLike` to `x`). ONNX float *attributes* are float32 by spec, so a value that matters bit-exactly must not travel as one -- `Quantify::HardSigmoid` therefore computes `Clip(x+3,0,6)/6` and ignores its `alpha`/`beta` (`float32(1/6)*x` flipped a rounding tie downstream). `LeakyRelu.alpha` is still a float32 attribute.

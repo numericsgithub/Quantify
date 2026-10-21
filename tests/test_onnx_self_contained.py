@@ -40,6 +40,7 @@ from quantizers.activations import (
     QuantHardSwish,
     QuantHardSigmoid,
 )
+from tests.onnx_run import run_onnx
 from utils.onnx_export import export_onnx_with_io
 from utils.onnx_self_contained import embed_self_contained_functions, _used_quantify_op_types
 
@@ -62,8 +63,7 @@ def _export_and_run(module: torch.nn.Module, x: torch.Tensor):
         )
         onnx_model = onnx.load(f.name)
         onnx.checker.check_model(onnx_model)
-        sess = ort.InferenceSession(f.name, providers=["CPUExecutionProvider"])
-        (out,) = sess.run(None, {"x": x.numpy()})
+        (out,) = run_onnx(f.name, {"x": x.numpy()})
         return onnx_model, out
     finally:
         os.remove(f.name)

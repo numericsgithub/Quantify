@@ -28,6 +28,7 @@ from quantizers.layers import (
     QuantGlobalAvgPool2d,
 )
 from quantizers.manager import QuantizerManager
+from tests.onnx_run import run_onnx
 from utils.onnx_export import export_onnx_with_io
 
 torch.manual_seed(0)
@@ -56,8 +57,7 @@ def _export(model, x):
     f.close()
     try:
         onnx_model = export_onnx_with_io(model, x, f.name, input_names=["x"])
-        out = ort.InferenceSession(f.name, providers=["CPUExecutionProvider"]).run(
-            None, {"x": x.numpy()})[0]
+        out = run_onnx(f.name, {"x": x.numpy()})[0]
     finally:
         os.remove(f.name)
     return onnx_model, out
