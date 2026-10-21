@@ -85,16 +85,11 @@ OUTPUT_LIMIT = 4.0
 
 COEFF_FILE = __file__.rsplit("/", 1)[0] + "/dummy_coeffs.txt"
 
-# CoefficientPerTensorWeightQuantizer only works in float32 (see KNOWN_BUGS);
-# float32 still computes every dyadic test value exactly.
+# Kept in float32 (float32 computes every dyadic test value exactly);
+# test_coefficient_weight_quant_float64 covers float64.
 FLOAT32_ARCHS = {"linear_coeff_weights"}
 
-KNOWN_BUGS = {
-    "coeff_float64": (
-        "CoefficientPerTensorWeightQuantizer returns float32 weights for a float64 "
-        "model (coefficient sets are float32 tensors and never cast to x.dtype), "
-        "so a float64 QuantLinear fails with a Double/Float matmul error."),
-}
+KNOWN_BUGS = {}
 
 
 class _DummyCoeffWeightQuant(CoefficientPerTensorWeightQuant):
@@ -488,7 +483,6 @@ def test_relu6_gradient_at_clip_boundaries_matches_pytorch():
     assert torch.equal(x.grad, x_ref.grad), f"{x.grad.tolist()} != {x_ref.grad.tolist()}"
 
 
-@pytest.mark.xfail(reason=KNOWN_BUGS["coeff_float64"], strict=True, raises=RuntimeError)
 def test_coefficient_weight_quant_float64():
     _run_case("linear_coeff_weights", "identity", "quantizing", dtype=torch.float64)
 
