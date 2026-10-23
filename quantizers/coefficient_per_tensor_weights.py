@@ -56,13 +56,17 @@ class CoefficientQuantFn(Function):
 
     @staticmethod
     def symbolic(g, x, coefficients, bit_shift_scale):
-        (captured_indices, captured_quantized,
+        (captured_indices, captured_quantized, captured_coefficients,
          num_coefficients, min_value, max_value) = CoefficientQuantFn._queue.popleft()
 
+        # The coefficient set is an ATTRIBUTE of the node (coefficients_t), not
+        # a graph input: it is part of the quantizer, like chosen_indices_t.
+        # The traced `coefficients` Value is deliberately left unused, so no
+        # stray Constant node survives export.
         quantized = g.op(
             "Quantify::CoefficientQuant",
             x,
-            coefficients,
+            coefficients_t=captured_coefficients,
             bit_shift_scale_i=int(bit_shift_scale),
             # scale_f: redundant precomputed float (== 2**bit_shift_scale),
             # so the embedded ONNX FunctionProto body
@@ -112,6 +116,7 @@ class CoefficientQuantFn(Function):
                     # STE backward) is untouched -- only this cached copy
                     # is detached.
                     quantized.detach().cpu(),
+                    coefficients.detach().cpu(),
                     int(coefficients.numel()),
                     float(coefficients.min()) * span_scale,
                     float(coefficients.max()) * span_scale,

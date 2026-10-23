@@ -330,5 +330,77 @@ class TestOnnxNodeAttributes:
         assert not any("bit_width" in name for name in attrs)
 
 
+class TestCoefficientsAreNodeAttribute:
+    """The coefficient set is part of the CoefficientQuant node (an attribute,
+    like chosen_indices), not a graph input or a stray Constant node."""
+
+    SETS = ["-1 -0.5 0 0.5 1", "-2 -1 0 1 2"]
+
+    def _export(self, tmp_path):
+        import onnx
+        from utils.onnx_export import export_onnx_with_io
+
+        paths = []
+        for i, line in enumerate(self.SETS):
+            path = tmp_path / f"c{i}.txt"
+            path.write_text(line + "\n")
+            paths.append(str(path))
+
+        def quant(path):
+            class Q(CoefficientPerTensorWeightQuant):
+                filepath = path
+            return Q
+
+        model = torch.nn.Sequential(
+            QuantLinear(3, 4, bias=False, weight_quant=quant(paths[0])),
+            QuantLinear(4, 2, bias=False, weight_quant=quant(paths[1])),
+        )
+        x = torch.randn(1, 3)
+        model.train(); model(x); model.eval()
+        out = tmp_path / "m.onnx"
+        export_onnx_with_io(model, x, str(out), dynamo=False, canonical_checks="off",
+                            input_names=["x"], output_names=["y"])
+        return onnx.load(str(out)), model, x
+
+    def test_no_constant_nodes_and_single_input(self, tmp_path):
+        model, _, _ = self._export(tmp_path)
+        assert not [n for n in model.graph.node if n.op_type == "Constant"]
+        quants = [n for n in model.graph.node if n.op_type == "CoefficientQuant"]
+        assert len(quants) == 2
+        for n in quants:
+            assert len(n.input) == 1  # just the weight
+        # the sets (5 values each) are not graph initializers; what is left is
+        # the two weights and the zero biases the Dense lowering adds
+        assert not [i.name for i in model.graph.initializer if list(i.dims) == [5]]
+
+    def test_attribute_holds_the_calibrated_set(self, tmp_path):
+        import numpy as np
+        from onnx import numpy_helper
+        model, torch_model, _ = self._export(tmp_path)
+        quants = [n for n in model.graph.node if n.op_type == "CoefficientQuant"]
+        for n, line in zip(quants, self.SETS):
+            attrs = {a.name: a for a in n.attribute}
+            coeffs = numpy_helper.to_array(attrs["coefficients"].t)
+            assert np.allclose(coeffs, [float(v) for v in line.split()])
+            assert attrs["num_coefficients"].i == len(coeffs)
+            assert attrs["min_value"].f == pytest.approx(coeffs.min() * attrs["scale"].f)
+            assert attrs["max_value"].f == pytest.approx(coeffs.max() * attrs["scale"].f)
+
+    def test_function_takes_only_x_and_references_the_attribute(self, tmp_path):
+        model, _, _ = self._export(tmp_path)
+        f = next(f for f in model.functions if f.name == "CoefficientQuant")
+        assert list(f.input) == ["x"]
+        assert set(f.attribute) == {"scale", "coefficients"}
+
+    def test_exported_model_still_matches_eager(self, tmp_path):
+        import numpy as np
+        from tests.onnx_run import run_onnx
+        model, torch_model, x = self._export(tmp_path)
+        with torch.no_grad():
+            eager = torch_model(x).detach().numpy()
+        out = run_onnx(model, {"x": x.numpy().astype(np.float64)})[0]
+        assert np.allclose(out, eager, atol=1e-5)
+
+
 if __name__ == '__main__':
     unittest.main()

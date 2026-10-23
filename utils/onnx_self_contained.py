@@ -89,6 +89,20 @@ def _ref_float(name: str, ref_attr_name: str) -> List[onnx.NodeProto]:
     ]
 
 
+def _ref_tensor(name: str, ref_attr_name: str) -> List[onnx.NodeProto]:
+    """A `Constant` node whose TENSOR value is substituted, per call site, from
+    the calling node's own `ref_attr_name` attribute, then cast to the dtype of
+    the function input `x` (same reason as `_ref_float`). Used to keep data
+    that belongs to a node (e.g. a coefficient set) as an attribute of it
+    instead of a separate graph input."""
+    node = helper.make_node("Constant", [], [f"{name}_raw"], name=f"{name}_raw_const")
+    attr = helper.make_attribute("value", helper.make_tensor("placeholder", TensorProto.FLOAT, [1], [0.0]))
+    attr.ref_attr_name = ref_attr_name
+    del node.attribute[:]
+    node.attribute.append(attr)
+    return [node, helper.make_node("CastLike", [f"{name}_raw", "x"], [name])]
+
+
 def _fconst(name: str, value: float) -> List[onnx.NodeProto]:
     """A float constant held in double precision and cast to `x`'s dtype, so a
     float64 graph gets the full-precision value (not a float32-rounded one)."""
@@ -244,13 +258,15 @@ def _build_gelu_function() -> onnx.FunctionProto:
 def _build_coefficient_quant_function() -> onnx.FunctionProto:
     """Nearest-neighbor quantization to a nonuniform codebook: for each
     element of `x`, pick whichever of `coefficients * scale` it's closest
-    to. `Gather` on a 1-D codebook with an arbitrary-shape index tensor is
+    to. Both `scale` and the `coefficients` set are attributes of the calling
+    node (the set is part of the quantizer, not a graph input). `Gather` on a 1-D codebook with an arbitrary-shape index tensor is
     exactly numpy/torch "fancy indexing" (`codebook[indices]`), giving an
     output the same shape as `indices` (== the shape of `x`, since ArgMin
     with keepdims=0 removes the codebook axis introduced by Unsqueeze).
     """
     nodes = [
         *_ref_float("scale", "scale"),
+        *_ref_tensor("coefficients", "coefficients"),
         helper.make_node("Constant", [], ["neg1"], value_ints=[-1]),
 
         helper.make_node("Mul", ["coefficients", "scale"], ["scaled_coeffs"]),
@@ -261,8 +277,8 @@ def _build_coefficient_quant_function() -> onnx.FunctionProto:
         helper.make_node("Gather", ["scaled_coeffs", "indices"], ["y"], axis=0),
     ]
     return helper.make_function(
-        domain=DOMAIN, fname="CoefficientQuant", inputs=["x", "coefficients"], outputs=["y"],
-        nodes=nodes, opset_imports=_opset(), attributes=["scale"],
+        domain=DOMAIN, fname="CoefficientQuant", inputs=["x"], outputs=["y"],
+        nodes=nodes, opset_imports=_opset(), attributes=["scale", "coefficients"],
     )
 
 
