@@ -76,6 +76,10 @@ tracker = trainer.fit()
 
 This framework includes custom quantizers (`FixedPointPerTensorQuantizer`, `CoefficientPerTensorWeightQuant`, etc.) that export to ONNX as custom nodes (`Quantify::FixedPointQuant`).
 
+### Coefficient files
+
+`coefficients/` holds ready-made coefficient sets for `CoefficientPerTensorWeightQuant` (plain text, one set per line, powers of two and their sums for n = 2..12; `coeffs_single_*` and `coeffs_all_*` have one set, `coeffs_comb{1..4}_*` ten). See `coefficients/README.md` for the naming scheme and usage.
+
 ### Export to ONNX
 ```python
 from utils import export_onnx_with_io
