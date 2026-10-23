@@ -7,8 +7,8 @@ ONNX-export path ignores the setting.
 
 | `clipped_ste`                      | gradient outside the range                         | effect on a clipped weight |
 |------------------------------------|----------------------------------------------------|----------------------------|
-| `"not_clip"` / `False` (default)   | passed (slope 1 everywhere, plain STE)             | drifts arbitrarily far out without changing the output; lags on the way back |
-| `"clip"` / `True`                  | zeroed (`ClippedSTEFn`)                            | gets **stuck** for good: no gradient ever again unless the range changes |
+| `"not_clip"` / `False`             | passed (slope 1 everywhere, plain STE)             | drifts arbitrarily far out without changing the output; lags on the way back |
+| `"clip"` / `True` (default)        | zeroed (`ClippedSTEFn`)                            | gets **stuck** for good: no gradient ever again unless the range changes |
 | `"single_direction_clip"`          | zeroed if it pushes further out, passed if it points back in (`SingleDirectionClippedSTEFn`) | no drift, and recovers the moment the loss wants it back inside |
 
 "Points back in" is judged on the sign of the gradient w.r.t. the quantized

@@ -131,15 +131,16 @@ class BaseQuantizer(nn.Module, ABC):
         self,
         bit_width: int = 8,
         quantizer_manager: Optional[QuantizerManager] = None,
-        clipped_ste=False,
+        clipped_ste="clip",
         **kwargs
     ):
         super().__init__()
         self.bit_width = bit_width
         # STE-clipping mode lives here (shared by every quantizer) so any
         # subclass can honor it just by overriding _in_range_mask() ("clip")
-        # and _clip_side() ("single_direction_clip"). Plain STE ("not_clip",
-        # slope 1 everywhere) remains the default. See the `clipped_ste`
+        # and _clip_side() ("single_direction_clip"). Clipped STE ("clip",
+        # slope 0 outside the range) is the default; "not_clip" gives the plain
+        # STE (slope 1 everywhere). See the `clipped_ste`
         # property, ClippedSTEFn and SingleDirectionClippedSTEFn.
         self.clipped_ste = clipped_ste
         self.inference_counter = 0

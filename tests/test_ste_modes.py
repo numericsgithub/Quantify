@@ -86,7 +86,7 @@ def test_invalid_ste_mode_rejected(value):
 
 
 def test_mode_can_be_changed_by_attribute_assignment():
-    q = FixedPointPerTensorQuantizer()
+    q = FixedPointPerTensorQuantizer(clipped_ste="not_clip")
     assert q.ste_mode == "not_clip"
     q.clipped_ste = "single_direction_clip"
     assert q.ste_mode == "single_direction_clip"
@@ -94,6 +94,18 @@ def test_mode_can_be_changed_by_attribute_assignment():
     assert q.ste_mode == "clip"
     with pytest.raises(ValueError):
         q.clipped_ste = "nope"
+
+
+def test_default_mode_is_clip_everywhere(tmp_path):
+    path = tmp_path / "c.txt"
+    path.write_text("-1 0 1\n")
+    assert FixedPointPerTensorQuantizer().ste_mode == "clip"
+    assert CoefficientPerTensorWeightQuantizer(str(path)).ste_mode == "clip"
+
+
+def test_default_mode_reaches_brevitas_injector_layers():
+    layer = qnn.QuantLinear(1, 1, weight_quant=FixedPointPerTensorWeightQuant)
+    assert layer.weight_quant.tensor_quant.ste_mode == "clip"
 
 
 def test_all_modes_listed():

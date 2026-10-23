@@ -554,10 +554,10 @@ class FixedPointPerTensorQuantizer(BaseQuantizer):
         Exclude most-negative code in signed mode (default False).
     clipped_ste : bool or str
         Backward behavior for inputs the forward clamp saturated, one of:
-          "not_clip" (or False, default): plain STE, slope 1 everywhere --
+          "not_clip" (or False): plain STE, slope 1 everywhere --
             a clipped weight keeps getting gradient and can drift arbitrarily
             far outside the range without changing the output.
-          "clip" (or True): clipped STE, slope 0 outside the range -- no
+          "clip" (or True, default): clipped STE, slope 0 outside the range -- no
             drift, but a clipped weight never gets gradient again (stuck
             unless the range changes).
           "single_direction_clip": slope 0 outside the range only for
@@ -599,7 +599,7 @@ class FixedPointPerTensorQuantizer(BaseQuantizer):
         rounding_mode: RoundingMode = RoundingMode.ROUND,
         narrow_range: bool = False,
         quantizer_role: str = "unknown",
-        clipped_ste: Union[bool, str] = False,
+        clipped_ste: Union[bool, str] = "clip",
         max_abs_value: Optional[float] = None,
         lsb_floor_link: Optional["LsbFloorLink"] = None,
         constant_ok: bool = False,

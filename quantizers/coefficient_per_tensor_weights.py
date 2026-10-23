@@ -142,7 +142,7 @@ class CoefficientPerTensorWeightQuantizer(BaseQuantizer):
     def __init__(
         self,
         filepath: str,
-        clipped_ste: Union[bool, str] = False,
+        clipped_ste: Union[bool, str] = "clip",
         max_clip_pct: float = _MAX_CLIP_PCT_BY_ROLE["weight"],
     ):
         # There is no bit_width: the representable values are given by the
