@@ -6,6 +6,13 @@ coefficients provided in a text file. It searches for the optimal coefficient
 set and a power-of-two scaling factor (2^n) that minimizes the Sum of 
 Absolute Differences (SAD) between the original and quantized weights.
 
+Calibration, per coefficient set: the shift that just covers the weights'
+largest magnitude is computed directly from the weight range, and only the
+`SHIFT_SEARCH_RADIUS` shifts on either side of it are tried. Candidates that
+clip more than `max_clip_pct` percent of the weights are rejected (the same
+ceiling the fixed-point weight quantizer uses); if every candidate clips more
+than that, the least-clipping one wins.
+
 The text file format:
     Each line contains one set of coefficients.
     Coefficients within a set are separated by spaces.
@@ -24,6 +31,14 @@ from quantizers.base_quantizer import BaseQuantizer
 from torch.autograd import Function
 from torch.onnx import symbolic_helper
 from collections import deque
+import math
+
+# Weight clipping ceiling, shared with the fixed-point weight quantizer.
+from quantizers.fixedpoint_per_tensor import _MAX_CLIP_PCT_BY_ROLE
+
+# Calibration tries the shift that just covers the weight range, plus this many
+# shifts to either side (2 * radius + 1 candidates per coefficient set).
+SHIFT_SEARCH_RADIUS = 6
 
 def apply_non_uniform_quantization(weights, coefficients, bit_shift_scale):
     scale = 2.0 ** bit_shift_scale
@@ -40,8 +55,9 @@ class CoefficientQuantFn(Function):
     _queue: deque = deque()
 
     @staticmethod
-    def symbolic(g, x, coefficients, bit_shift_scale, bit_width):
-        captured_indices, captured_quantized = CoefficientQuantFn._queue.popleft()
+    def symbolic(g, x, coefficients, bit_shift_scale):
+        (captured_indices, captured_quantized,
+         num_coefficients, min_value, max_value) = CoefficientQuantFn._queue.popleft()
 
         quantized = g.op(
             "Quantify::CoefficientQuant",
@@ -54,23 +70,35 @@ class CoefficientQuantFn(Function):
             # instead of computing a power-of-two from the int attribute
             # in-graph.
             scale_f=float(2.0 ** bit_shift_scale),
+            # num_coefficients_i / min_value_f / max_value_f: the size of the
+            # chosen set and the representable span in the tensor's own units
+            # (min/max of coefficients * 2**bit_shift_scale) -- graph
+            # readability only (e.g. Netron), like FixedPointQuant's
+            # min_value_f/max_value_f. Not consumed by the embedded
+            # FunctionProto body (utils/onnx_self_contained.py).
+            num_coefficients_i=num_coefficients,
+            min_value_f=min_value,
+            max_value_f=max_value,
             chosen_indices_t=captured_indices,
             quantized_values_t=captured_quantized,
         ).setType(x.type())
 
         scale = g.op("Constant", value_t=torch.tensor(2.0 ** bit_shift_scale))
         zero_point = g.op("Constant", value_t=torch.tensor(0.0))
-        bw = g.op("Constant", value_t=torch.tensor(float(bit_width)))
+        # Brevitas expects a 4-tuple; its "bit width" slot carries the number
+        # of coefficients.
+        bw = g.op("Constant", value_t=torch.tensor(float(num_coefficients)))
         return quantized, scale, zero_point, bw
 
     @staticmethod
-    def forward(ctx, x, coefficients, bit_shift_scale, bit_width):
+    def forward(ctx, x, coefficients, bit_shift_scale):
         ctx.save_for_backward(x)
         quantized, scale, _ = apply_non_uniform_quantization(x, coefficients, bit_shift_scale)
 
         if torch.onnx.is_in_onnx_export():
             with torch.no_grad():
                 _, __, indices = apply_non_uniform_quantization(x, coefficients, bit_shift_scale)
+                span_scale = 2.0 ** bit_shift_scale
                 CoefficientQuantFn._queue.append((
                     indices.cpu().to(torch.long),
                     # .detach() -- this cached copy is embedded into the
@@ -84,9 +112,12 @@ class CoefficientQuantFn(Function):
                     # STE backward) is untouched -- only this cached copy
                     # is detached.
                     quantized.detach().cpu(),
+                    int(coefficients.numel()),
+                    float(coefficients.min()) * span_scale,
+                    float(coefficients.max()) * span_scale,
                 ))
 
-        bw = torch.tensor(float(bit_width), dtype=x.dtype, device=x.device)
+        bw = torch.tensor(float(coefficients.numel()), dtype=x.dtype, device=x.device)
         return (
             quantized,
             torch.tensor(scale, dtype=x.dtype, device=x.device),
@@ -108,22 +139,33 @@ class CoefficientPerTensorWeightQuantizer(BaseQuantizer):
     Inherits infrastructure from BaseQuantizer (gating, calibration state, ONNX guards).
     """
 
-    def __init__(self, filepath: str, bit_width: int = 8, clipped_ste: Union[bool, str] = False):
-        # clipped_ste is stored by BaseQuantizer (shared by all quantizers).
-        super().__init__(bit_width=bit_width, clipped_ste=clipped_ste)
-        self.filepath = filepath
-        
+    def __init__(
+        self,
+        filepath: str,
+        clipped_ste: Union[bool, str] = False,
+        max_clip_pct: float = _MAX_CLIP_PCT_BY_ROLE["weight"],
+    ):
+        # There is no bit_width: the representable values are given by the
+        # coefficient sets, whose sizes differ. (BaseQuantizer still stores
+        # one for its pass-through return; the largest set's size is used.)
         # Read coefficient sets from the text file during initialization
-        self.coefficient_sets = []
+        coefficient_sets = []
         with open(filepath, 'r') as f:
             for line in f:
                 line = line.strip()
                 if line:
                     coeffs = torch.tensor([float(x) for x in line.split()], dtype=torch.float32)
-                    self.coefficient_sets.append(coeffs)
+                    coefficient_sets.append(coeffs)
 
-        if not self.coefficient_sets:
+        if not coefficient_sets:
             raise ValueError(f"No valid coefficient sets found in file: {filepath}")
+
+        # clipped_ste is stored by BaseQuantizer (shared by all quantizers).
+        super().__init__(
+            bit_width=max(len(c) for c in coefficient_sets), clipped_ste=clipped_ste)
+        self.filepath = filepath
+        self.coefficient_sets = coefficient_sets
+        self.max_clip_pct = max_clip_pct
 
         # Register search results as buffers (handled by base class for state-dict)
         self.register_buffer('best_set_idx', torch.tensor(0, dtype=torch.long))
@@ -146,34 +188,54 @@ class CoefficientPerTensorWeightQuantizer(BaseQuantizer):
         return self._cached_scalar(
             self.best_bit_shift_scale, "_best_bit_shift_scale_cached", "_best_bit_shift_scale_version", int)
 
+    @staticmethod
+    def _covering_shift(abs_max: float, coeffs: torch.Tensor) -> int:
+        """Smallest shift whose scaled coefficient set spans `abs_max`, i.e.
+        ceil(log2(abs_max / max|coeffs|)). 0 for all-zero weights / sets."""
+        coeff_max = float(coeffs.abs().max())
+        if abs_max <= 0.0 or coeff_max <= 0.0:
+            return 0
+        return math.ceil(math.log2(abs_max / coeff_max))
+
     def _calibrate(self, x: torch.Tensor) -> Any:
         """Run calibration/search logic and return a params dict.
 
-        Unlike find_optimal_lsb's search (which already syncs every
-        iteration via torch.unique()'s data-dependent output shape, so there
-        is nothing to gain there), this search is pure elementwise math with
-        no structural reason to sync per candidate. Every (coefficient_set,
-        bit_shift_scale) candidate's SAD is kept as a 0-dim tensor -- no
-        `.item()` -- and only compared on-device (`torch.stack` + one
-        `argmin`); the loop itself still runs in Python (each candidate's SAD
-        computation depends on `x`'s full size, so batching all candidates
-        into one tensor op would multiply peak memory by len(coefficient_sets)*25,
-        which isn't worth it here), but the GPU queue is never drained until
-        the very end, one sync total instead of one per candidate.
+        Per coefficient set, only the `2 * SHIFT_SEARCH_RADIUS + 1` shifts
+        around the one that just covers `max|x|` (`_covering_shift`) are tried.
+        Candidates clipping more than `max_clip_pct` percent of `x` (outside
+        the scaled set's [min, max]) are rejected; among the rest the lowest
+        SAD wins. If every candidate clips too much, the least-clipping one
+        is taken instead.
+
+        Every candidate's SAD and clip fraction stay 0-dim tensors -- no
+        `.item()` -- and are compared on-device (`torch.stack`, one `argmin`);
+        the only syncs are `max|x|` up front and the final pick. The loop
+        itself still runs in Python (batching all candidates into one tensor
+        op would multiply peak memory by the number of candidates).
         """
         device = x.device
+        abs_max = float(x.detach().abs().max())  # sync 1 of 2
         sads = []
+        clip_pcts = []
         combos = []
 
         for idx, coeffs in enumerate(self.coefficient_sets):
             coeffs_dev = coeffs.to(device=device, dtype=x.dtype)
-            for bit_shift_scale in range(-12, 13):
+            center = self._covering_shift(abs_max, coeffs)
+            for bit_shift_scale in range(center - SHIFT_SEARCH_RADIUS,
+                                         center + SHIFT_SEARCH_RADIUS + 1):
                 quantized_temp, scale, _ = apply_non_uniform_quantization(x, coeffs_dev, bit_shift_scale)
                 sads.append(torch.sum(torch.abs(x - quantized_temp)))  # stays a 0-dim tensor
+                lower, upper = coeffs_dev.min() * scale, coeffs_dev.max() * scale
+                clip_pcts.append(((x < lower) | (x > upper)).float().mean() * 100.0)
                 combos.append((idx, bit_shift_scale))
 
-        best_flat_idx = int(torch.stack(sads).argmin().item())  # the one sync
-        best_set_idx, best_bit_shift_scale = combos[best_flat_idx]
+        sad = torch.stack(sads)
+        clip = torch.stack(clip_pcts)
+        allowed = clip <= self.max_clip_pct
+        best_allowed = torch.where(allowed, sad, torch.full_like(sad, float("inf"))).argmin()
+        best_flat = torch.where(allowed.any(), best_allowed, clip.argmin())
+        best_set_idx, best_bit_shift_scale = combos[int(best_flat.item())]  # sync 2 of 2
 
         return {'set_idx': best_set_idx, 'bit_shift_scale': best_bit_shift_scale}
 
@@ -210,7 +272,6 @@ class CoefficientPerTensorWeightQuantizer(BaseQuantizer):
             x,
             chosen_coeffs,
             bit_shift_scale,
-            len(self.coefficient_sets[params['set_idx']]),
         )
         return quantized
 

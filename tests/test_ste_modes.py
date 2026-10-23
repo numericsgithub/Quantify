@@ -206,7 +206,7 @@ def test_invalid_mode_on_injector_rejected():
 def _coefficient_quantizer(mode, tmp_path):
     path = tmp_path / "coeffs.txt"
     path.write_text("0.0 0.5 1.0 1.5 2.0 2.5 3.0 3.5\n")
-    return CoefficientPerTensorWeightQuantizer(filepath=str(path), bit_width=3, clipped_ste=mode)
+    return CoefficientPerTensorWeightQuantizer(filepath=str(path), clipped_ste=mode)
 
 
 @pytest.mark.parametrize("g, expected", [(+1.0, 1.0), (-1.0, 0.0)])

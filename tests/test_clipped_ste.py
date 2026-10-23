@@ -266,7 +266,7 @@ def _coefficient_quantizer_factory():
     def factory(clipped_ste):
         # Will raise TypeError if clipped_ste isn't a constructor param -> skip.
         return CoefficientPerTensorWeightQuantizer(
-            filepath=path, bit_width=BIT_WIDTH, clipped_ste=clipped_ste
+            filepath=path, clipped_ste=clipped_ste
         )
 
     return factory
