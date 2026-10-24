@@ -9,7 +9,7 @@ import pytest
 from training_harness import QATTrainerV2, TrainerConfigV2, QATScheduleConfigV2
 from quantizers.base_quantizer import BaseQuantizer
 from quantizers.manager import QuantizerManager
-from quantizers import FixedPointPerTensorWeightQuant, FixedPointPerTensorActivationQuant
+from quantizers import FixedPointPerTensorWeightQuant
 
 
 class SimpleQuantizedMNIST(nn.Module):

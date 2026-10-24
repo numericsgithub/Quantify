@@ -35,7 +35,6 @@ if a test fails, report the actual value):
       In-range by the >=/<= convention, so clipped STE keeps slope 1:
       q(w)=3.5, y_hat=11.5, dL/dy_hat=3.0, w.grad = 9.0 (same as plain).
 """
-import inspect
 
 import pytest
 import torch

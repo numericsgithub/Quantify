@@ -17,7 +17,6 @@ Correct protocol:
 
 from __future__ import annotations
 
-import time
 import warnings
 from typing import Callable, Dict, List, Optional
 
@@ -299,12 +298,12 @@ class QATTrainerV2:
             print(f"  Mixup      : α={self.config.mixup}  CutMix α={self.config.cutmix}"
                   f"  prob={self.config.mixup_prob}  switch={self.config.mixup_switch_prob}"
                   f"  smoothing={self.config.smoothing}")
-            print(f"               train_acc is approximate (pre-mixup hard labels)")
+            print("               train_acc is approximate (pre-mixup hard labels)")
         if self._erasing_fn is not None:
             print(f"  RandErase  : prob={self.config.reprob}  mode=pixel")
         if self.config.freeze_bn:
-            print(f"  Freeze BN  : True  (running stats locked from checkpoint)")
-        print(f"  ── Output paths ──────────────────────────────────────")
+            print("  Freeze BN  : True  (running stats locked from checkpoint)")
+        print("  ── Output paths ──────────────────────────────────────")
         print(f"  Logs       : {abs_logs}")
         print(f"  Checkpoints: {abs_ckpt}")
         print(f"  Plots      : {abs_plots}")

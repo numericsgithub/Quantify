@@ -1,5 +1,4 @@
 import numpy as np
-import onnxruntime as ort
 import pytest
 import torch
 import torch.nn as nn

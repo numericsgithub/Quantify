@@ -10,7 +10,6 @@ import os
 import tempfile
 
 import numpy as np
-import onnxruntime as ort
 import pytest
 import torch
 import torch.nn as nn
@@ -18,7 +17,6 @@ import torch.nn.functional as F
 from onnx import numpy_helper
 
 from quantizers import FixedPointPerTensorWeightQuant, QuantReLU
-from quantizers.base_quantizer import BaseQuantizer
 from quantizers.fixedpoint_per_tensor import FixedPointPerTensorQuantizer
 from quantizers.layers import (
     QuantAvgPool1d,

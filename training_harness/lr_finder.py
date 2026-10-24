@@ -36,7 +36,7 @@ import copy
 import math
 import os
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Dict, Iterator, List, Optional, Tuple
 
@@ -128,7 +128,7 @@ def find_lr(
 
     # ── Phase 1: Calibration pre-pass ────────────────────────────────────────
     print(f"\n{'─'*60}")
-    print(f"  LR Finder — Phase 1: Calibration pre-pass")
+    print("  LR Finder — Phase 1: Calibration pre-pass")
     print(f"  Steps      : {calibration_steps}  at LR={calibration_lr:.1e}")
     print(f"{'─'*60}")
 
@@ -166,7 +166,7 @@ def find_lr(
 
     # ── Phase 2: LR range sweep ───────────────────────────────────────────────
     print(f"\n{'─'*60}")
-    print(f"  LR Finder — Phase 2: LR sweep")
+    print("  LR Finder — Phase 2: LR sweep")
     print(f"  Range      : {sweep_start_lr:.1e} → {sweep_end_lr:.1e}")
     print(f"  Steps      : {sweep_steps}")
     print(f"{'─'*60}")
@@ -253,7 +253,7 @@ def find_lr(
 
     # ── Summary ───────────────────────────────────────────────────────────────
     print(f"\n{'═'*60}")
-    print(f"  LR Finder Summary")
+    print("  LR Finder Summary")
     print(f"{'─'*60}")
     print(f"  Steepest descent LR  : {steep_lr:.2e}   ← primary recommendation")
     print(f"  Min-loss LR          : {min_loss_lr:.2e}")

@@ -11,9 +11,8 @@ from __future__ import annotations
 
 import json
 import warnings
-from dataclasses import asdict
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Dict, List, Optional
 
 import numpy as np
 import torch

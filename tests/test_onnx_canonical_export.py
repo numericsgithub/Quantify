@@ -453,7 +453,7 @@ class TestActivations:
         _calibrate(model, x)
         with pytest.raises(NonCanonicalONNXError) as e:
             _export(model, x)
-        assert f"'1'" in _messages(e) and f"quantizers.{suggest}" in _messages(e)
+        assert "'1'" in _messages(e) and f"quantizers.{suggest}" in _messages(e)
 
     def test_functional_activation_inside_raises(self):
         class M(nn.Module):

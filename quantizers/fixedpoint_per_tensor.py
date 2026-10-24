@@ -29,7 +29,6 @@ from enum import Enum
 from typing import Tuple, Optional, Any, Union
 
 import torch
-import torch.nn as nn
 
 from quantizers.base_injector import BaseWeightQuant, BaseActivationQuant
 from brevitas.proxy.parameter_quant import BiasQuantProxyFromInjector

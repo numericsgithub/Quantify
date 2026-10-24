@@ -99,7 +99,7 @@ def add_workspace_args(
         type=Path,
         default=name,
         help=(
-            f"Base directory for data, checkpoints and logs. "
+            "Base directory for data, checkpoints and logs. "
         ),
     )
 

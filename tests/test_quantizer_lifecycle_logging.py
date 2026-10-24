@@ -9,7 +9,6 @@ import logging
 
 import pytest
 import torch
-import torch.nn as nn
 import brevitas.nn as qnn
 
 from quantizers import FixedPointPerTensorWeightQuant, FixedPointPerTensorQuantizer

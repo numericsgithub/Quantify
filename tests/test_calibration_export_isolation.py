@@ -29,7 +29,6 @@ one-shot "annealing complete" log flag for an already-calibrated quantizer
 that is for real still mid-anneal, permanently suppressing the real event.
 """
 
-import tempfile
 
 import pytest
 import torch

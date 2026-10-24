@@ -28,7 +28,6 @@ report the actual gradient instead, see module docstring in the PR):
 """
 import pytest
 import torch
-import torch.nn as nn
 import brevitas.nn as qnn
 
 from quantizers.fixedpoint_per_tensor import FixedPointPerTensorQuantizer, FixedPointPerTensorWeightQuant

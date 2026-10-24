@@ -17,7 +17,6 @@ import tempfile
 
 import numpy as np
 import onnx
-import onnxruntime as ort
 import pytest
 import torch
 import brevitas.nn as qnn

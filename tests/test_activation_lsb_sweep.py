@@ -21,14 +21,12 @@ sweep, not just that the table *looks* right:
    kicking in), never to the wide, disallowed setting itself.
 """
 
-import math
 
 import pytest
 import torch
 
 from quantizers.fixedpoint_per_tensor import (
     quantize_fixed_point_with_integers,
-    FixedPointPerTensorQuantizer,
     RoundingMode,
 )
 from utils.activation_lsb_sweep import (

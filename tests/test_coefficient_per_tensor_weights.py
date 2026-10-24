@@ -1,7 +1,6 @@
 import unittest
 import torch
 import os
-from typing import Tuple
 
 from quantizers.coefficient_per_tensor_weights import CoefficientPerTensorWeightQuantizer, CoefficientPerTensorWeightQuant
 from brevitas.nn import QuantLinear

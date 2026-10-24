@@ -1,4 +1,3 @@
-import torch
 import torch.nn as nn
 import brevitas.nn as qnn
 from quantizers.fixedpoint_per_tensor import FixedPointPerTensorWeightQuant

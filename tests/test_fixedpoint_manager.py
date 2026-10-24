@@ -1,8 +1,7 @@
 import torch
 import unittest
 from quantizers.fixedpoint_per_tensor import (
-    FixedPointPerTensorQuantizer, 
-    RoundingMode
+    FixedPointPerTensorQuantizer
 )
 from quantizers.manager import QuantizerManager
 

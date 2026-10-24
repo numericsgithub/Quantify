@@ -23,13 +23,11 @@ Example:
 """
 
 import torch
-import torch.nn as nn
 from typing import Tuple, Any, Union
 
 from quantizers.base_injector import BaseWeightQuant
 from quantizers.base_quantizer import BaseQuantizer
 from torch.autograd import Function
-from torch.onnx import symbolic_helper
 from collections import deque
 import math
 

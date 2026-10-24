@@ -24,7 +24,6 @@ from quantizers.fixedpoint_per_tensor import (
     FixedPointPerTensorBiasQuant,
     FixedPointPerTensorActivationQuant,
     find_optimal_lsb,
-    quantize_fixed_point,
     RoundingMode,
 )
 

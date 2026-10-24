@@ -30,7 +30,6 @@ guardrails exist):
 
 import torch
 import pytest
-import brevitas.nn as qnn
 
 from quantizers.activations import (
     QuantReLU,
@@ -132,7 +131,8 @@ class TestDefaultInputOutputQuantizers:
     def test_onnx_export_has_input_quant_activation_output_quant(self, cls, unsigned_output, kwargs):
         """Exactly 3 ONNX nodes now: input quantizer, activation, output
         quantizer (was 2 before this feature: activation, output quantizer)."""
-        import tempfile, os
+        import tempfile
+        import os
         import onnx
 
         module = cls(bit_width=8, **kwargs)

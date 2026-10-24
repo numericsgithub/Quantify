@@ -1,10 +1,7 @@
-import os
-import tempfile
 import torch
 import torch.nn as nn
 import brevitas.nn as qnn
 import onnx
-import numpy as np
 import pytest
 
 from quantizers import FixedPointPerTensorWeightQuant, FixedPointPerTensorQuantizer, RoundingMode
