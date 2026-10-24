@@ -79,8 +79,6 @@ logs/
 data/
 plots/
 output/
-*.csv
-*.json
 
 # Stray run/debug output
 *.log

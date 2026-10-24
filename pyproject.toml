@@ -1,7 +1,34 @@
 [project]
 name = "brevitas-quantizers"
 version = "0.1.0"
+description = "Custom Brevitas quantizers with self-contained ONNX export and an end-to-end QAT harness"
+readme = "README.md"
+license = { file = "LICENSE" }
 requires-python = ">=3.12"
+dependencies = [
+    "torch",
+    "brevitas[export]==0.12.1",
+    "numpy==1.26.4",
+    "onnx==1.17.0",
+    "matplotlib",
+    "tqdm",
+]
+
+[project.optional-dependencies]
+# timm: mixup/random-erasing in the trainer; pandas: importance Result.to_dataframe
+# wandb/tensorboard: optional experiment loggers
+extras = ["timm", "pandas", "wandb", "tensorboard"]
+dev = [
+    "pytest",
+    "pytest-xdist",
+    "pytest-cov",
+    "pytest-timeout",
+    "ruff",
+    "onnxruntime",
+    "torchvision",
+    "pandas",
+    "timm",
+]
 
 [build-system]
 requires = ["setuptools"]
@@ -9,3 +36,22 @@ build-backend = "setuptools.build_meta"
 
 [tool.setuptools]
 packages = ["quantizers", "training_harness", "models", "utils", "importance"]
+
+[tool.setuptools.package-data]
+importance = ["static/*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-ra --durations=15"
+markers = ["slow: ResNet / trainer / ONNX-heavy tests (deselect with -m 'not slow')"]
+filterwarnings = ["ignore::torch.jit.TracerWarning"]
+
+[tool.coverage.run]
+source = ["quantizers", "training_harness", "models", "utils", "importance"]
+
+[tool.ruff]
+line-length = 120
+target-version = "py312"
+
+[tool.ruff.lint]
+select = ["E4", "E7", "E9", "F", "I"]

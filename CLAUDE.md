@@ -83,7 +83,7 @@ Use `TrainerConfigV2` + `QATScheduleConfigV2` (`training_harness/config_v2.py`) 
 
 ## Key Conventions (`docs/llm/CONVENTIONS.md`)
 
-- Add new packages to `requirements.txt` before importing them.
+- Add new packages to `pyproject.toml` (`dependencies`, or an optional extra if imported lazily) before importing them.
 - New reusable patterns go in `docs/llm/skills/<pattern-name>.md`.
 - New pitfalls go in `docs/llm/pitfalls/brevitas_pitfalls.md`.
 

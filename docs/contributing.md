@@ -3,7 +3,7 @@
 Thank you for your interest in contributing to the Brevitas QAT Framework!
 
 ## Guidelines
-1. **Dependencies**: Add new packages to `requirements.txt` or `pyproject.toml` before importing.
+1. **Dependencies**: Add new packages to `pyproject.toml` (`dependencies`, or an optional extra if imported lazily) before importing.
 2. **Skills**: If you identify a reusable pattern tightly coupled to this framework, create a new `.md` file in `docs/llm/skills/`.
 3. **Pitfalls**: Document common errors or debugging tips in `docs/llm/pitfalls/brevitas_pitfalls.md`.
 4. **Testing**: Ensure all tests pass (`pytest tests/ -v`) before submitting changes.

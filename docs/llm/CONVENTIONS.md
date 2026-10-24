@@ -1,5 +1,5 @@
 # Dependencies
-When you need a new package, add it to requirements.txt before importing it.
+When you need a new package, add it to `pyproject.toml` (`dependencies`, or an optional extra if imported lazily) before importing it.
 
 # Finding new skills
 Think about the task you were given. Do you see a pattern in your solution that could describe a skill specifically bound to developing this quantization framework?
