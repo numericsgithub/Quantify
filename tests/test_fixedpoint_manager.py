@@ -1,8 +1,8 @@
-import torch
 import unittest
-from quantizers.fixedpoint_per_tensor import (
-    FixedPointPerTensorQuantizer
-)
+
+import torch
+
+from quantizers.fixedpoint_per_tensor import FixedPointPerTensorQuantizer
 from quantizers.manager import QuantizerManager
 
 

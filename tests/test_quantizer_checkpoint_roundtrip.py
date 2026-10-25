@@ -30,18 +30,18 @@ model's own state_dict onto itself). Two consequences:
      module tree — this file locks that mitigation in with a test.
 """
 
+import brevitas.nn as qnn
 import pytest
 import torch
 import torch.nn as nn
-import brevitas.nn as qnn
 
-from quantizers.manager import QuantizerManager
 from quantizers.base_quantizer import BaseQuantizer
 from quantizers.fixedpoint_per_tensor import (
-    FixedPointPerTensorWeightQuant,
     FixedPointPerTensorActivationQuant,
     FixedPointPerTensorBiasQuant,
+    FixedPointPerTensorWeightQuant,
 )
+from quantizers.manager import QuantizerManager
 from training_harness.trainer_v2 import _reset_and_register
 
 

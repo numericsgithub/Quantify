@@ -10,15 +10,15 @@ quantizer. Quantizers that are NOT yet calibrated must still go through
 the normal reset + gradual annealing ramp regardless of the flag.
 """
 
+import brevitas.nn as qnn
 import pytest
 import torch
 import torch.nn as nn
-import brevitas.nn as qnn
 
-from quantizers.manager import QuantizerManager
 from quantizers.fixedpoint_per_tensor import FixedPointPerTensorWeightQuant
+from quantizers.manager import QuantizerManager
+from training_harness.config_v2 import QATScheduleConfigV2, TrainerConfigV2
 from training_harness.trainer_v2 import QATTrainerV2, _reset_and_register
-from training_harness.config_v2 import TrainerConfigV2, QATScheduleConfigV2
 
 
 class _WQ(FixedPointPerTensorWeightQuant):

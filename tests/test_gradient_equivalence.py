@@ -40,24 +40,24 @@ failure is deterministic), each with the reason -- see KNOWN_BUGS below.
 """
 import math
 
+import brevitas.nn as qnn
 import pytest
 import torch
 import torch.nn as nn
-import brevitas.nn as qnn
 
 from quantizers import (
-    FixedPointPerTensorWeightQuant,
+    CoefficientPerTensorWeightQuant,
     FixedPointPerTensorActivationQuant,
     FixedPointPerTensorBiasQuant,
-    CoefficientPerTensorWeightQuant,
+    FixedPointPerTensorWeightQuant,
+    QuantGELU,
+    QuantLeakyReLU,
     QuantReLU,
     QuantReLU6,
     QuantSigmoid,
-    QuantTanh,
     QuantSiLU,
-    QuantGELU,
-    QuantLeakyReLU,
     QuantSoftmax,
+    QuantTanh,
 )
 from quantizers.base_quantizer import BaseQuantizer
 from quantizers.manager import QuantizerManager

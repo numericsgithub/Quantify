@@ -18,8 +18,8 @@ modules to give each quantizer its own calibration state. Since ReLU has no
 learnable parameters, this difference is invisible to weight loading.
 """
 
-import torch.nn as nn
 import brevitas.nn as qnn
+import torch.nn as nn
 
 from quantizers.activations import QuantReLU
 from quantizers.layers import MaxPool2d, QuantConv2d

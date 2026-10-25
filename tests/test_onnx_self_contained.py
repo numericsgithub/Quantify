@@ -15,33 +15,33 @@ result compared against the eager PyTorch output.
 import os
 import tempfile
 
+import brevitas.nn as qnn
 import numpy as np
 import onnx
 import pytest
 import torch
-import brevitas.nn as qnn
 
-from quantizers.fixedpoint_per_tensor import (
-    FixedPointPerTensorWeightQuant,
-    FixedPointPerTensorActivationQuant,
-    RoundingMode,
-)
 from quantizers import CoefficientPerTensorWeightQuant
 from quantizers.activations import (
+    QuantGELU,
+    QuantHardSigmoid,
+    QuantHardSwish,
+    QuantLeakyReLU,
     QuantReLU,
     QuantReLU6,
     QuantSigmoid,
-    QuantTanh,
     QuantSiLU,
-    QuantGELU,
-    QuantLeakyReLU,
     QuantSoftmax,
-    QuantHardSwish,
-    QuantHardSigmoid,
+    QuantTanh,
+)
+from quantizers.fixedpoint_per_tensor import (
+    FixedPointPerTensorActivationQuant,
+    FixedPointPerTensorWeightQuant,
+    RoundingMode,
 )
 from tests.onnx_run import run_onnx
 from utils.onnx_export import export_onnx_with_io
-from utils.onnx_self_contained import embed_self_contained_functions, _used_quantify_op_types
+from utils.onnx_self_contained import _used_quantify_op_types, embed_self_contained_functions
 
 torch.manual_seed(0)
 

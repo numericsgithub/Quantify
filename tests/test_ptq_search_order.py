@@ -15,10 +15,10 @@ on each quantizer's first forward() call — i.e. true forward execution order.
 import pytest
 import torch
 
-from quantizers.manager import QuantizerManager
+from models.resnet_quant import QuantResNet18
 from quantizers.base_quantizer import BaseQuantizer
 from quantizers.fixedpoint_per_tensor import FixedPointPerTensorActivationQuant
-from models.resnet_quant import QuantResNet18
+from quantizers.manager import QuantizerManager
 from quantizers.naming import assign_descriptive_quant_ids
 
 

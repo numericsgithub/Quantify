@@ -46,10 +46,10 @@ from __future__ import annotations
 import math
 from typing import List, Sequence, Tuple
 
+import brevitas.nn as qnn
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-import brevitas.nn as qnn
 from torch.autograd import Function
 
 from quantizers.fixedpoint_per_tensor import (

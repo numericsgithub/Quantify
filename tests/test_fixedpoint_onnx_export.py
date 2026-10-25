@@ -1,10 +1,10 @@
-import torch
-import torch.nn as nn
 import brevitas.nn as qnn
 import onnx
 import pytest
+import torch
+import torch.nn as nn
 
-from quantizers import FixedPointPerTensorWeightQuant, FixedPointPerTensorQuantizer, RoundingMode
+from quantizers import FixedPointPerTensorQuantizer, FixedPointPerTensorWeightQuant, RoundingMode
 from quantizers.base_quantizer import BaseQuantizer
 from utils.onnx_export import export_onnx_with_io
 

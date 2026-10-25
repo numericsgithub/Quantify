@@ -28,20 +28,20 @@ guardrails exist):
    range for these is legitimate and must calibrate normally.
 """
 
-import torch
 import pytest
+import torch
 
 from quantizers.activations import (
+    QuantGELU,
+    QuantHardSigmoid,
+    QuantHardSwish,
+    QuantLeakyReLU,
     QuantReLU,
     QuantReLU6,
     QuantSigmoid,
-    QuantTanh,
     QuantSiLU,
-    QuantGELU,
-    QuantLeakyReLU,
     QuantSoftmax,
-    QuantHardSwish,
-    QuantHardSigmoid,
+    QuantTanh,
 )
 from quantizers.base_quantizer import BaseQuantizer
 
@@ -131,8 +131,9 @@ class TestDefaultInputOutputQuantizers:
     def test_onnx_export_has_input_quant_activation_output_quant(self, cls, unsigned_output, kwargs):
         """Exactly 3 ONNX nodes now: input quantizer, activation, output
         quantizer (was 2 before this feature: activation, output quantizer)."""
-        import tempfile
         import os
+        import tempfile
+
         import onnx
 
         module = cls(bit_width=8, **kwargs)

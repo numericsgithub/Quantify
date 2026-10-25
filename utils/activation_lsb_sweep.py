@@ -37,17 +37,17 @@ from typing import List, Optional, Sequence, Tuple, Type
 import torch
 import torch.nn as nn
 
-from quantizers.base_quantizer import BaseQuantizer
 from quantizers.activations import (
+    QuantGELU,
+    QuantLeakyReLU,
     QuantReLU,
     QuantReLU6,
     QuantSigmoid,
-    QuantTanh,
     QuantSiLU,
-    QuantGELU,
-    QuantLeakyReLU,
     QuantSoftmax,
+    QuantTanh,
 )
+from quantizers.base_quantizer import BaseQuantizer
 
 # (name, class) -- order matches the module docstring / CLAUDE.md listing.
 ACTIVATIONS: List[Tuple[str, Type[nn.Module]]] = [

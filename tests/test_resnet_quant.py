@@ -11,10 +11,10 @@ Verifies:
 
 import copy
 
+import brevitas.nn as qnn
 import pytest
 import torch
 import torch.nn as nn
-import brevitas.nn as qnn
 
 from models.resnet_quant import (
     QuantBasicBlock,
@@ -28,7 +28,6 @@ from quantizers.fixedpoint_per_tensor import (
     FixedPointPerTensorWeightQuant,
 )
 from quantizers.manager import QuantizerManager
-
 
 # ---------------------------------------------------------------------------
 # Local fixed-width injector subclasses (avoid sharing state across tests)

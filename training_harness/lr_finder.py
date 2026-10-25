@@ -45,8 +45,8 @@ import torch.nn as nn
 from torch.utils.data import DataLoader
 
 from quantizers.manager import QuantizerManager
-from .trainer_v2 import _reset_and_register, _unpack_batch
 
+from .trainer_v2 import _reset_and_register, _unpack_batch
 
 # ---------------------------------------------------------------------------
 # Result container

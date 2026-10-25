@@ -25,17 +25,17 @@ Example (signed, bit_width=4, lsb=-1):
 """
 
 import math
+from collections import deque
 from enum import Enum
-from typing import Tuple, Optional, Any, Union
+from typing import Any, Optional, Tuple, Union
 
 import torch
-
-from quantizers.base_injector import BaseWeightQuant, BaseActivationQuant
 from brevitas.proxy.parameter_quant import BiasQuantProxyFromInjector
 from torch.autograd import Function
 from torch.onnx import symbolic_helper
+
+from quantizers.base_injector import BaseActivationQuant, BaseWeightQuant
 from quantizers.base_quantizer import BaseQuantizer
-from collections import deque
 
 # ---------------------------------------------------------------------------
 # Core fixed-point quantization

@@ -18,7 +18,7 @@ import numpy as np
 import torch
 
 from importance.discovery import LayerInfo
-from importance.engine import EngineResult, LEVEL_PRIORITY, _quantized_weight, _reduce_grad
+from importance.engine import LEVEL_PRIORITY, EngineResult, _quantized_weight, _reduce_grad
 from importance.graph import sequential_fallback_graph
 from importance.sparsity import layer_sparsity
 

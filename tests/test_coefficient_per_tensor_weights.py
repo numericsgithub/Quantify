@@ -1,9 +1,14 @@
-import unittest
-import torch
 import os
+import unittest
 
-from quantizers.coefficient_per_tensor_weights import CoefficientPerTensorWeightQuantizer, CoefficientPerTensorWeightQuant
+import torch
 from brevitas.nn import QuantLinear
+
+from quantizers.coefficient_per_tensor_weights import (
+    CoefficientPerTensorWeightQuant,
+    CoefficientPerTensorWeightQuantizer,
+)
+
 
 class TestCoefficientQuantizer(unittest.TestCase):
     def setUp(self):
@@ -287,6 +292,7 @@ class TestClippedSTEViaInjector:
 class TestOnnxNodeAttributes:
     def _export(self, tmp_path, lines, weight):
         import onnx
+
         from utils.onnx_export import export_onnx_with_io
 
         path = tmp_path / "c.txt"
@@ -337,6 +343,7 @@ class TestCoefficientsAreNodeAttribute:
 
     def _export(self, tmp_path):
         import onnx
+
         from utils.onnx_export import export_onnx_with_io
 
         paths = []
@@ -393,6 +400,7 @@ class TestCoefficientsAreNodeAttribute:
 
     def test_exported_model_still_matches_eager(self, tmp_path):
         import numpy as np
+
         from tests.onnx_run import run_onnx
         model, torch_model, x = self._export(tmp_path)
         with torch.no_grad():

@@ -22,14 +22,15 @@ Example:
     -0.5 -0.25 0.0 0.25 0.5
 """
 
+import math
+from collections import deque
+from typing import Any, Tuple, Union
+
 import torch
-from typing import Tuple, Any, Union
+from torch.autograd import Function
 
 from quantizers.base_injector import BaseWeightQuant
 from quantizers.base_quantizer import BaseQuantizer
-from torch.autograd import Function
-from collections import deque
-import math
 
 # Weight clipping ceiling, shared with the fixed-point weight quantizer.
 from quantizers.fixedpoint_per_tensor import _MAX_CLIP_PCT_BY_ROLE

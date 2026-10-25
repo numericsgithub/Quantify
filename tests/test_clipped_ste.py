@@ -255,6 +255,7 @@ def test_two_layer_graph_stays_connected():
 def _coefficient_quantizer_factory():
     import os
     import tempfile
+
     from quantizers.coefficient_per_tensor_weights import CoefficientPerTensorWeightQuantizer
 
     # A coefficient set that (scaled) can represent 2.0 but caps below 5.0.

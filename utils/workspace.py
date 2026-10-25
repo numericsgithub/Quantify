@@ -24,7 +24,6 @@ import os
 from dataclasses import dataclass
 from pathlib import Path
 
-
 DEFAULT_WORKDIR_ENV = "QUANT_WORKDIR"
 DEFAULT_ROOT = None
 

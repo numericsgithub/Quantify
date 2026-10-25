@@ -28,16 +28,16 @@ import torch
 import torch.nn.functional as F
 
 from quantizers.activations import (
+    QuantGELU,
+    QuantHardSigmoid,
+    QuantHardSwish,
+    QuantLeakyReLU,
     QuantReLU,
     QuantReLU6,
     QuantSigmoid,
-    QuantTanh,
     QuantSiLU,
-    QuantGELU,
-    QuantLeakyReLU,
     QuantSoftmax,
-    QuantHardSwish,
-    QuantHardSigmoid,
+    QuantTanh,
 )
 
 torch.manual_seed(0)

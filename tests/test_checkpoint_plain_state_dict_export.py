@@ -11,7 +11,9 @@ import torch.nn as nn
 
 from quantizers import FixedPointPerTensorWeightQuant
 from training_harness.checkpointing import (
-    CheckpointManager, export_plain_state_dict, strip_quantizer_state,
+    CheckpointManager,
+    export_plain_state_dict,
+    strip_quantizer_state,
 )
 
 

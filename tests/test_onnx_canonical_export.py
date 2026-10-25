@@ -16,6 +16,7 @@ import os
 import tempfile
 import warnings
 
+import brevitas.nn as qnn
 import numpy as np
 import onnx
 import onnxruntime as ort
@@ -23,7 +24,6 @@ import pytest
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-import brevitas.nn as qnn
 from onnx import TensorProto, helper
 
 from quantizers import (
@@ -47,8 +47,8 @@ from quantizers.layers import (
     QuantConv2d,
     same_pads,
 )
-from utils.onnx_canonical import NonCanonicalONNXError, check_onnx_graph
 from tests.onnx_run import run_onnx
+from utils.onnx_canonical import NonCanonicalONNXError, check_onnx_graph
 from utils.onnx_export import export_onnx_with_io
 
 torch.manual_seed(0)

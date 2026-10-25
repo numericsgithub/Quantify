@@ -7,10 +7,9 @@ import numpy as np
 import pytest
 import torch
 
+import importance.engine as engine_mod
 from importance import analyze
 from importance.storage import _quantize_uint8
-import importance.engine as engine_mod
-
 from tests.importance_test_models import Small2DCNN, make_image_loader
 
 

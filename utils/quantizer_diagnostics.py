@@ -44,11 +44,10 @@ from __future__ import annotations
 import math
 from datetime import datetime
 from pathlib import Path
-from typing import Dict, Any, Optional, Tuple
+from typing import Any, Dict, Optional, Tuple
 
-import torch
 import numpy as np
-
+import torch
 
 # ---------------------------------------------------------------------------
 # Metric computation  (runs on original device — no large CPU transfer)
@@ -442,11 +441,13 @@ def _save_search_plot(
     # orangered = selected, gold = lowest SAD, steelblue = everything else.
     # If selected and lowest-SAD coincide, orangered wins.
     def _bar_color(lsb):
-        if lsb == best_lsb:    return "orangered"
-        if lsb == min_sad_lsb: return "gold"
+        if lsb == best_lsb:
+            return "orangered"
+        if lsb == min_sad_lsb:
+            return "gold"
         return "steelblue"
 
-    ax_sad.bar(lsb_vals, sad_vals, color=[_bar_color(l) for l in lsb_vals],
+    ax_sad.bar(lsb_vals, sad_vals, color=[_bar_color(lsb) for lsb in lsb_vals],
                alpha=0.75, width=0.6)
     ax_sad.set_xlabel("LSB position")
     ax_sad.set_ylabel("SAD", color="steelblue")

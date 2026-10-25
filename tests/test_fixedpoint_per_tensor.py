@@ -24,14 +24,13 @@ import torch
 import torch.nn as nn
 
 from quantizers import (
+    FixedPointPerTensorBiasQuant,
     FixedPointPerTensorQuantizer,
     FixedPointPerTensorWeightQuant,
-    FixedPointPerTensorBiasQuant,
     RoundingMode,
-    quantize_fixed_point,
     find_optimal_lsb,
+    quantize_fixed_point,
 )
-
 
 # =========================================================================
 # 1. Core quantization grid

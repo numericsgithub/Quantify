@@ -56,16 +56,15 @@ on the training hot path.
 
 from typing import Optional
 
+import brevitas.nn as qnn
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-import brevitas.nn as qnn
 from brevitas.nn import quant_activation as _brevitas_act
 from brevitas.nn.quant_layer import QuantNonLinearActLayer
 from torch.autograd import Function
 
 from quantizers.fixedpoint_per_tensor import FixedPointPerTensorActivationQuant, LsbFloorLink
-
 
 # ---------------------------------------------------------------------------
 # Input-quantizer defaults: bit-width asymmetry + saturation-aware range cap

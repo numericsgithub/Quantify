@@ -1,22 +1,27 @@
 import os
+
+import brevitas.nn as qnn
+import pytest
 import torch
 import torch.nn as nn
 import torch.optim as optim
 from torch.utils.data import DataLoader, Subset
 from torchvision import datasets, transforms
-import pytest
 
-import brevitas.nn as qnn
-from quantizers.manager import QuantizerManager
-from quantizers.fixedpoint_per_tensor import FixedPointPerTensorWeightQuant, FixedPointPerTensorActivationQuant, FixedPointPerTensorBiasQuant
-from utils.onnx_export import export_onnx_with_io
 from quantizers.activations import QuantReLU
+from quantizers.fixedpoint_per_tensor import (
+    FixedPointPerTensorActivationQuant,
+    FixedPointPerTensorBiasQuant,
+    FixedPointPerTensorWeightQuant,
+)
+from quantizers.manager import QuantizerManager
 
 # Training Harness Imports
-from training_harness.engine_utils import set_seed, EarlyStopping, EpochTimer
+from training_harness.engine_utils import EarlyStopping, EpochTimer, set_seed
 from training_harness.logger import ExperimentLogger
 from training_harness.metrics import AverageMeter, MetricsTracker
 from training_harness.schedulers import WarmupCosineScheduler
+from utils.onnx_export import export_onnx_with_io
 
 
 class SimpleMNISTNet(nn.Module):

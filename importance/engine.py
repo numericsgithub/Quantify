@@ -195,7 +195,6 @@ def _eager_pass(
     If collect_abs is True (only meaningful when x has batch size 1), also
     updates the abs weight/bias metric -- this is the fallback path.
     """
-    B = x.shape[0]
     acts: Dict[str, torch.Tensor] = {}
     handles = []
 
@@ -294,7 +293,7 @@ def _try_vmap_abs_pass(
     chunk_outputs: int,
     use_quantized_weight: bool,
 ) -> None:
-    from torch.func import functional_call, vmap, jacrev
+    from torch.func import functional_call, jacrev, vmap
 
     all_params = dict(model.named_parameters())
     all_buffers = dict(model.named_buffers())
@@ -436,7 +435,7 @@ def run_analysis(
             out_channels=layer.out_channels or weight_shape[0],
         )
 
-    n_params_total = sum(int(np.prod(l.weight_shape)) for l in layers if l.weight_shape)
+    n_params_total = sum(int(np.prod(layer.weight_shape)) for layer in layers if layer.weight_shape)
     chunk_b, chunk_out = config.chunk_samples, config.chunk_outputs
     if chunk_b is None or chunk_out is None:
         auto_b, auto_out = _default_chunk_sizes(n_params_total, device)

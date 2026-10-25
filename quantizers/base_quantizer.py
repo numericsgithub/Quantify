@@ -9,10 +9,11 @@ Provides shared boilerplate for per-tensor quantizers, including:
 """
 
 import logging
+from abc import ABC, abstractmethod
+from typing import Any, Optional, Tuple
+
 import torch
 import torch.nn as nn
-from abc import ABC, abstractmethod
-from typing import Tuple, Any, Optional
 
 from quantizers.manager import QuantizerManager
 
@@ -624,6 +625,7 @@ class BaseQuantizer(nn.Module, ABC):
             return
 
         from pathlib import Path
+
         from utils.quantizer_diagnostics import run_diagnostics
 
         out_dir = Path(self.quantizer_manager.diagnostics_dir)

@@ -7,11 +7,11 @@ message the training harness prints.
 """
 import logging
 
+import brevitas.nn as qnn
 import pytest
 import torch
-import brevitas.nn as qnn
 
-from quantizers import FixedPointPerTensorWeightQuant, FixedPointPerTensorQuantizer
+from quantizers import FixedPointPerTensorQuantizer, FixedPointPerTensorWeightQuant
 from quantizers.manager import QuantizerManager
 
 

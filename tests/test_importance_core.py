@@ -8,11 +8,19 @@ import torch.nn as nn
 
 from importance import analyze, load
 from importance.discovery import BatchDetectionError
-
 from tests.importance_test_models import (
-    Small2DCNN, Small1DCNN, SmallMLP, ConvBNModel, DepthwiseGroupedModel,
-    BrevitasQuantModel, QuantifyFixedPointModel, TupleOutputModel, ResidualModel,
-    make_image_loader, make_1d_loader, make_flat_loader,
+    BrevitasQuantModel,
+    ConvBNModel,
+    DepthwiseGroupedModel,
+    QuantifyFixedPointModel,
+    ResidualModel,
+    Small1DCNN,
+    Small2DCNN,
+    SmallMLP,
+    TupleOutputModel,
+    make_1d_loader,
+    make_flat_loader,
+    make_image_loader,
 )
 
 

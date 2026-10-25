@@ -16,12 +16,12 @@ and the expected w.grad per element is a plain truth table.
 """
 import os
 
+import brevitas.nn as qnn
 import pytest
 import torch
-import brevitas.nn as qnn
 
 from quantizers import FixedPointPerTensorWeightQuant
-from quantizers.base_quantizer import BaseQuantizer, STE_MODES, normalize_ste_mode
+from quantizers.base_quantizer import STE_MODES, BaseQuantizer, normalize_ste_mode
 from quantizers.coefficient_per_tensor_weights import CoefficientPerTensorWeightQuantizer
 from quantizers.fixedpoint_per_tensor import FixedPointPerTensorQuantizer
 from quantizers.manager import QuantizerManager

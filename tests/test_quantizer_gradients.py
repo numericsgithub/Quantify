@@ -26,9 +26,9 @@ report the actual gradient instead, see module docstring in the PR):
     dL/db = dL/dy_hat * 1.0 = -6.0               (b never touches the quantizer,
                                                     so this must hold in every state)
 """
+import brevitas.nn as qnn
 import pytest
 import torch
-import brevitas.nn as qnn
 
 from quantizers.fixedpoint_per_tensor import FixedPointPerTensorQuantizer, FixedPointPerTensorWeightQuant
 from quantizers.manager import QuantizerManager

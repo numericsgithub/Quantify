@@ -32,7 +32,6 @@ import torch.nn as nn
 from quantizers.base_quantizer import BaseQuantizer
 from quantizers.manager import QuantizerManager
 
-
 # Maps the Brevitas proxy suffix in a named_modules() path to an explicit
 # role label. Checked in order so longer (more specific) suffixes win over
 # shorter ones that would also match (e.g. the fused-activation path before

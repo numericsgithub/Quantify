@@ -26,17 +26,17 @@ import pytest
 import torch
 
 from quantizers.fixedpoint_per_tensor import (
-    quantize_fixed_point_with_integers,
     RoundingMode,
+    quantize_fixed_point_with_integers,
 )
 from utils.activation_lsb_sweep import (
     ACTIVATIONS,
     DEFAULT_BIT_WIDTH,
     DEFAULT_LSB_VALUES,
     build_lsb_table,
+    find_input_quantizer,
     get_input_cap,
     representable_range,
-    find_input_quantizer,
 )
 
 

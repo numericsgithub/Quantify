@@ -8,7 +8,7 @@
 
 See docs/llm/importance_analysis.md for the metrics and on-disk format.
 """
-from importance.api import analyze, view, load
+from importance.api import analyze, load, view
 from importance.storage import Result
 
 __all__ = ["analyze", "view", "load", "Result"]

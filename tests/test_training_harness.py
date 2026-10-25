@@ -1,15 +1,16 @@
 import os
 import tempfile
+
+import pytest
 import torch
 import torch.nn as nn
 import torch.optim as optim
 from torch.utils.data import DataLoader, TensorDataset
-import pytest
 
-from training_harness import QATTrainerV2, TrainerConfigV2, QATScheduleConfigV2
+from quantizers import FixedPointPerTensorWeightQuant
 from quantizers.base_quantizer import BaseQuantizer
 from quantizers.manager import QuantizerManager
-from quantizers import FixedPointPerTensorWeightQuant
+from training_harness import QATScheduleConfigV2, QATTrainerV2, TrainerConfigV2
 
 
 class SimpleQuantizedMNIST(nn.Module):

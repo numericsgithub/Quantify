@@ -30,10 +30,10 @@ that is for real still mid-anneal, permanently suppressing the real event.
 """
 
 
+import brevitas.nn as qnn
 import pytest
 import torch
 import torch.nn as nn
-import brevitas.nn as qnn
 
 from quantizers import FixedPointPerTensorWeightQuant
 from quantizers.base_quantizer import BaseQuantizer

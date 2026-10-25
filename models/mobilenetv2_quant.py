@@ -1,8 +1,10 @@
-import torch.nn as nn
 import brevitas.nn as qnn
-from quantizers.fixedpoint_per_tensor import FixedPointPerTensorWeightQuant
+import torch.nn as nn
+
 from models.quant_activations import QuantReLU6
+from quantizers.fixedpoint_per_tensor import FixedPointPerTensorWeightQuant
 from quantizers.layers import QuantConv2d
+
 
 class QuantInvertedResidual(nn.Module):
     """Quantized Inverted Residual Block for MobileNetV2.

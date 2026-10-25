@@ -15,7 +15,7 @@ import copy
 import pytest
 import torch
 
-from quantizers.activations import QuantReLU, QuantReLU6, QuantSigmoid, QuantTanh, QuantLeakyReLU
+from quantizers.activations import QuantLeakyReLU, QuantReLU, QuantReLU6, QuantSigmoid, QuantTanh
 from quantizers.base_quantizer import BaseQuantizer, reset_calibration_state
 from quantizers.fixedpoint_per_tensor import (
     FixedPointPerTensorQuantizer,

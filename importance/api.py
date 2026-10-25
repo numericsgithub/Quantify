@@ -1,18 +1,17 @@
 """Public API: analyze(), view(). See importance/__init__.py for exports."""
 from __future__ import annotations
 
-from typing import Any, Callable, Optional, Tuple
-
 import logging
+from typing import Any, Callable, Optional, Tuple
 
 import numpy as np
 import torch
 import torch.nn as nn
 
-from importance.discovery import discover_layers, detect_batch, build_output_spec, warn_if_probability_head
+from importance.discovery import build_output_spec, detect_batch, discover_layers, warn_if_probability_head
 from importance.engine import AnalyzeConfig, run_analysis
 from importance.graph import trace_graph
-from importance.storage import Result, DEFAULT_SIZE_WARNING_BYTES
+from importance.storage import DEFAULT_SIZE_WARNING_BYTES, Result
 
 
 def analyze(

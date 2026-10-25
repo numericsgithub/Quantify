@@ -1,6 +1,9 @@
 import unittest
+
 import torch
+
 from quantizers import FixedPointPerTensorQuantizer
+
 
 class TestQuantizerSerialization(unittest.TestCase):
     """

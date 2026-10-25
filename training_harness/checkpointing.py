@@ -21,7 +21,6 @@ import torch.nn as nn
 from quantizers.base_quantizer import reset_calibration_state
 from utils.onnx_export import export_onnx_with_io
 
-
 # ---------------------------------------------------------------------------
 # Data structures
 # -----------------------------------------------------------------------------------

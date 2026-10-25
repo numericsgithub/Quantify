@@ -6,9 +6,9 @@ import torch
 import torch.nn as nn
 from onnx import TensorProto
 
-from quantizers.layers import QuantConv2d
-from quantizers.activations import QuantGELU, QuantHardSigmoid, QuantReLU
 from quantizers import FixedPointPerTensorWeightQuant
+from quantizers.activations import QuantGELU, QuantHardSigmoid, QuantReLU
+from quantizers.layers import QuantConv2d
 from tests.onnx_run import run_onnx
 from utils.onnx_export import export_onnx_with_io, load_embedded_io
 

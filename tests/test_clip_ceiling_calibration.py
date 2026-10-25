@@ -15,16 +15,16 @@ FixedPointPerTensorQuantizer._calibrate):
 [0.1, 0.2, 0.3, 0.8, 1.1] against a range capped at 0.5 clips 2/5 = 40%.
 """
 
-import torch
 import pytest
+import torch
 
 from quantizers.fixedpoint_per_tensor import (
+    FixedPointPerTensorActivationQuant,
+    FixedPointPerTensorBiasQuant,
     FixedPointPerTensorQuantizer,
     FixedPointPerTensorWeightQuant,
-    FixedPointPerTensorBiasQuant,
-    FixedPointPerTensorActivationQuant,
-    find_optimal_lsb,
     RoundingMode,
+    find_optimal_lsb,
 )
 
 

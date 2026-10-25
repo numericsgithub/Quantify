@@ -66,6 +66,7 @@ def dense_export(model: nn.Module):
     lowers to one `Quantify::Dense` node while `torch.onnx.is_in_onnx_export()`;
     eager behaviour is unchanged. Restored on exit, even on error."""
     from brevitas.nn.quant_layer import QuantWeightBiasInputOutputLayer
+
     from quantizers.layers import DenseFn, _value
 
     patched = []

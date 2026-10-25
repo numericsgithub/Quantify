@@ -16,10 +16,10 @@ import os
 from typing import Dict, List, Optional
 
 import matplotlib
-matplotlib.use("Agg")  # Non-interactive backend — safe in all environments
-import matplotlib.pyplot as plt
-import matplotlib.gridspec as gridspec
 
+matplotlib.use("Agg")  # Non-interactive backend — safe in all environments
+import matplotlib.gridspec as gridspec
+import matplotlib.pyplot as plt
 
 # Default colour palette (colourblind-friendly)
 _COLORS = {
@@ -226,7 +226,8 @@ class TrainingPlotter:
         panel = 0
 
         # --- Loss panel ---
-        ax_loss = fig.add_subplot(gs[panel]); panel += 1
+        ax_loss = fig.add_subplot(gs[panel])
+        panel += 1
         _style_axes(ax_loss)
         train_ep, train_loss = tracker.get_metric_series("train_loss")
         val_ep,   val_loss   = tracker.get_metric_series("val_loss")
@@ -234,11 +235,14 @@ class TrainingPlotter:
             ax_loss.plot(train_ep, train_loss, color=_COLORS["train"], label="Train", lw=1.8)
         if val_loss:
             ax_loss.plot(val_ep, val_loss, color=_COLORS["val"], label="Val", lw=1.8)
-        ax_loss.set_title("Loss"); ax_loss.set_xlabel("Epoch"); ax_loss.legend(fontsize=8)
+        ax_loss.set_title("Loss")
+        ax_loss.set_xlabel("Epoch")
+        ax_loss.legend(fontsize=8)
 
         # --- Accuracy panel ---
         if has_acc:
-            ax_acc = fig.add_subplot(gs[panel]); panel += 1
+            ax_acc = fig.add_subplot(gs[panel])
+            panel += 1
             _style_axes(ax_acc)
             train_ea, train_ac = tracker.get_metric_series("train_acc")
             val_ea,   val_ac   = tracker.get_metric_series("val_acc")
@@ -246,14 +250,18 @@ class TrainingPlotter:
                 ax_acc.plot(train_ea, train_ac, color=_COLORS["train"], label="Train", lw=1.8)
             if val_ac:
                 ax_acc.plot(val_ea, val_ac, color=_COLORS["val"], label="Val", lw=1.8)
-            ax_acc.set_title("Accuracy"); ax_acc.set_xlabel("Epoch"); ax_acc.legend(fontsize=8)
+            ax_acc.set_title("Accuracy")
+            ax_acc.set_xlabel("Epoch")
+            ax_acc.legend(fontsize=8)
 
         # --- LR panel ---
         if has_lr:
-            ax_lr = fig.add_subplot(gs[panel]); panel += 1
+            ax_lr = fig.add_subplot(gs[panel])
+            panel += 1
             _style_axes(ax_lr)
             ax_lr.plot(lr_history, color=_COLORS["accent"], lw=1.8)
-            ax_lr.set_title("Learning Rate"); ax_lr.set_xlabel("Step")
+            ax_lr.set_title("Learning Rate")
+            ax_lr.set_xlabel("Step")
             ax_lr.set_yscale("log")
 
         # --- Summary panel (text) ---

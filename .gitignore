@@ -14,8 +14,8 @@ dist/
 downloads/
 eggs/
 .eggs/
-lib/
-lib64/
+/lib/
+/lib64/
 parts/
 sdist/
 var/
@@ -76,9 +76,16 @@ Thumbs.db
 runs/
 checkpoints/
 logs/
-data/
+/data/
 plots/
-output/
+/output/
 
 # Stray run/debug output
 *.log
+
+# Tool caches / local worktrees
+.ruff_cache/
+.mypy_cache/
+.claude/worktrees/
+wandb/
+lightning_logs/

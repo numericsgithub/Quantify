@@ -8,7 +8,6 @@ import torch
 
 from importance import analyze
 from importance.serve import make_server
-
 from tests.importance_test_models import Small2DCNN, make_image_loader
 
 

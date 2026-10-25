@@ -41,19 +41,19 @@ is pinned down as its own test:
       replacement for normal calibration).
 """
 
-import torch
 import pytest
+import torch
 
 from quantizers.activations import (
+    _RELU6_SATURATION,
+    _SIGMOID_SATURATION,
+    _TANH_SATURATION,
     QuantReLU6,
     QuantSigmoid,
     QuantTanh,
-    _RELU6_SATURATION,
-    _TANH_SATURATION,
-    _SIGMOID_SATURATION,
 )
-from quantizers.fixedpoint_per_tensor import find_optimal_lsb, RoundingMode
 from quantizers.base_quantizer import BaseQuantizer
+from quantizers.fixedpoint_per_tensor import RoundingMode, find_optimal_lsb
 
 
 def _quantizers_of(module):

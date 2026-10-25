@@ -20,17 +20,17 @@ Verifies:
 
 import copy
 
+import brevitas.nn as qnn
 import pytest
 import torch
 import torch.nn as nn
-import brevitas.nn as qnn
 
-from utils.bn_fusion import fuse_bn_into_conv
-from quantizers.manager import QuantizerManager
-from quantizers.fixedpoint_per_tensor import FixedPointPerTensorWeightQuant
-from models.resnet_quant import QuantResNet18
 from models.mobilenetv1_quant import QuantMobileNetV1
 from models.mobilenetv2_quant import QuantMobileNetV2
+from models.resnet_quant import QuantResNet18
+from quantizers.fixedpoint_per_tensor import FixedPointPerTensorWeightQuant
+from quantizers.manager import QuantizerManager
+from utils.bn_fusion import fuse_bn_into_conv
 
 
 @pytest.fixture(autouse=True)

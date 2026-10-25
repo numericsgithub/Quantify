@@ -13,8 +13,8 @@ Architecture:
 exports as a canonical ONNX graph (VALID/SAME pads only).
 """
 
-import torch.nn as nn
 import brevitas.nn as qnn
+import torch.nn as nn
 
 from models.quant_activations import QuantReLU6
 from quantizers.layers import QuantConv2d

@@ -15,7 +15,6 @@ import torch
 from quantizers.fixedpoint_per_tensor import FixedPointPerTensorQuantizer
 from quantizers.manager import QuantizerManager
 
-
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------

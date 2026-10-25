@@ -12,9 +12,12 @@ from importance import analyze, load
 from importance.graph import trace_graph
 from importance.serve import make_server
 from importance.sparsity import float_zero_threshold, layer_sparsity
-
 from tests.importance_test_models import (
-    BrevitasQuantModel, ResidualModel, Small2DCNN, TupleOutputModel, make_image_loader,
+    BrevitasQuantModel,
+    ResidualModel,
+    Small2DCNN,
+    TupleOutputModel,
+    make_image_loader,
 )
 
 

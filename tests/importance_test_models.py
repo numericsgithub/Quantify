@@ -1,7 +1,7 @@
 """Small model zoo shared by the importance test suite (not a test file itself)."""
+import brevitas.nn as qnn
 import torch
 import torch.nn as nn
-import brevitas.nn as qnn
 
 from quantizers import FixedPointPerTensorWeightQuant
 
