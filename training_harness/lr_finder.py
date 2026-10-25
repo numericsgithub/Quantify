@@ -322,26 +322,25 @@ def _to_device(batch, device: torch.device):
 
 def _save_quant_attrs(model: nn.Module) -> Dict[str, dict]:
     """Save non-buffer per-quantizer attributes that state_dict does not capture."""
-    from quantizers.base_quantizer import BaseQuantizer
+    from quantizers.base_quantizer import iter_quantizers
     attrs = {}
-    for name, mod in model.named_modules():
-        if isinstance(mod, BaseQuantizer):
-            attrs[name] = {
-                "inference_counter":    mod.inference_counter,
-                "inference_sequence_id": mod.inference_sequence_id,
-                "annealing_alpha_step": mod.annealing_alpha_step,
-                "_calibration_count":   mod._calibration_count,
-                "_was_annealing":       mod._was_annealing,
-                "_post_annealing_fired": mod._post_annealing_fired,
-                "_last_snapshot_seen":  mod._last_snapshot_seen,
-            }
+    for name, mod in iter_quantizers(model):
+        attrs[name] = {
+            "inference_counter":    mod.inference_counter,
+            "inference_sequence_id": mod.inference_sequence_id,
+            "annealing_alpha_step": mod.annealing_alpha_step,
+            "_calibration_count":   mod._calibration_count,
+            "_was_annealing":       mod._was_annealing,
+            "_post_annealing_fired": mod._post_annealing_fired,
+            "_last_snapshot_seen":  mod._last_snapshot_seen,
+        }
     return attrs
 
 
 def _restore_quant_attrs(model: nn.Module, attrs: Dict[str, dict]) -> None:
-    from quantizers.base_quantizer import BaseQuantizer
-    for name, mod in model.named_modules():
-        if isinstance(mod, BaseQuantizer) and name in attrs:
+    from quantizers.base_quantizer import iter_quantizers
+    for name, mod in iter_quantizers(model):
+        if name in attrs:
             a = attrs[name]
             mod.inference_counter      = a["inference_counter"]
             mod.inference_sequence_id  = a["inference_sequence_id"]

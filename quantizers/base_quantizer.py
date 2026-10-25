@@ -10,7 +10,7 @@ Provides shared boilerplate for per-tensor quantizers, including:
 
 import logging
 from abc import ABC, abstractmethod
-from typing import Any, Optional, Tuple
+from typing import Any, Iterator, Optional, Tuple
 
 import torch
 import torch.nn as nn
@@ -249,11 +249,11 @@ class BaseQuantizer(nn.Module, ABC):
         `metrics`, when given (only for "calibration_completed"/
         "calibration_rerun" and "annealing_complete" -- see
         `_compute_event_metrics`), is attached as `record.metrics`: a dict
-        from `utils/quantizer_diagnostics.py::compute_metrics()` with a
+        from `quantizers/diagnostics.py::compute_metrics()` with a
         histogram of the float input, the EXACT per-code quantized-value
         counts, clipped/unclipped counts, LSB/scale, min/max of both the
         quantized grid and the raw input, SQNR, and more. Pass it to
-        `utils.quantizer_diagnostics.plot_quantizer_metrics()` for a ready
+        `quantizers.diagnostics.plot_quantizer_metrics()` for a ready
         -made plot. `None` for every other event (and whenever the
         quantizer subclass doesn't support it, i.e.
         `_get_diagnostics_params()` returns `None`).
@@ -315,7 +315,7 @@ class BaseQuantizer(nn.Module, ABC):
             return None
         diag_params = dict(diag_params)
         diag_params.pop("search_records", None)  # LSB-search-only, unrelated to compute_metrics
-        from utils.quantizer_diagnostics import compute_metrics
+        from quantizers.diagnostics import compute_metrics
         with torch.no_grad():
             return compute_metrics(x.detach(), quantized.detach(), **diag_params)
 
@@ -621,7 +621,7 @@ class BaseQuantizer(nn.Module, ABC):
 
         from pathlib import Path
 
-        from utils.quantizer_diagnostics import run_diagnostics
+        from quantizers.diagnostics import run_diagnostics
 
         out_dir = Path(self.quantizer_manager.diagnostics_dir)
         qid = getattr(self, "quant_id", "unknown")
@@ -661,6 +661,15 @@ class BaseQuantizer(nn.Module, ABC):
             _emit(f"snapshot_{mgr_snap:04d}")
 
 
+def iter_quantizers(model: nn.Module) -> Iterator[Tuple[str, "BaseQuantizer"]]:
+    """Yield ``(name, quantizer)`` for every `BaseQuantizer` submodule of `model`,
+    in `named_modules()` order (declaration order, NOT forward execution order --
+    see `QuantizerManager.quantizers_in_execution_order` and pitfall #9)."""
+    for name, module in model.named_modules():
+        if isinstance(module, BaseQuantizer):
+            yield name, module
+
+
 def reset_calibration_state(model: nn.Module, preserve_calibrated: bool = False) -> int:
     """Reset `search_done` to False for every `BaseQuantizer` submodule of
     `model`, forcing recalibration on the next forward pass.
@@ -681,10 +690,9 @@ def reset_calibration_state(model: nn.Module, preserve_calibrated: bool = False)
         How many quantizers were actually reset.
     """
     count = 0
-    for module in model.modules():
-        if isinstance(module, BaseQuantizer):
-            if preserve_calibrated and module.search_done_value:
-                continue
-            module.set_search_done(False)
-            count += 1
+    for _, module in iter_quantizers(model):
+        if preserve_calibrated and module.search_done_value:
+            continue
+        module.set_search_done(False)
+        count += 1
     return count

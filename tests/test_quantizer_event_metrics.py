@@ -1,7 +1,7 @@
 """
 Tests for the rich metrics dict attached to "calibration_completed"/
 "calibration_rerun" and "annealing_complete" lifecycle log events
-(`BaseQuantizer._compute_event_metrics`, `utils/quantizer_diagnostics.py`).
+(`BaseQuantizer._compute_event_metrics`, `quantizers/diagnostics.py`).
 
 Covers:
     - compute_metrics() correctness: histogram sums to n_elements, exact
@@ -23,12 +23,12 @@ import pytest
 import torch
 
 from quantizers import FixedPointPerTensorQuantizer
-from quantizers.manager import QuantizerManager
-from utils.quantizer_diagnostics import (
+from quantizers.diagnostics import (
     compute_metrics,
     plot_quantizer_metrics,
     plot_quantizer_metrics_grid,
 )
+from quantizers.manager import QuantizerManager
 
 
 @pytest.fixture(autouse=True)
@@ -180,7 +180,7 @@ class TestEventMetricsAttachment:
         """During export isolation (suppress_lifecycle_logging=True), no
         event should fire at all -- and therefore compute_metrics() should
         never even be called (not just discarded)."""
-        import utils.quantizer_diagnostics as diag_mod
+        import quantizers.diagnostics as diag_mod
 
         calls = []
         orig = diag_mod.compute_metrics

@@ -29,7 +29,7 @@ from typing import Optional, Tuple
 
 import torch.nn as nn
 
-from quantizers.base_quantizer import BaseQuantizer
+from quantizers.base_quantizer import iter_quantizers
 from quantizers.manager import QuantizerManager
 
 # Maps the Brevitas proxy suffix in a named_modules() path to an explicit
@@ -101,10 +101,7 @@ def assign_descriptive_quant_ids(
     mgr = manager if manager is not None else QuantizerManager()
 
     seen: dict = {}  # qid -> collision count, for the numeric-suffix dedup
-    for path, module in model.named_modules():
-        if not isinstance(module, BaseQuantizer):
-            continue
-
+    for path, module in iter_quantizers(model):
         parent, role = split_quant_path(path)
         if role:
             parent_us = parent.replace(".", "_")

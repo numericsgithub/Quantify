@@ -442,7 +442,7 @@ def test_two_layer_ste_annealing_alpha_half():
 # NOTE: annealing blend graph structure
 #
 # With the blend active, the alpha=0 and alpha=0.5 graphs both contain
-# FixedPointQuantFnTestingThingsBackward — even at alpha=0, the blend still
+# FixedPointQuantSTEFn.backward — even at alpha=0, the blend still
 # computes `0 * quantized(w)` so the STE node is reachable (gradient through
 # it is exactly 0).  The distinguishing mark is the AddBackward node that
 # represents the blend sum; it is absent in the alpha=1 (pure quantized) graph.
@@ -463,7 +463,7 @@ def test_quant_linear_gradient_flow():
 
     Code path:
         QuantLinear.forward → WeightQuantProxy → FixedPointPerTensorQuantizer
-        → FixedPointQuantFnTestingThingsBackward → weight.grad
+        → FixedPointQuantSTEFn.backward → weight.grad
 
     A broken proxy would leave weight.grad as None even though the standalone
     quantizer tests pass.

@@ -59,7 +59,7 @@ from quantizers.fixedpoint_per_tensor import (
 )
 
 
-def _value(t):
+def unwrap_quant_tensor(t):
     """Unwrap a Brevitas QuantTensor to its plain tensor."""
     return getattr(t, "value", t)
 
@@ -196,8 +196,8 @@ class _SameConvMixin:
     def inner_forward_impl(self, x, quant_weight, quant_bias):
         if not self.same_padding:
             return super().inner_forward_impl(x, quant_weight, quant_bias)
-        x, w = _value(x), _value(quant_weight)
-        b = None if quant_bias is None else _value(quant_bias)
+        x, w = unwrap_quant_tensor(x), unwrap_quant_tensor(quant_weight)
+        b = None if quant_bias is None else unwrap_quant_tensor(quant_bias)
         n = self._spatial_dims
         in_sizes = _spatial(x, n)
         pads = same_pads(in_sizes, self.kernel_size, self.stride, self.dilation)

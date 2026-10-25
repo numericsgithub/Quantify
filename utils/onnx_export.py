@@ -60,13 +60,12 @@ def _freeze_annealing(model: torch.nn.Module) -> dict:
     actually a float/quantized blend, not the real quantized value. See
     docs/llm/pitfalls/brevitas_pitfalls.md.
     """
-    from quantizers.base_quantizer import BaseQuantizer
+    from quantizers.base_quantizer import iter_quantizers
 
     saved = {}
-    for module in model.modules():
-        if isinstance(module, BaseQuantizer):
-            saved[module] = module.annealing_alpha.clone()
-            module.annealing_alpha.fill_(1.0)
+    for _, module in iter_quantizers(model):
+        saved[module] = module.annealing_alpha.clone()
+        module.annealing_alpha.fill_(1.0)
     return saved
 
 
@@ -102,11 +101,11 @@ def _freeze_uncalibrated(model: torch.nn.Module) -> list:
     the real (live) model either, so showing a `Quantify::FixedPointQuant`
     node with a bogus, uncalibrated LSB would be actively misleading.
     """
-    from quantizers.base_quantizer import BaseQuantizer
+    from quantizers.base_quantizer import iter_quantizers
 
     frozen = []
-    for module in model.modules():
-        if isinstance(module, BaseQuantizer) and not module.search_done_value:
+    for _, module in iter_quantizers(model):
+        if not module.search_done_value:
             module.force_passthrough_for_export = True
             frozen.append(module)
     return frozen
@@ -132,13 +131,12 @@ def _suppress_lifecycle_logging(model: torch.nn.Module) -> list:
     finishes later in training. See pitfall #19 in
     docs/llm/pitfalls/brevitas_pitfalls.md.
     """
-    from quantizers.base_quantizer import BaseQuantizer
+    from quantizers.base_quantizer import iter_quantizers
 
     touched = []
-    for module in model.modules():
-        if isinstance(module, BaseQuantizer):
-            module.suppress_lifecycle_logging = True
-            touched.append(module)
+    for _, module in iter_quantizers(model):
+        module.suppress_lifecycle_logging = True
+        touched.append(module)
     return touched
 
 

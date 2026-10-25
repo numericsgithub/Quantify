@@ -196,8 +196,8 @@ class TestCalibrationSearch:
         assert _calibrate(q, x)[1] == 2
 
     def test_default_ceiling_matches_fixedpoint_weights(self, tmp_path):
-        from quantizers.fixedpoint_per_tensor import _MAX_CLIP_PCT_BY_ROLE
-        assert _make(tmp_path, ["-1 0 1"]).max_clip_pct == _MAX_CLIP_PCT_BY_ROLE["weight"]
+        from quantizers.fixedpoint_per_tensor import MAX_CLIP_PCT_BY_ROLE
+        assert _make(tmp_path, ["-1 0 1"]).max_clip_pct == MAX_CLIP_PCT_BY_ROLE["weight"]
 
     def test_falls_back_to_least_clipping_when_nothing_qualifies(self, tmp_path):
         """No candidate can satisfy a negative ceiling, so the least-clipping

@@ -67,7 +67,7 @@ def dense_export(model: nn.Module):
     eager behaviour is unchanged. Restored on exit, even on error."""
     from brevitas.nn.quant_layer import QuantWeightBiasInputOutputLayer
 
-    from quantizers.layers import DenseFn, _value
+    from quantizers.layers import DenseFn, unwrap_quant_tensor
 
     patched = []
     for module in model.modules():
@@ -79,9 +79,9 @@ def dense_export(model: nn.Module):
             def inner(self, x, quant_weight, quant_bias, _orig=original):
                 if not torch.onnx.is_in_onnx_export():
                     return _orig(x, quant_weight, quant_bias)
-                w = _value(quant_weight)
-                b = _zero_bias(w) if quant_bias is None else _value(quant_bias)
-                return DenseFn.apply(_value(x), w, b)
+                w = unwrap_quant_tensor(quant_weight)
+                b = _zero_bias(w) if quant_bias is None else unwrap_quant_tensor(quant_bias)
+                return DenseFn.apply(unwrap_quant_tensor(x), w, b)
 
             name = "inner_forward_impl"
             fn = inner

@@ -33,7 +33,7 @@ from quantizers.base_injector import BaseWeightQuant
 from quantizers.base_quantizer import BaseQuantizer
 
 # Weight clipping ceiling, shared with the fixed-point weight quantizer.
-from quantizers.fixedpoint_per_tensor import _MAX_CLIP_PCT_BY_ROLE
+from quantizers.fixedpoint_per_tensor import MAX_CLIP_PCT_BY_ROLE
 
 # Calibration tries the shift that just covers the weight range, plus this many
 # shifts to either side (2 * radius + 1 candidates per coefficient set).
@@ -147,7 +147,7 @@ class CoefficientPerTensorWeightQuantizer(BaseQuantizer):
         self,
         filepath: str,
         clipped_ste: Union[bool, str] = "clip",
-        max_clip_pct: float = _MAX_CLIP_PCT_BY_ROLE["weight"],
+        max_clip_pct: float = MAX_CLIP_PCT_BY_ROLE["weight"],
     ):
         # There is no bit_width: the representable values are given by the
         # coefficient sets, whose sizes differ. (BaseQuantizer still stores

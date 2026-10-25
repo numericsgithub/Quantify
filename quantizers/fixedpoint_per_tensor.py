@@ -138,8 +138,7 @@ def quantize_fixed_point(inputs: torch.Tensor, lsb: int, bit_width: int, signed:
     up in BaseQuantizer.forward via ClippedSTEFn + _in_range_mask, so it is
     shared by all quantizers rather than baked into this function.
     """
-    quantized, _, _, _ = FixedPointQuantFnTestingThings.apply(inputs, lsb, bit_width, signed, rounding_mode, narrow_range)
-    # quantized, _ =  quantize_fixed_point_with_integers(inputs, lsb, bit_width, signed, rounding_mode, narrow_range)
+    quantized, _, _, _ = FixedPointQuantSTEFn.apply(inputs, lsb, bit_width, signed, rounding_mode, narrow_range)
 
     return quantized
 
@@ -364,8 +363,11 @@ def _round(x: torch.Tensor, mode: RoundingMode) -> torch.Tensor:
 # ONNX Custom Node Shim
 # ---------------------------------------------------------------------------
 
-class FixedPointQuantFnTestingThings(Function):
-    """Plain fake-quantize with a straight-through backward and NO `symbolic()`.
+class FixedPointQuantSTEFn(Function):
+    """Plain fake-quantize whose only job is the straight-through backward; NO `symbolic()`.
+
+    The rounding in `quantize_fixed_point_with_integers` has zero gradient, so
+    this Function is what makes `quantize_fixed_point` differentiable.
 
     Used by `quantize_fixed_point` (e.g. the LSB calibration search). Without a
     `symbolic()` it cannot be exported -- `FixedPointQuantFn` below is the
@@ -490,7 +492,7 @@ class FixedPointQuantFn(Function):
 # already guarantees 0% clipping through a different mechanism -- see
 # find_optimal_lsb's docstring) -- "unknown" (a standalone quantizer with no
 # role set) is unconstrained, matching the pre-existing default behavior.
-_MAX_CLIP_PCT_BY_ROLE = {
+MAX_CLIP_PCT_BY_ROLE = {
     "weight": 15.0,
     "bias": 0.0,
 }
@@ -658,7 +660,7 @@ class FixedPointPerTensorQuantizer(BaseQuantizer):
             self.rounding_mode,
             self.narrow_range,
             prefer_high_lsb=(self.quantizer_role == "activation"),
-            max_clip_pct=_MAX_CLIP_PCT_BY_ROLE.get(self.quantizer_role),
+            max_clip_pct=MAX_CLIP_PCT_BY_ROLE.get(self.quantizer_role),
             max_abs_value=self.max_abs_value,
             min_lsb=(self.lsb_floor_link.lsb_floor()
                      if self.lsb_floor_link is not None else None),

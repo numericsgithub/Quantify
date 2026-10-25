@@ -1,5 +1,5 @@
 """
-Sanity checks for utils/activation_lsb_sweep.py's LSB table (and, by
+Sanity checks for quantizers/activation_lsb_sweep.py's LSB table (and, by
 extension, for the saturation-aware input-range guardrail it was built to
 visualize -- pitfall #21 in docs/llm/pitfalls/brevitas_pitfalls.md).
 
@@ -25,11 +25,7 @@ sweep, not just that the table *looks* right:
 import pytest
 import torch
 
-from quantizers.fixedpoint_per_tensor import (
-    RoundingMode,
-    quantize_fixed_point_with_integers,
-)
-from utils.activation_lsb_sweep import (
+from quantizers.activation_lsb_sweep import (
     ACTIVATIONS,
     DEFAULT_BIT_WIDTH,
     DEFAULT_LSB_VALUES,
@@ -37,6 +33,10 @@ from utils.activation_lsb_sweep import (
     find_input_quantizer,
     get_input_cap,
     representable_range,
+)
+from quantizers.fixedpoint_per_tensor import (
+    RoundingMode,
+    quantize_fixed_point_with_integers,
 )
 
 
@@ -243,7 +243,7 @@ class TestAllowedColumnMatchesRealCalibration:
 
 class TestTableFormatting:
     def test_print_all_tables_runs_without_error(self, capsys):
-        from utils.activation_lsb_sweep import print_all_tables
+        from quantizers.activation_lsb_sweep import print_all_tables
 
         print_all_tables()
         captured = capsys.readouterr()
