@@ -69,7 +69,11 @@ class Workspace:
     def at(cls, root: os.PathLike | str, sub_folder_name: os.PathLike | str) -> "Workspace":
         """Build a Workspace rooted at ``root`` (expanded & resolved),
         and create its subdirectories."""
-        return cls(root_folder_path=Path(root).expanduser().resolve(), root_sub_folder_path=Path(root / sub_folder_name).expanduser().resolve()).ensure()
+        root_path = Path(root).expanduser().resolve()
+        return cls(
+            root_folder_path=root_path,
+            root_sub_folder_path=(root_path / sub_folder_name).resolve(),
+        ).ensure()
 
 
 def add_workspace_args(
@@ -110,7 +114,7 @@ def workspace_from_args(args: argparse.Namespace) -> Workspace:
         main_root = Path(env_root)
     else:
         if DEFAULT_ROOT is None:
-            raise Exception("Set enviroment variable " + env_root)
+            raise Exception(f"Set the environment variable {DEFAULT_WORKDIR_ENV}")
         main_root = DEFAULT_ROOT
 
     if "/" in str(args.workdir).strip() or "\\" in str(args.workdir).strip():
