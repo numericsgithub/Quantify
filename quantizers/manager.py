@@ -114,7 +114,7 @@ class QuantizerManager:
                 ramp up again like a freshly-calibrated quantizer.
 
         This is the real "start QAT" entry point used by the training
-        harness (`trainer_v2.py::_activate_qat`), which never calls
+        harness (`trainer.py::_activate_qat`), which never calls
         `enable_quantization()` -- so it must clear
         `quantization_globally_disabled` itself, or a model that began with
         `disable_quantization()` (float warmup) would stay hard-disabled

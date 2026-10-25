@@ -1,5 +1,5 @@
 """
-Tests for QATTrainerV2._activate_qat() with preserve_calibrated_quantizers.
+Tests for QATTrainer._activate_qat() with preserve_calibrated_quantizers.
 
 Verifies that quantizers already calibrated (search_done=True) before QAT
 activates — the situation after loading a PTQ checkpoint produced by
@@ -17,8 +17,8 @@ import torch.nn as nn
 
 from quantizers.fixedpoint_per_tensor import FixedPointPerTensorWeightQuant
 from quantizers.manager import QuantizerManager
-from training_harness.config_v2 import QATScheduleConfigV2, TrainerConfigV2
-from training_harness.trainer_v2 import QATTrainerV2, _reset_and_register
+from training_harness.config import QATScheduleConfig, TrainerConfig
+from training_harness.trainer import QATTrainer, _reset_and_register
 
 
 class _WQ(FixedPointPerTensorWeightQuant):
@@ -49,18 +49,18 @@ def reset_manager():
     QuantizerManager().reset()
 
 
-def _make_trainer(tmp_path, preserve: bool) -> QATTrainerV2:
+def _make_trainer(tmp_path, preserve: bool) -> QATTrainer:
     model = _TinyModel()
     optimizer = torch.optim.SGD(model.parameters(), lr=1e-3)
     x = torch.randn(4, 3, 8, 8)
     y = torch.randint(0, 2, (4,))
     loader = [(x, y)]
 
-    config = TrainerConfigV2(
+    config = TrainerConfig(
         experiment_name="test_preserve_calibrated",
         output_dir=str(tmp_path),
         epochs=1,
-        qat=QATScheduleConfigV2(
+        qat=QATScheduleConfig(
             float_warmup_epochs=0,
             annealing_steps=10,
             quantization_start_gap=5,
@@ -68,7 +68,7 @@ def _make_trainer(tmp_path, preserve: bool) -> QATTrainerV2:
         ),
         early_stopping_patience=None,
     )
-    return QATTrainerV2(
+    return QATTrainer(
         config=config, model=model, optimizer=optimizer,
         train_loader=loader, val_loader=None, loss_fn=nn.CrossEntropyLoss(),
     )

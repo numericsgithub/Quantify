@@ -665,7 +665,7 @@ def reset_calibration_state(model: nn.Module, preserve_calibrated: bool = False)
     """Reset `search_done` to False for every `BaseQuantizer` submodule of
     `model`, forcing recalibration on the next forward pass.
 
-    Used by `training_harness` (`checkpointing.py`, `trainer_v2.py`) instead
+    Used by `training_harness` (`checkpointing.py`, `trainer.py`) instead
     of the previous pattern of iterating `model.named_buffers()` and
     string-matching on `"search_done"`/`"calibration_done"`: that was fragile
     (name matching) and, for the preserve-calibrated variant, called

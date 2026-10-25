@@ -16,4 +16,4 @@ Replaces the old root-level `POSSIBLY_DEAD_QUANTIZER_CODE.md`. Each former candi
 - `FixedPointQuantFnTestingThings`: still applied inside `quantize_fixed_point`. Replacing it with a direct `quantize_fixed_point_with_integers` call is a hot-path change (calibration search loop), so it is a separate, test-gated refactor.
 - `detect_signed`, `QuantizerManager.enable_quantization`: no src callers, but public helpers exercised by many tests.
 - `RoundingMode.ROUND` vs `ROUND_TO_NEAREST_EVEN`: both used by tests and by `utils/onnx_self_contained.py`. Merging them would change numerics.
-- Unused but public: `EpochMetrics.update_scales` and `MetricsTracker.current_avg`/`latest`/`all_epoch_dicts` in `training_harness/metrics.py`, `ExperimentLogger.log_image`, `QATTrainerV2.evaluate`, scheduler `get_lr`. Cheap, plausible user-facing API; remove only with a deliberate API decision.
+- Unused but public: `EpochMetrics.update_scales` and `MetricsTracker.current_avg`/`latest`/`all_epoch_dicts` in `training_harness/metrics.py`, `ExperimentLogger.log_image`, `QATTrainer.evaluate`, scheduler `get_lr`. Cheap, plausible user-facing API; remove only with a deliberate API decision.

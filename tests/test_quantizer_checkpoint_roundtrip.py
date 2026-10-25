@@ -25,7 +25,7 @@ model's own state_dict onto itself). Two consequences:
      model.named_modules()) after a load is therefore at risk of touching
      dead objects with zero effect on the real model, or of double-counting
      in progress/diagnostics output. The mitigation already used by the real
-     training flow is training_harness.trainer_v2._reset_and_register(model),
+     training flow is training_harness.trainer._reset_and_register(model),
      which wipes and rebuilds the registry purely from the model's current
      module tree — this file locks that mitigation in with a test.
 """
@@ -42,7 +42,7 @@ from quantizers.fixedpoint_per_tensor import (
     FixedPointPerTensorWeightQuant,
 )
 from quantizers.manager import QuantizerManager
-from training_harness.trainer_v2 import _reset_and_register
+from training_harness.trainer import _reset_and_register
 
 
 class _WQ(FixedPointPerTensorWeightQuant):
@@ -285,7 +285,7 @@ class TestManagerRegistryOrphansAfterLoad:
 
     def test_reset_and_register_eliminates_the_orphans(self):
         """The mitigation already used by the real training flow
-        (training_harness/trainer_v2.py calls this early in fit(), after any
+        (training_harness/trainer.py calls this early in fit(), after any
         --init-from-ptq checkpoint load and before _activate_qat())."""
         model = _RoundTripModel()
         model.load_state_dict(model.state_dict(), strict=False)

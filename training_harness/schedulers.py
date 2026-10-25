@@ -3,7 +3,7 @@ schedulers.py — Learning rate scheduler and model-state helpers.
 
 Provides:
   WarmupCosineScheduler  — linear warmup then cosine annealing
-  freeze_bn / collect_scale_factors / _set_quant_enabled — used by QATTrainerV2
+  freeze_bn / collect_scale_factors / _set_quant_enabled — used by QATTrainer
 """
 
 from __future__ import annotations
@@ -130,7 +130,7 @@ def collect_scale_factors(model: nn.Module) -> dict[str, float]:
     REAL forward pass through our `BaseQuantizer.forward()` on the model's
     live weight tensor, right here, as a side effect of merely reading the
     scale. Since this is called once per epoch as soon as QAT is active
-    (`QATTrainerV2`, in eval mode, outside the normal gated
+    (`QATTrainer`, in eval mode, outside the normal gated
     training loop), it used to make ANY quantizer whose staggered gate
     threshold happens to be 0 (the first one reached in forward order)
     calibrate, open its gate, and start annealing on the very first epoch

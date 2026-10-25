@@ -68,7 +68,7 @@ class TestDisableQuantizationSkipsCompute:
         assert q.search_done_value is True  # calibration now actually ran
 
     def test_disabled_then_reactivated_via_set_annealing_for_n_inferences(self):
-        """The real production path (training_harness/trainer_v2.py
+        """The real production path (training_harness/trainer.py
         _activate_qat()): float warmup calls disable_quantization(), QAT
         activation calls set_annealing_for_n_inferences() directly -- it
         never calls enable_quantization(). Regression guard: this specific

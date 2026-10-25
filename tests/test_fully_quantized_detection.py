@@ -1,7 +1,7 @@
 """
 Tests for QuantizerManager.is_quantizing_everything_fully and the QAT cascade.
 
-The early-stopping gate in trainer_v2 fires only after
+The early-stopping gate in trainer fires only after
 `QuantizerManager().is_quantizing_everything_fully` returns True.  These tests
 verify that the flag:
   - stays False while any quantizer is still gated or still annealing

@@ -16,7 +16,7 @@ from typing import TYPE_CHECKING
 from tqdm import tqdm
 
 if TYPE_CHECKING:
-    from .trainer_v2 import QATTrainerV2
+    from .trainer import QATTrainer
 
 
 _HELP = """
@@ -33,12 +33,12 @@ _HELP = """
 
 class TrainingConsole:
     """
-    Attach to a QATTrainerV2 to get a live command prompt during training.
+    Attach to a QATTrainer to get a live command prompt during training.
 
     Commands are collected in a background thread and executed between epochs
     so they never interrupt a batch mid-flight.
 
-    Usage inside QATTrainerV2.fit()::
+    Usage inside QATTrainer.fit()::
 
         console = TrainingConsole(self)
         console.start()
@@ -50,7 +50,7 @@ class TrainingConsole:
         console.stop()
     """
 
-    def __init__(self, trainer: "QATTrainerV2") -> None:
+    def __init__(self, trainer: "QATTrainer") -> None:
         self.trainer = trainer
         self._queue: queue.Queue[str] = queue.Queue()
         self._stop_event = threading.Event()

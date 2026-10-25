@@ -10,7 +10,7 @@ from torch.utils.data import DataLoader, TensorDataset
 from quantizers import FixedPointPerTensorWeightQuant
 from quantizers.base_quantizer import BaseQuantizer
 from quantizers.manager import QuantizerManager
-from training_harness import QATScheduleConfigV2, QATTrainerV2, TrainerConfigV2
+from training_harness import QATScheduleConfig, QATTrainer, TrainerConfig
 
 
 class SimpleQuantizedMNIST(nn.Module):
@@ -53,14 +53,14 @@ def dummy_mnist_data():
 
 def test_training_harness_basic(dummy_mnist_data):
     """
-    QATTrainerV2 end to end on a tiny quantized CNN: float warmup with
+    QATTrainer end to end on a tiny quantized CNN: float warmup with
     quantization fully disabled, then QAT activates after the warmup budget,
     the quantizers calibrate and start annealing, metrics are tracked and a
     checkpoint is written.
     """
     QuantizerManager().reset()
     with tempfile.TemporaryDirectory() as tmpdir:
-        config = TrainerConfigV2(
+        config = TrainerConfig(
             experiment_name="test_harness_mnist",
             output_dir=tmpdir,
             epochs=3,
@@ -68,7 +68,7 @@ def test_training_harness_basic(dummy_mnist_data):
             learning_rate=1e-3,
             device="cpu",
             num_classes=10,
-            qat=QATScheduleConfigV2(
+            qat=QATScheduleConfig(
                 float_warmup_epochs=1,
                 annealing_steps=4,
                 quantization_start_gap=1,
@@ -81,7 +81,7 @@ def test_training_harness_basic(dummy_mnist_data):
         quantizers = [m for m in model.modules() if isinstance(m, BaseQuantizer)]
         assert quantizers, "test model has no Quantify quantizers"
 
-        trainer = QATTrainerV2(
+        trainer = QATTrainer(
             config=config,
             model=model,
             optimizer=optimizer,

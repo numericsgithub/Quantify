@@ -1,7 +1,7 @@
 # Training Harness
 
 The `training_harness` provides an end-to-end QAT pipeline built around
-`QATTrainerV2` (`training_harness/trainer_v2.py`).
+`QATTrainer` (`training_harness/trainer.py`).
 
 ## Pipeline Phases
 1. **Float warmup**: all quantization is fully disabled (`QuantizerManager().disable_quantization()`) and the model trains in full precision.
@@ -10,16 +10,16 @@ The `training_harness` provides an end-to-end QAT pipeline built around
 4. **Checkpointing & Logging**: automatic top-K checkpointing, CSV/TensorBoard/W&B logging, and training curve plotting.
 
 ## Configuration and usage
-`TrainerConfigV2` holds the run settings, and its `qat` field
-(`QATScheduleConfigV2`) controls when and how quantization switches on:
+`TrainerConfig` holds the run settings, and its `qat` field
+(`QATScheduleConfig`) controls when and how quantization switches on:
 ```python
-from training_harness import QATTrainerV2, TrainerConfigV2, QATScheduleConfigV2
+from training_harness import QATTrainer, TrainerConfig, QATScheduleConfig
 
-config = TrainerConfigV2(
+config = TrainerConfig(
     experiment_name="my_qat_run",
     epochs=50,
     learning_rate=1e-3,
-    qat=QATScheduleConfigV2(
+    qat=QATScheduleConfig(
         float_warmup_epochs=10,    # QAT starts after this, or earlier on a val_loss plateau
         plateau_patience=5,
         annealing_steps=100,       # forward passes for each quantizer to ramp 0 -> 1
@@ -27,7 +27,7 @@ config = TrainerConfigV2(
     ),
 )
 
-trainer = QATTrainerV2(
+trainer = QATTrainer(
     config=config,
     model=model,
     optimizer=optimizer,
@@ -40,8 +40,8 @@ tracker = trainer.fit()
 ```
 
 ## Key Classes
-- `QATTrainerV2`: orchestrates the training loop, QAT activation, validation, checkpointing and logging.
-- `TrainerConfigV2` / `QATScheduleConfigV2` / `CheckpointConfig` / `LoggingConfig`: configuration (`config_v2.py`).
+- `QATTrainer`: orchestrates the training loop, QAT activation, validation, checkpointing and logging.
+- `TrainerConfig` / `QATScheduleConfig` / `CheckpointConfig` / `LoggingConfig`: configuration (`config.py`).
 - `CheckpointManager`: saving/loading model state and ONNX export.
 - `ExperimentLogger`: routes metrics to CSV, TensorBoard and W&B.
 - `find_lr`: learning-rate range test using the same model setup as the trainer.

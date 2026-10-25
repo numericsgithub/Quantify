@@ -38,7 +38,7 @@ trainer) are archived on the `old_examples` branch.
 
 ## 🛠 Training Harness
 
-The `training_harness` provides an end-to-end QAT pipeline (`QATTrainerV2`):
+The `training_harness` provides an end-to-end QAT pipeline (`QATTrainer`):
 1. **Float warmup**: all quantization is fully disabled (`QuantizerManager().disable_quantization()`) and the model trains in full precision.
 2. **QAT activation**: after `float_warmup_epochs`, or earlier when `val_loss` plateaus, calibration buffers are reset, BatchNorm is frozen, and the quantizers switch on one by one (`quantization_start_gap`), each annealing from float to fully quantized over `annealing_steps` forward passes.
 3. **QAT**: fine-tune with fake quantization; gradients flow through the STE.
@@ -46,13 +46,13 @@ The `training_harness` provides an end-to-end QAT pipeline (`QATTrainerV2`):
 
 ### Basic Usage
 ```python
-from training_harness import QATTrainerV2, TrainerConfigV2, QATScheduleConfigV2
+from training_harness import QATTrainer, TrainerConfig, QATScheduleConfig
 
-config = TrainerConfigV2(
+config = TrainerConfig(
     experiment_name="my_qat_run",
     epochs=50,
     learning_rate=1e-3,
-    qat=QATScheduleConfigV2(
+    qat=QATScheduleConfig(
         float_warmup_epochs=10,    # QAT starts after this, or earlier on a val_loss plateau
         plateau_patience=5,
         annealing_steps=100,       # forward passes for each quantizer to ramp 0 -> 1
@@ -60,7 +60,7 @@ config = TrainerConfigV2(
     ),
 )
 
-trainer = QATTrainerV2(
+trainer = QATTrainer(
     config=config,
     model=model,
     optimizer=optimizer,
