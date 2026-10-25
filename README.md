@@ -13,7 +13,7 @@ pip install -e ".[dev]"
 ## 📂 Project Structure
 
 ```
-├── models/              # PyTorch model definitions (CIFAR-10, MobileNet, ResNet)
+├── models/              # PyTorch model definitions (MobileNet, ResNet)
 ├── quantizers/          # Custom Brevitas quantizers (Fixed-Point, Coefficient, SiLU)
 ├── training_harness/    # QAT training loop, calibration, checkpointing, logging
 ├── importance/          # Importance analysis + interactive graph viewer
@@ -133,6 +133,7 @@ on-disk format, and known v1 limitations.
 
 - **Conventions**: See `docs/llm/CONVENTIONS.md` for dependency and skill management rules.
 - **Pitfalls**: Check `docs/llm/pitfalls/brevitas_pitfalls.md` for common Brevitas/ONNX export gotchas.
+- **Index**: `docs/index.md` links every guide, including the skills under `docs/llm/skills/`.
 
 ## 🧪 Testing
 

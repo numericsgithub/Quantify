@@ -24,7 +24,7 @@ export QUANT_WORKDIR=/tmp/quanttests
 
 - `quantizers/` — Custom Brevitas quantizers with ONNX export support
 - `training_harness/` — End-to-end QAT pipeline (`QATTrainerV2`, `config_v2`, schedulers, checkpointing, logging)
-- `models/` — Quantized model definitions (CIFAR-10, MobileNetV1/V2, ResNet)
+- `models/` — Quantized model definitions (MobileNetV1/V2, ResNet)
 - `utils/` — ONNX export helpers, workspace management, model introspection
 - `docs/llm/` — Agent-facing docs: conventions, pitfalls, skills (read these before touching unfamiliar subsystems)
 

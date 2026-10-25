@@ -53,73 +53,6 @@
 **How to Prevent It:**
 - Keep `return_quant_tensor=False` (default) unless specifically required by the architecture or export target.
 
-## 9. Brevitas `Injector` Subclasses Are Immutable After Definition
-
-**When this happens:** You dynamically create an `Injector` subclass at runtime (e.g., to set `bit_width` or `filepath` from a CLI arg) and then try to set any attribute on the class object itself — including cosmetic ones like `__name__` or `__qualname__`.
-
-**The Problem:** Brevitas injectors inherit from `_dependencies.Injector`, which overrides `__setattr__` to raise `DependencyError: 'Injector' modification is not allowed`. This applies to *any* attribute set on the class after its `class` block is evaluated, not just quantization-specific ones. Example that breaks:
-
-```python
-class WeightQuant(FixedPointPerTensorWeightQuant):
-    bit_width = bw
-WeightQuant.__name__ = "MyQuant"   # ← DependencyError here
-```
-
-**How to Prevent It:**
-- All injector attributes must be set **inside** the `class` body — never after the `class` statement.
-- This includes cosmetic attributes like `__name__`. If you need a descriptive name, embed it directly in the class definition using a string variable before the class block:
-
-```python
-# Correct: all attributes set inside the class body
-bw = args.weight_bits
-class WeightQuant(FixedPointPerTensorWeightQuant):
-    bit_width = bw          # ← fine: captured from enclosing scope at class creation time
-```
-
-- Never call `setattr()` on an injector class either — it hits the same guard.
-
-## 10. Residual Paths Are Not Quantized Without Explicit `QuantIdentity`
-
-**When this happens:** You build a quantized residual network (ResNet-style) and pass `act_quant` to the blocks, expecting all activations to be quantized.
-
-**The Problem:** Two paths in a residual block produce unquantized tensors unless you explicitly add `QuantIdentity`:
-
-1. **Pre-add main path**: After the last `conv → BN` in each block (before the residual add), the BN output is a plain float. The `QuantReLU` only quantizes the output of the *sum*, not the individual branches.
-2. **Downsample skip path**: The `1×1 QuantConv2d → BN` in the downsample branch produces an unquantized tensor. Without a `QuantIdentity` after the BN, the identity branch is float when it reaches the add.
-
-These unquantized tensors are not fake-quantized during QAT, so the simulation does not match the deployed hardware behavior.
-
-**How to Prevent It:**
-
-Add `QuantIdentity` to both paths. In each block, add a `pre_add_quant` module after the last BN:
-
-```python
-self.pre_add_quant = qnn.QuantIdentity(act_quant=act_quant) if act_quant else None
-
-# In forward():
-out = self.bn2(self.conv2(out))
-if self.pre_add_quant is not None:
-    out = self.pre_add_quant(out)
-```
-
-And append a `QuantIdentity` to the downsample `Sequential` when `act_quant` is set:
-
-```python
-ds_modules = [QuantConv2d(...), BatchNorm2d(...)]
-if act_quant is not None:
-    ds_modules.append(qnn.QuantIdentity(act_quant=act_quant))
-downsample = nn.Sequential(*ds_modules)
-```
-
-`QuantIdentity` accepts `act_quant` injectors designed for activations. The `FixedPointPerTensorQuantizer` auto-detects signed/unsigned during calibration, so it correctly handles the negative BN outputs on the pre-add path even though `FixedPointPerTensorActivationQuant` defaults to `signed=False`.
-
-Two additional boundary points also require `QuantIdentity`:
-
-- **Network input** (before the first conv): the raw float image must be quantized before entering the stem. Add `self.input_quant = QuantIdentity(act_quant=act_quant)` and call it at the top of `forward()`.
-- **`AdaptiveAvgPool2d` output** (before the FC layer): avgpool computes a spatial mean of quantized values, which lands off the quantization grid. Add `self.post_pool_quant = QuantIdentity(act_quant=act_quant)` and call it after avgpool. `MaxPool2d` does *not* need this treatment — selecting a max from quantized values stays on the grid.
-
-The FC output (logits) should intentionally remain unquantized.
-
 ## 8. Custom ONNX Nodes Don't Run in ORT
 **When this happens:** You export a model with `Quantify::CustomOp` and expect ONNX Runtime to execute it natively.
 **The Problem:** ORT only executes standard ONNX ops or registered custom kernels. Unregistered `Quantify::` nodes will cause fallback warnings or runtime errors.
@@ -356,3 +289,70 @@ Note what did *not* need to change: the calibration **algorithm**. This is still
 - Feed **float64** arrays to the graph (a float32 feed is an ORT "Unexpected input data type" error). Embedded dummy I/O is float64 too.
 - onnxruntime's CPU provider has **no float64 kernels** for Conv, ConvTranspose, Erf, HardSigmoid, ... Run such graphs with `onnx.reference.ReferenceEvaluator` (tests: `tests/onnx_run.py::run_onnx`, ORT first, reference evaluator as fallback).
 - Function bodies (`utils/onnx_self_contained.py`) must be dtype-agnostic: float constants go through `_ref_float`/`_fconst` (`CastLike` to `x`). ONNX float *attributes* are float32 by spec, so a value that matters bit-exactly must not travel as one -- `Quantify::HardSigmoid` therefore computes `Clip(x+3,0,6)/6` and ignores its `alpha`/`beta` (`float32(1/6)*x` flipped a rounding tie downstream). `LeakyRelu.alpha` is still a float32 attribute.
+
+## 28. Brevitas `Injector` Subclasses Are Immutable After Definition
+
+**When this happens:** You dynamically create an `Injector` subclass at runtime (e.g., to set `bit_width` or `filepath` from a CLI arg) and then try to set any attribute on the class object itself — including cosmetic ones like `__name__` or `__qualname__`.
+
+**The Problem:** Brevitas injectors inherit from `_dependencies.Injector`, which overrides `__setattr__` to raise `DependencyError: 'Injector' modification is not allowed`. This applies to *any* attribute set on the class after its `class` block is evaluated, not just quantization-specific ones. Example that breaks:
+
+```python
+class WeightQuant(FixedPointPerTensorWeightQuant):
+    bit_width = bw
+WeightQuant.__name__ = "MyQuant"   # ← DependencyError here
+```
+
+**How to Prevent It:**
+- All injector attributes must be set **inside** the `class` body — never after the `class` statement.
+- This includes cosmetic attributes like `__name__`. If you need a descriptive name, embed it directly in the class definition using a string variable before the class block:
+
+```python
+# Correct: all attributes set inside the class body
+bw = args.weight_bits
+class WeightQuant(FixedPointPerTensorWeightQuant):
+    bit_width = bw          # ← fine: captured from enclosing scope at class creation time
+```
+
+- Never call `setattr()` on an injector class either — it hits the same guard.
+
+## 29. Residual Paths Are Not Quantized Without Explicit `QuantIdentity`
+
+**When this happens:** You build a quantized residual network (ResNet-style) and pass `act_quant` to the blocks, expecting all activations to be quantized.
+
+**The Problem:** Two paths in a residual block produce unquantized tensors unless you explicitly add `QuantIdentity`:
+
+1. **Pre-add main path**: After the last `conv → BN` in each block (before the residual add), the BN output is a plain float. The `QuantReLU` only quantizes the output of the *sum*, not the individual branches.
+2. **Downsample skip path**: The `1×1 QuantConv2d → BN` in the downsample branch produces an unquantized tensor. Without a `QuantIdentity` after the BN, the identity branch is float when it reaches the add.
+
+These unquantized tensors are not fake-quantized during QAT, so the simulation does not match the deployed hardware behavior.
+
+**How to Prevent It:**
+
+Add `QuantIdentity` to both paths. In each block, add a `pre_add_quant` module after the last BN:
+
+```python
+self.pre_add_quant = qnn.QuantIdentity(act_quant=act_quant) if act_quant else None
+
+# In forward():
+out = self.bn2(self.conv2(out))
+if self.pre_add_quant is not None:
+    out = self.pre_add_quant(out)
+```
+
+And append a `QuantIdentity` to the downsample `Sequential` when `act_quant` is set:
+
+```python
+ds_modules = [QuantConv2d(...), BatchNorm2d(...)]
+if act_quant is not None:
+    ds_modules.append(qnn.QuantIdentity(act_quant=act_quant))
+downsample = nn.Sequential(*ds_modules)
+```
+
+`QuantIdentity` accepts `act_quant` injectors designed for activations. The `FixedPointPerTensorQuantizer` auto-detects signed/unsigned during calibration, so it correctly handles the negative BN outputs on the pre-add path even though `FixedPointPerTensorActivationQuant` defaults to `signed=False`.
+
+Two additional boundary points also require `QuantIdentity`:
+
+- **Network input** (before the first conv): the raw float image must be quantized before entering the stem. Add `self.input_quant = QuantIdentity(act_quant=act_quant)` and call it at the top of `forward()`.
+- **`AdaptiveAvgPool2d` output** (before the FC layer): avgpool computes a spatial mean of quantized values, which lands off the quantization grid. Add `self.post_pool_quant = QuantIdentity(act_quant=act_quant)` and call it after avgpool. `MaxPool2d` does *not* need this treatment — selecting a max from quantized values stays on the grid.
+
+The FC output (logits) should intentionally remain unquantized.

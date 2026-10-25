@@ -41,7 +41,7 @@ def set_seed(seed: int, deterministic: bool = False) -> None:
         except AttributeError:
             pass  # Older PyTorch — best effort
     else:
-        # benchmark=True can speed up training_harness when input sizes are fixed
+        # benchmark=True can speed up training when input sizes are fixed
         torch.backends.cudnn.benchmark = True
 
 

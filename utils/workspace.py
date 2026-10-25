@@ -13,8 +13,8 @@ Every example follows the same layout::
 The root is controlled by (in priority order):
 
 1. The ``--workdir`` CLI flag.
-2. The ``$QATLAB_WORKDIR`` environment variable, combined with the
-   example's ``name`` (e.g. ``$QATLAB_WORKDIR/cifar10_vgg``).
+2. The ``$QUANT_WORKDIR`` environment variable, combined with the
+   example's ``name`` (e.g. ``$QUANT_WORKDIR/my_experiment``).
 """
 
 from __future__ import annotations
@@ -85,7 +85,7 @@ def add_workspace_args(
     parser
         Your example's ``argparse.ArgumentParser``.
     name
-        Short identifier for this example (e.g. ``"cifar10_vgg"``).
+        Short identifier for this example (e.g. ``"my_experiment"``).
         Used to build a per-example subdirectory when the env var
         fallback is active.
     env_var

@@ -28,7 +28,7 @@ if is_train and (self.config.freeze_bn or
     freeze_bn(self.model)
 ```
 
-**How to enable for fine-tuning:** Pass `freeze_bn=True` to `TrainerConfigV2`, or use `--freeze-bn` in `train_imagenet_float.py`. Always use this when:
+**How to enable for fine-tuning:** Pass `freeze_bn=True` to `TrainerConfigV2`, or use `--freeze-bn` in `train_imagenet_float.py` (archived on the `old_examples` branch). Always use this when:
 - Fine-tuning a converged checkpoint at LR ≤ 1e-5
 - Heavy augmentation is active (mixup, cutmix, reprob all on by default in the float script)
 - You expect val_acc to improve, not drift downward

@@ -365,7 +365,12 @@ def _round(x: torch.Tensor, mode: RoundingMode) -> torch.Tensor:
 # ---------------------------------------------------------------------------
 
 class FixedPointQuantFnTestingThings(Function):
-    """Symbolic shim: emits a single `Quantify::FixedPointQuant` ONNX node."""
+    """Plain fake-quantize with a straight-through backward and NO `symbolic()`.
+
+    Used by `quantize_fixed_point` (e.g. the LSB calibration search). Without a
+    `symbolic()` it cannot be exported -- `FixedPointQuantFn` below is the
+    variant that emits the `Quantify::FixedPointQuant` node.
+    """
     # inputs, lsb, bit_width, signed, rounding_mode, narrow_range
     @staticmethod
     def forward(ctx, x, lsb, bit_width, signed, rounding_mode, narrow_range):

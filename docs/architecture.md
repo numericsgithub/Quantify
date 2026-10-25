@@ -3,7 +3,7 @@
 This document outlines the high-level architecture of the Brevitas QAT Framework.
 
 ## Core Components
-- **Models**: PyTorch implementations of quantized architectures (CIFAR-10, MobileNet, ResNet).
+- **Models**: PyTorch implementations of quantized architectures (MobileNet, ResNet).
 - **Quantizers**: Custom Brevitas quantizers (Fixed-Point, Coefficient, SiLU) with ONNX export support.
 - **Training Harness**: End-to-end QAT pipeline including float warmup, calibration, QAT, checkpointing, and logging.
 - **Utils**: Shared utilities for ONNX export, workspace management, and model inspection.
