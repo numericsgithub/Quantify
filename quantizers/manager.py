@@ -103,10 +103,6 @@ class QuantizerManager:
                 return False
         return True
 
-    def stop_quantization_for_n_inferences(self, n):
-        for quant in self.quantizers.values():
-            quant.inference_counter = -n
-
     def set_annealing_for_n_inferences(self, n, skip_calibrated=False):
         """
         Args:

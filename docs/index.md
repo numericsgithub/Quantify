@@ -14,3 +14,4 @@ Welcome to the documentation for the Brevitas QAT Framework.
 - [Training Harness Pitfalls](llm/pitfalls/training_harness_pitfalls.md)
 - [Conventions](llm/CONVENTIONS.md)
 - [Importance Analysis & Viewer](llm/importance_analysis.md)
+- [Dead-code audit status](llm/dead_code_status.md)
