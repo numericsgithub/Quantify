@@ -98,6 +98,13 @@ class SimpleMNISTNet(nn.Module):
 
 @pytest.fixture
 def dataloader(device, batch_size=64):
+    try:
+        return _build_mnist_loaders(device, batch_size)
+    except (RuntimeError, OSError) as exc:  # torchvision raises RuntimeError on download failure
+        pytest.skip(f"MNIST unavailable (needs network or a cached ./data): {exc}")
+
+
+def _build_mnist_loaders(device, batch_size):
     transform = transforms.Compose([
         transforms.ToTensor(),
         transforms.Normalize((0.1307,), (0.3081,))
@@ -113,6 +120,7 @@ def dataloader(device, batch_size=64):
     return train_loader, test_loader, device
 
 
+@pytest.mark.slow
 def test_training_harness_integration(dataloader, device, tmp_path):
     """Test that the training harness components work correctly with the MNIST model."""
     train_loader, test_loader, device = dataloader

@@ -1,6 +1,12 @@
 """Shared pytest fixtures for the test suite."""
+import numpy as np
 import pytest
 import torch
+
+# These tests use tiny tensors: one intra-op thread per process is faster than
+# the default (all cores) and keeps `pytest -n auto` from oversubscribing the
+# CPU -- the full suite ran ~10x slower without this.
+torch.set_num_threads(1)
 
 
 @pytest.fixture
@@ -41,4 +47,13 @@ def _reset_quantizer_manager_switches():
     mgr.quantization_globally_disabled = False
     mgr.quantization_start_gap = 0
     mgr.force_recalibration = False
+    yield
+
+
+@pytest.fixture(autouse=True)
+def _seed_rngs():
+    """Deterministic RNG state for every test (many tests draw `torch.randn`
+    without seeding, which made failures hard to reproduce)."""
+    torch.manual_seed(0)
+    np.random.seed(0)
     yield

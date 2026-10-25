@@ -236,6 +236,7 @@ class TestFlattenModule:
 # 5. Forward pass / shape tests (regression — must pass before and after fix)
 # ---------------------------------------------------------------------------
 
+@pytest.mark.slow
 class TestQuantResNetForward:
 
     def test_resnet18_train_output_shape(self, rn18_full, x_small):
@@ -293,6 +294,7 @@ class TestQuantResNetForward:
 # 6. Quantizer calibration coverage
 # ---------------------------------------------------------------------------
 
+@pytest.mark.slow
 class TestQuantizerCoverage:
 
     def test_quantizers_registered_at_construction(self, rn18_full):
