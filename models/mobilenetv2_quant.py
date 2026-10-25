@@ -1,7 +1,7 @@
 import brevitas.nn as qnn
 import torch.nn as nn
 
-from models.quant_activations import QuantReLU6
+from quantizers.activations import QuantReLU6
 from quantizers.fixedpoint_per_tensor import FixedPointPerTensorWeightQuant
 from quantizers.layers import QuantConv2d
 

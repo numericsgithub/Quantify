@@ -16,13 +16,13 @@ exports as a canonical ONNX graph (VALID/SAME pads only).
 import brevitas.nn as qnn
 import torch.nn as nn
 
-from models.quant_activations import QuantReLU6
+from quantizers.activations import QuantReLU6
 from quantizers.layers import QuantConv2d
 
 
 def _relu(act_quant):
     # MobileNetV1 (incl. timm's mobilenetv1_100 checkpoints) uses ReLU6, not an
-    # unbounded ReLU; see models/quant_activations.py:QuantReLU6. Without
+    # unbounded ReLU; see quantizers/activations.py:QuantReLU6. Without
     # act_quant it's still a QuantReLU6 (exports as Quantify::Relu6), just
     # with no quantizers.
     if act_quant is not None:

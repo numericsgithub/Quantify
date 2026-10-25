@@ -13,3 +13,11 @@ Only create a new skill file if the pattern is reusable across multiple tasks or
 When you encounter a common error, unexpected behavior, or debugging tip while working on this project, add it to `pitfalls/brevitas_pitfalls.md`. 
 Follow the established format: explain when it happens, what the problem is, and how to prevent or fix it. 
 This keeps a centralized knowledge base for the framework and helps avoid repeating mistakes in future tasks.
+
+# Naming
+- `*Quant` (e.g. `FixedPointPerTensorWeightQuant`): the Brevitas **injector** that plugs a quantizer into a layer.
+- `*Quantizer` (e.g. `FixedPointPerTensorQuantizer`): the `BaseQuantizer` **module** doing the work.
+- `*QuantFn` / `*Fn`: a `torch.autograd.Function` (forward/backward, and `symbolic()` when exported).
+- `Quant<Layer>` (e.g. `QuantConv2d`, `QuantReLU`): a layer/activation wrapper.
+- No version suffixes (`V2`) on new names; rename and leave a deprecated alias instead.
+- Iterate a model's quantizers with `quantizers.iter_quantizers(model)` instead of re-writing the `isinstance(..., BaseQuantizer)` walk.
