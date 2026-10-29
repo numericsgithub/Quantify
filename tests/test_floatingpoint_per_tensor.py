@@ -110,14 +110,14 @@ def test_ste_gradients():
 
     def grad(mode):
         x.grad = None
-        qz = FloatingPointPerTensorQuantizer(wE, wF, clipped_ste=mode)
+        qz = FloatingPointPerTensorQuantizer(exponent_bits=wE, fraction_bits=wF, clipped_ste=mode)
         qz(x)[0].sum().backward()
         return x.grad.tolist()
 
     assert grad("not_clip") == [1, 1, 1, 1, 1]
     assert grad("clip") == [1, 1, 0, 0, 1]  # overflow masked; underflow (0.01) is not
     x.grad = None
-    qz = FloatingPointPerTensorQuantizer(wE, wF, clipped_ste="single_direction_clip")
+    qz = FloatingPointPerTensorQuantizer(exponent_bits=wE, fraction_bits=wF, clipped_ste="single_direction_clip")
     (qz(x)[0] * torch.tensor([1.0, 1, 1, 1, 1])).sum().backward()  # descent pushes values down
     assert x.grad.tolist() == [1, 1, 1, 0, 1]  # +40 may come back in (grad>0); -40 pushed out
 
@@ -140,7 +140,9 @@ def test_activation_injector():
     act = QuantIdentity(act_quant=FloatingPointPerTensorActivationQuant, return_quant_tensor=False)
     x = torch.randn(4, 6)
     y = act(x)
-    assert torch.equal(y, quantize_floating_point(x, 5, 10, "saturate"))
+    qz = act.act_quant.fused_activation_quant_proxy.tensor_quant
+    assert qz.bit_width == 16 and qz.search_done_value
+    assert torch.equal(y, quantize_floating_point(x, qz.exponent_bits, qz.fraction_bits, "saturate"))
 
 
 @pytest.mark.parametrize("overflow", ["saturate", "inf"])
@@ -205,3 +207,94 @@ def test_onnx_function_equals_torch_on_many_values(wE, wF, overflow):
     got = run_onnx(model, {"x": xs})[0]
     want = quantize_floating_point(torch.tensor(xs), wE, wF, overflow).numpy()
     np.testing.assert_array_equal(got, want)
+
+
+# ---------------------------------------------------------------- search
+
+def _search(x, **kw):
+    qz = FloatingPointPerTensorQuantizer(**kw)
+    assert not qz.search_done_value
+    qz.train()
+    qz(x)
+    assert qz.search_done_value
+    return qz
+
+
+def test_search_picks_exponent_width_from_data_range():
+    """Wide dynamic range needs more exponent bits than a narrow one."""
+    narrow = _search(torch.randn(4000) * 0.5, bit_width=12, quantizer_role="weight")
+    wide = _search(torch.randn(4000).double() * 10.0 ** torch.randint(-12, 12, (4000,)),
+                   bit_width=12, quantizer_role="weight")
+    assert narrow.exponent_bits < wide.exponent_bits
+    for qz in (narrow, wide):
+        assert qz.exponent_bits + qz.fraction_bits + 3 == 12
+
+
+def test_search_is_optimal_among_allowed_candidates():
+    torch.manual_seed(0)
+    x = torch.randn(2000) * 3
+    qz = _search(x, bit_width=13, quantizer_role="weight")
+    best = None
+    for we in range(2, 10):
+        wf = 13 - 3 - we
+        q = quantize_floating_point(x.double(), we, wf, "saturate")
+        clip = (quantize_floating_point(x.double(), we, wf, "inf").abs() > flopoco_format_info(we, wf)["max_value"]).double().mean() * 100
+        if clip <= 15.0:
+            sad = (x.double() - q).abs().sum().item()
+            if best is None or sad < best[0]:
+                best = (sad, we)
+    assert qz.exponent_bits == best[1]
+
+
+def test_search_respects_clip_ceiling():
+    # 20% of the values are huge: with a 15% weight ceiling the chosen format must cover them,
+    # even though fewer exponent bits would give lower SAD on the small bulk.
+    x = torch.cat([torch.randn(800) * 0.01, torch.full((200,), 1e4)])
+    qz = _search(x, bit_width=14, quantizer_role="weight")
+    assert qz.format_info["max_value"] >= 1e4
+    # an activation (0% ceiling) must not clip either
+    qa = _search(x, bit_width=14, quantizer_role="activation")
+    assert qa.format_info["max_value"] >= 1e4
+
+
+def test_search_falls_back_to_least_overflowing():
+    # bit_width 9 -> wE in 2..5, max value 2^17 at best: 10% of the values (1e6) overflow
+    # every candidate, but only wE=5 covers the 40% at 1e3 -> least-overflowing wins.
+    x = torch.cat([torch.full((10,), 1e6), torch.full((40,), 1e3), torch.full((50,), 0.5)])
+    qz = _search(x, bit_width=9, quantizer_role="bias")  # 0% ceiling is unreachable
+    assert qz.exponent_bits == 5
+
+
+def test_pinned_exponent_or_fraction_and_fixed_format():
+    qz = FloatingPointPerTensorQuantizer(bit_width=14, exponent_bits=4)
+    assert qz.search_done_value and (qz.exponent_bits, qz.fraction_bits) == (4, 7)
+    qz = FloatingPointPerTensorQuantizer(bit_width=14, fraction_bits=6)
+    assert qz.search_done_value and (qz.exponent_bits, qz.fraction_bits) == (5, 6)
+    qz = FloatingPointPerTensorQuantizer(bit_width=99, exponent_bits=3, fraction_bits=4)
+    assert qz.search_done_value and qz.bit_width == 10  # both pinned: bit_width derived
+
+
+def test_search_result_survives_state_dict_and_export(tmp_path):
+    torch.manual_seed(1)
+    layer = QuantLinear(16, 4, bias=False, weight_quant=FloatingPointPerTensorWeightQuant)
+    layer.train()
+    layer(torch.randn(2, 16))
+    qz = layer.weight_quant.tensor_quant
+    we, wf = qz.exponent_bits, qz.fraction_bits
+    assert we + wf + 3 == 16
+    layer.eval()
+    x = torch.randn(2, 16)
+    m = export_onnx_with_io(layer, x, str(tmp_path / "s.onnx"), input_names=["x"], output_names=["y"],
+                            canonical_checks="off")
+    node = next(n for n in m.graph.node if n.op_type == "FloatingPointQuant")
+    attrs = {a.name: a.i for a in node.attribute if a.name in ("exponent_bits", "fraction_bits")}
+    assert attrs == {"exponent_bits": we, "fraction_bits": wf}
+    sd = {k: v for k, v in layer.state_dict().items() if "search_result_exponent_bits" in k}
+    assert sd and list(sd.values())[0].item() == we
+
+
+def test_eval_before_calibration_raises_like_fixed_point():
+    qz = FloatingPointPerTensorQuantizer(bit_width=12)
+    qz.eval()
+    with pytest.raises(RuntimeError, match="not been calibrated"):
+        qz(torch.randn(4))
