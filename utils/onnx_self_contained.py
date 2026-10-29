@@ -3,7 +3,7 @@ Make exported Quantify ONNX models self-contained and executable with
 vanilla ONNX Runtime -- no custom op registration required.
 
 The custom `Quantify::*` nodes this project emits (`FixedPointQuant`,
-`CoefficientQuant`, `Dense`, and the activations `Relu`, `Relu6`,
+`CoefficientQuant`, `FloatingPointQuant`, `Dense`, and the activations `Relu`, `Relu6`,
 `Sigmoid`, `Tanh`, `SiLU`, `GELU`, `LeakyRelu`, `Softmax`, `HardSwish`,
 `HardSigmoid`) exist purely to
 preserve exact quantization semantics in the exported graph for inspection
@@ -283,6 +283,99 @@ def _build_coefficient_quant_function() -> onnx.FunctionProto:
 
 
 # ---------------------------------------------------------------------------
+# Quantify::FloatingPointQuant
+# ---------------------------------------------------------------------------
+
+def _build_floating_point_quant_function() -> onnx.FunctionProto:
+    """FloPoCo FPFloat(wE, wF) rounding (see quantizers/floatingpoint_per_tensor.py):
+    round |x| to wF+1 significand bits (half-to-even, unbounded exponent), then
+    flush |y| < 2^-bias to a signed zero and send |y| >= 2^(emax+1) to
+    +-inf (`overflow_inf`=1) or +-max_value (0).
+
+    ONNX has no frexp, so the exponent is floor(log2|x|) from `Log`, then
+    corrected by +-1 against exact powers of two (Log is not exact near them).
+    All powers of two are built with `Pow` in x's dtype from INT attributes
+    (a float attribute is float32 and cannot hold 2^128). Zero / +-inf inputs
+    are swapped for 1 during the rounding and patched afterwards; NaN flows
+    through. An input of exactly -0.0 comes out as +0.0 (flushed negatives
+    keep their sign).
+    """
+    nodes = [
+        _ref_attr("bias_i", "exponent_bias", "int"),
+        _ref_attr("wf_i", "fraction_bits", "int"),
+        _ref_attr("emax_i", "emax", "int"),
+        _ref_attr("ovf_inf_i", "overflow_inf", "int"),
+        *_fconst("zero", 0.0),
+        *_fconst("one", 1.0),
+        *_fconst("two", 2.0),
+        *_fconst("ln2", 0.6931471805599453),
+        *_fconst("inf", float("inf")),
+        *_fconst("e_floor", -900.0),
+        helper.make_node("Constant", [], ["zero_i"], value_int=0),
+        helper.make_node("CastLike", ["bias_i", "x"], ["bias"]),
+        helper.make_node("CastLike", ["wf_i", "x"], ["wf"]),
+        helper.make_node("CastLike", ["emax_i", "x"], ["emax"]),
+
+        helper.make_node("Abs", ["x"], ["a"]),
+        helper.make_node("IsInf", ["a"], ["is_inf"]),
+        helper.make_node("Equal", ["a", "zero"], ["is_zero"]),
+        helper.make_node("Or", ["is_inf", "is_zero"], ["special"]),
+        helper.make_node("Where", ["special", "one", "a"], ["a_safe"]),
+
+        # e = floor(log2 a), corrected against the exact power of two
+        helper.make_node("Log", ["a_safe"], ["ln_a"]),
+        helper.make_node("Div", ["ln_a", "ln2"], ["log2_a"]),
+        helper.make_node("Floor", ["log2_a"], ["e0"]),
+        helper.make_node("Pow", ["two", "e0"], ["p0"]),
+        helper.make_node("Greater", ["p0", "a_safe"], ["too_big"]),
+        helper.make_node("Sub", ["e0", "one"], ["e0_m1"]),
+        helper.make_node("Where", ["too_big", "e0_m1", "e0"], ["e1"]),
+        helper.make_node("Pow", ["two", "e1"], ["p1"]),
+        helper.make_node("Mul", ["p1", "two"], ["p1x2"]),
+        helper.make_node("GreaterOrEqual", ["a_safe", "p1x2"], ["too_small"]),
+        helper.make_node("Add", ["e1", "one"], ["e1_p1"]),
+        helper.make_node("Where", ["too_small", "e1_p1", "e1"], ["e2"]),
+        # Anything this small flushes to zero anyway; the clamp only keeps
+        # 2^(e-wF) from underflowing to 0 in the division below.
+        helper.make_node("Max", ["e2", "e_floor"], ["e"]),
+
+        helper.make_node("Sub", ["e", "wf"], ["ulp_exp"]),
+        helper.make_node("Pow", ["two", "ulp_exp"], ["ulp"]),
+        helper.make_node("Div", ["a_safe", "ulp"], ["ratio"]),
+        helper.make_node("Round", ["ratio"], ["ratio_r"]),   # half-to-even
+        helper.make_node("Mul", ["ratio_r", "ulp"], ["r"]),
+
+        # range limits
+        helper.make_node("Neg", ["bias"], ["neg_bias"]),
+        helper.make_node("Pow", ["two", "neg_bias"], ["min_value"]),
+        helper.make_node("Add", ["emax", "one"], ["emax_p1"]),
+        helper.make_node("Pow", ["two", "emax_p1"], ["over_threshold"]),
+        helper.make_node("Neg", ["wf"], ["neg_wf"]),
+        helper.make_node("Pow", ["two", "neg_wf"], ["frac_ulp"]),
+        helper.make_node("Sub", ["two", "frac_ulp"], ["sig_max"]),
+        helper.make_node("Pow", ["two", "emax"], ["two_emax"]),
+        helper.make_node("Mul", ["sig_max", "two_emax"], ["max_value"]),
+        helper.make_node("Equal", ["ovf_inf_i", "zero_i"], ["saturate"]),
+        helper.make_node("Where", ["saturate", "max_value", "inf"], ["over_value"]),
+
+        helper.make_node("GreaterOrEqual", ["r", "over_threshold"], ["over_r"]),
+        helper.make_node("Or", ["over_r", "is_inf"], ["over"]),
+        helper.make_node("Less", ["r", "min_value"], ["under_r"]),
+        helper.make_node("Or", ["under_r", "is_zero"], ["under"]),
+        helper.make_node("Where", ["under", "zero", "r"], ["r_flushed"]),
+        helper.make_node("Where", ["over", "over_value", "r_flushed"], ["mag"]),
+        helper.make_node("Neg", ["mag"], ["neg_mag"]),
+        helper.make_node("Less", ["x", "zero"], ["is_neg"]),
+        helper.make_node("Where", ["is_neg", "neg_mag", "mag"], ["y"]),
+    ]
+    return helper.make_function(
+        domain=DOMAIN, fname="FloatingPointQuant", inputs=["x"], outputs=["y"],
+        nodes=nodes, opset_imports=_opset(),
+        attributes=["exponent_bias", "fraction_bits", "emax", "overflow_inf"],
+    )
+
+
+# ---------------------------------------------------------------------------
 # Quantify::Relu / Sigmoid / Tanh / HardSwish / LeakyRelu / Softmax /
 # HardSigmoid -- each a single standard op; the custom domain only exists so
 # a Quantify activation stays distinguishable from a plain one in the graph.
@@ -356,6 +449,7 @@ _BUILDERS = {
     "SiLU": _build_silu_function,
     "GELU": _build_gelu_function,
     "CoefficientQuant": _build_coefficient_quant_function,
+    "FloatingPointQuant": _build_floating_point_quant_function,
     "Relu": lambda: _build_unary_function("Relu"),
     "Sigmoid": lambda: _build_unary_function("Sigmoid"),
     "Tanh": lambda: _build_unary_function("Tanh"),

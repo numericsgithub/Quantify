@@ -255,7 +255,8 @@ def activation_module_findings(rejected, warn_only, record, model_output):
 # ---------------------------------------------------------------------------
 
 _COMPUTE_OPS = {("", "Conv"), ("", "ConvTranspose"), (QUANTIFY, "Dense"), ("", "Gemm"), ("", "MatMul")}
-_QUANT_OPS = {(QUANTIFY, "FixedPointQuant"), (QUANTIFY, "CoefficientQuant")}
+_QUANT_OPS = {(QUANTIFY, "FixedPointQuant"), (QUANTIFY, "CoefficientQuant"),
+              (QUANTIFY, "FloatingPointQuant")}
 _PLAIN_ACT_OPS = {"Relu", "Sigmoid", "Tanh", "LeakyRelu", "Softmax", "LogSoftmax", "HardSwish",
                   "HardSigmoid", "Clip", "Elu", "Selu", "Celu", "Gelu", "Mish", "Softplus",
                   "Softsign", "PRelu", "ThresholdedRelu"}
@@ -414,13 +415,13 @@ def _check_graph_inputs(G: _Graph, skip: frozenset = frozenset()) -> List[str]:
         while frontier:
             name, chain = frontier.pop()
             for n in G.consumers.get(name, []):
-                if _key(n) == (QUANTIFY, "FixedPointQuant"):
+                if _key(n) in {(QUANTIFY, "FixedPointQuant"), (QUANTIFY, "FloatingPointQuant")}:
                     frontier.append((n.output[0], chain + [_label(n)]))
                 elif _key(n) not in _COMPUTE_OPS:
                     tail = _describe_tail(G, n)
                     v.append(f"[input] {' -> '.join(chain + tail)}: the graph input must feed "
                              f"straight into the first compute layer (Conv / Dense / MatMul), only a "
-                             f"FixedPointQuant may sit in between. Feed the input already in the shape "
+                             f"FixedPointQuant/FloatingPointQuant may sit in between. Feed the input already in the shape "
                              f"the first layer expects instead of reshaping it inside the model.")
     return v
 

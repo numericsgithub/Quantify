@@ -3,6 +3,13 @@ from quantizers.fixedpoint_per_tensor import FixedPointPerTensorWeightQuant
 from quantizers.fixedpoint_per_tensor import FixedPointPerTensorActivationQuant
 from quantizers.fixedpoint_per_tensor import FixedPointPerTensorBiasQuant
 
+from quantizers.floatingpoint_per_tensor import (
+    FloatingPointPerTensorWeightQuant,
+    FloatingPointPerTensorActivationQuant,
+    FloatingPointPerTensorBiasQuant,
+    FloatingPointPerTensorQuantizer,
+    quantize_floating_point,
+)
 from quantizers.coefficient_per_tensor_weights import CoefficientPerTensorWeightQuantizer
 from quantizers.fixedpoint_per_tensor import FixedPointPerTensorQuantizer
 from quantizers.fixedpoint_per_tensor import RoundingMode, quantize_fixed_point, find_optimal_lsb
@@ -25,6 +32,11 @@ __all__ = [
     "FixedPointPerTensorWeightQuant",
     "FixedPointPerTensorActivationQuant",
     "FixedPointPerTensorBiasQuant",
+    "FloatingPointPerTensorWeightQuant",
+    "FloatingPointPerTensorActivationQuant",
+    "FloatingPointPerTensorBiasQuant",
+    "FloatingPointPerTensorQuantizer",
+    "quantize_floating_point",
     "CoefficientPerTensorWeightQuantizer",
     "FixedPointPerTensorQuantizer",
     "RoundingMode",
